@@ -1,18 +1,19 @@
-from dagster import job, op, execute_job
-from app.scripts.flows import collect_data, transfrom_data
+from prefect import flow, task
+from app.scripts.flows.collect_data import collect_data
+from app.scripts.flows.transform_data import transform_data
 
-@op
-def collect_data_op():
+@task
+def collect_data_task() -> None:
     collect_data()
 
-@op
-def transform_data_op():
-    transfrom_data()
+@task
+def transform_data_task() -> None:
+    transform_data()
 
-@job
-def chembl_job():
-    collect_data_op()
-    transform_data_op()
+@flow
+def chembl_pipeline() -> None:
+    collect_data_task()
+    transform_data_task()
 
 if __name__ == "__main__":
-    execute_job(chembl_job)
+    chembl_pipeline()

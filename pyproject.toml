@@ -5,13 +5,15 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "dagster>=1.11.12",
     "duckdb>=1.4.0",
     "httpx>=0.28.1",
     "numpy>=2.3.3",
     "pandas>=2.3.2",
     "polars>=1.33.1",
+    "prefect>=3.4.20",
     "pyarrow>=21.0.0",
     "ray>=2.49.2",
     "tdqm>=0.0.1",
 ]
+[tool.setuptools]
+packages = ["app"]
