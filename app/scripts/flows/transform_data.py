@@ -3,15 +3,18 @@ from duckdb import DuckDBPyConnection
 import polars as pl
 import os
 
+
 def transform_data() -> None:
     conn: DuckDBPyConnection = duckdb.connect()
     conn.execute("INSTALL sqlite;")
     conn.execute("LOAD sqlite;")
     print("Loading data")
     conn.execute("SET arrow_large_buffer_size=true;")
-    conn.execute("ATTACH 'data/chembl_36/chembl_36_sqlite/chembl_36.db' AS chembl36 (TYPE sqlite);")
+    conn.execute(
+        "ATTACH 'data/chembl_36/chembl_36_sqlite/chembl_36.db' AS chembl36 (TYPE sqlite);"
+    )
     tables: pl.DataFrame = conn.execute("SHOW TABLES FROM chembl36;").pl()
-    output_dir = os.path.join( "data", "chembl_transform")
+    output_dir = os.path.join("data", "chembl_transform")
     os.makedirs(output_dir, exist_ok=True)
     for table in tables.select(pl.col("name")).to_series().to_list():
         print(f"Processing table: {table}")
