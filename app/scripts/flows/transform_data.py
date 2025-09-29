@@ -2,6 +2,8 @@ import duckdb
 from duckdb import DuckDBPyConnection
 import polars as pl
 import os
+import shutil
+import sys
 
 
 def transform_data() -> None:
@@ -24,3 +26,13 @@ def transform_data() -> None:
             print(f"Saved {table}.parquet")
         else:
             print(f"Table {table} is empty, skipping.")
+    conn.close()
+    chembl_dir = os.path.join("data", "chembl_36")
+    if os.path.exists(chembl_dir):
+        try:
+            shutil.rmtree(chembl_dir)
+            print(f"Removed directory: {chembl_dir}")
+        except Exception as e:
+            print(f"Failed to remove {chembl_dir}: {e}", file=sys.stderr)
+    else:
+        print(f"{chembl_dir} does not exist, nothing to remove.")

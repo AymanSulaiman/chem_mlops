@@ -6,8 +6,8 @@ from tqdm import tqdm  # Add this import
 
 def collect_data():
     os.makedirs("data", exist_ok=True)
-    url = "https://ftp.ebi.ac.uk/pub/databases/chembl/ChEMBLdb/latest/chembl_36_sqlite.tar.gz"
-    archive_path = os.path.join("data", "chembl_36_sqlite.tar.gz")
+    url: str = "https://ftp.ebi.ac.uk/pub/databases/chembl/ChEMBLdb/latest/chembl_36_sqlite.tar.gz"
+    archive_path: str = os.path.join("data", "chembl_36_sqlite.tar.gz")
 
     print("Downloading ChEMBL SQLite archive...")
     with requests.get(url, stream=True) as r:
