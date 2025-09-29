@@ -13,6 +13,7 @@ dependencies = [
     "polars>=1.33.1",
     "prefect>=3.4.20",
     "pyarrow>=21.0.0",
+    "pytest>=8.4.2",
     "ray>=2.49.2",
     "signalpilot-ai>=0.2.2",
     "tdqm>=0.0.1",

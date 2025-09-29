@@ -12,7 +12,7 @@ def collect_data():
     print("Downloading ChEMBL SQLite archive...")
     with requests.get(url, stream=True) as r:
         r.raise_for_status()
-        total_size = int(r.headers.get("content-length", 0))
+        total_size = int(r.headers.get("content-length", 0) or 0)
         with (
             open(archive_path, "wb") as f,
             tqdm(
