@@ -3,7 +3,6 @@ from duckdb import DuckDBPyConnection
 import polars as pl
 import os
 import shutil
-import sys
 
 
 def transform_data() -> None:

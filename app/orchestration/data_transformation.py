@@ -1,6 +1,6 @@
 from prefect import flow, task
-from app.scripts.flows.collect_data import collect_data
-from app.scripts.flows.transform_data import transform_data
+from app.scripts.flows.initial_data_transformation.collect_data import collect_data
+from app.scripts.flows.initial_data_transformation.transform_data import transform_data
 
 
 @task
