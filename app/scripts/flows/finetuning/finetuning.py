@@ -61,6 +61,16 @@ def finetune_lora(
     iters: int = ITERS,
     learning_rate: float = LEARNING_RATE,
 ):
+    #TODO: Find a way to save the logs to analyse the loss, tokens/sec etc. example of logs below
+    """
+    Iter 393: Train loss 0.568, Learning Rate 1.000e-05, It/sec 0.061, Tokens/sec 185.796, Trained Tokens 682568, Peak mem 25.933 GB
+    Iter 394: Train loss 0.603, Learning Rate 1.000e-05, It/sec 0.175, Tokens/sec 218.927, Trained Tokens 683816, Peak mem 25.933 GB
+    Iter 395: Train loss 0.415, Learning Rate 1.000e-05, It/sec 0.195, Tokens/sec 249.194, Trained Tokens 685091, Peak mem 25.933 GB
+    Iter 396: Train loss 0.573, Learning Rate 1.000e-05, It/sec 0.078, Tokens/sec 193.704, Trained Tokens 687569, Peak mem 25.933 GB
+    Iter 397: Train loss 0.593, Learning Rate 1.000e-05, It/sec 0.111, Tokens/sec 196.816, Trained Tokens 689347, Peak mem 25.933 GB
+    Iter 398: Train loss 0.616, Learning Rate 1.000e-05, It/sec 0.162, Tokens/sec 215.451, Trained Tokens 690679, Peak mem 25.933 GB
+    Iter 399: Train loss 0.594, Learning Rate 1.000e-05, It/sec 0.125, Tokens/sec 227.212, Trained Tokens 692493, Peak mem 25.933 GB
+    """
     """
     Launch LoRA fine-tuning using updated mlx_lm CLI.
     """
