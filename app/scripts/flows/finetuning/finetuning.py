@@ -11,6 +11,7 @@ NUM_LAYERS = 8
 ITERS = 1500
 LEARNING_RATE = 1e-5
 
+
 def _run(cmd: list[str], cwd: Path | None = None) -> None:
     display_cwd = str(cwd) if cwd else "(current)"
     print(f"\n>>> Running: {' '.join(cmd)}")
@@ -42,17 +43,25 @@ def convert_to_mlx(hf_model_id: str, mlx_model_dir: Path) -> Path:
     """Convert HF model to MLX format."""
     mlx_model_dir.parent.mkdir(parents=True, exist_ok=True)
 
-    _run([
-        "python",
-        "-m", "mlx_lm",
-        "convert",
-        "--hf-path", hf_model_id,
-        "--mlx-path", str(mlx_model_dir),
-        "--q-bits", "4",
-        "--q-group-size", "64",
-    ])
+    _run(
+        [
+            "python",
+            "-m",
+            "mlx_lm",
+            "convert",
+            "--hf-path",
+            hf_model_id,
+            "--mlx-path",
+            str(mlx_model_dir),
+            "--q-bits",
+            "4",
+            "--q-group-size",
+            "64",
+        ]
+    )
 
     return mlx_model_dir
+
 
 def finetune_lora(
     mlx_model_dir: Path,
@@ -68,23 +77,36 @@ def finetune_lora(
     """
     adapter_dir.mkdir(parents=True, exist_ok=True)
 
-    _run([
-        "python",
-        "-m", "mlx_lm",
-        "lora",
-        "--model", str(mlx_model_dir),
-        "--train",
-        "--data", str(data_dir),
-        "--fine-tune-type", "lora",
-        "--batch-size", str(batch_size),
-        "--num-layers", str(num_layers),
-        "--iters", str(iters),
-        "--learning-rate", str(learning_rate),
-        "--adapter-path", str(adapter_dir),
-        "--steps-per-report", "25",
-    ])
+    _run(
+        [
+            "python",
+            "-m",
+            "mlx_lm",
+            "lora",
+            "--model",
+            str(mlx_model_dir),
+            "--train",
+            "--data",
+            str(data_dir),
+            "--fine-tune-type",
+            "lora",
+            "--batch-size",
+            str(batch_size),
+            "--num-layers",
+            str(num_layers),
+            "--iters",
+            str(iters),
+            "--learning-rate",
+            str(learning_rate),
+            "--adapter-path",
+            str(adapter_dir),
+            "--steps-per-report",
+            "25",
+        ]
+    )
 
     return adapter_dir
+
 
 def gemma3_chembl_toon_finetune_flow(
     hf_model_id: str = HF_MODEL_ID,
@@ -105,24 +127,25 @@ def gemma3_chembl_toon_finetune_flow(
     # Generate timestamped run directory
     if run_name is None:
         run_name = datetime.now().strftime("%Y%m%d_%H%M%S")
-    
+
     run_dir = Path("artifacts") / run_name
     mlx_model_dir = run_dir / "mlx" / "gemma-3-4b-pt-mlx"
     adapter_dir = run_dir / "adapters" / "gemma3-4b-pt-chembl-toon"
-    
-    print(f"\n{'='*60}")
+
+    print(f"\n{'=' * 60}")
     print(f"Starting finetuning run: {run_name}")
     print(f"Run directory: {run_dir}")
-    print(f"{'='*60}\n")
-    
+    print(f"{'=' * 60}\n")
+
     mlx_model_dir = convert_to_mlx(hf_model_id, mlx_model_dir)
     adapter_dir = finetune_lora(mlx_model_dir, adapter_dir, Path(data_dir))
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"Finetuning complete!")
     print(f"MLX model: {mlx_model_dir}")
     print(f"LoRA adapter: {adapter_dir}")
-    print(f"{'='*60}\n")
+    print(f"{'=' * 60}\n")
+
 
 if __name__ == "__main__":
     gemma3_chembl_toon_finetune_flow()
