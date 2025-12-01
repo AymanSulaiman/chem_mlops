@@ -100,8 +100,7 @@ def finetune_lora(
             str(learning_rate),
             "--adapter-path",
             str(adapter_dir),
-            "--steps-per-report",
-            "25",
+            "--steps-per-report", "1",
         ]
     )
 
