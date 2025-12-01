@@ -21,22 +21,11 @@ def _run(cmd: list[str], cwd: Path | None = None) -> None:
         cmd,
         check=False,
         cwd=cwd,
-        capture_output=True,
-        text=True,
     )
 
-    if result.stdout:
-        print("---- STDOUT ----")
-        print(result.stdout)
-
-    if result.stderr:
-        print("---- STDERR ----")
-        print(result.stderr)
-
     if result.returncode != 0:
-        raise subprocess.CalledProcessError(
-            result.returncode, cmd, result.stdout, result.stderr
-        )
+        raise subprocess.CalledProcessError(result.returncode, cmd)
+
 
 
 def convert_to_mlx(hf_model_id: str, mlx_model_dir: Path) -> Path:
