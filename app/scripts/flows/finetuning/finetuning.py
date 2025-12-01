@@ -71,6 +71,9 @@ def finetune_lora(
     Iter 398: Train loss 0.616, Learning Rate 1.000e-05, It/sec 0.162, Tokens/sec 215.451, Trained Tokens 690679, Peak mem 25.933 GB
     Iter 399: Train loss 0.594, Learning Rate 1.000e-05, It/sec 0.125, Tokens/sec 227.212, Trained Tokens 692493, Peak mem 25.933 GB
     """
+
+    #TODO [WARNING] Some sequences are longer than 2048 tokens. The longest sentence 5161 will be truncated to 2048. Consider pre-splitting your data to save memory. <- figure this out
+
     """
     Launch LoRA fine-tuning using updated mlx_lm CLI.
     """
