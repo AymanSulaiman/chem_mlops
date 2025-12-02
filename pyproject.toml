@@ -8,6 +8,7 @@ dependencies = [
     "duckdb>=1.4.0",
     "httpx>=0.28.1",
     "jupyterlab>=4.4.9",
+    "llama-cpp-python>=0.3.16",
     "mlx-lm>=0.28.3",
     "numpy>=2.3.3",
     "pandas>=2.3.2",
