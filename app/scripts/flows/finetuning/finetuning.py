@@ -108,6 +108,10 @@ def finetune_lora(
 
     return adapter_dir
 
+def save_to_ollama() -> None:
+    # TODO using llama.cpp save the model so it can be used in ollama
+    # There is a package in this project.
+    pass 
 
 def gemma3_chembl_toon_finetune_flow(
     hf_model_id: str = HF_MODEL_ID,
