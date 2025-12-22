@@ -3,12 +3,12 @@ from pathlib import Path
 import subprocess
 from datetime import datetime
 
-HF_MODEL_ID = "google/gemma-3-4b-pt"
+HF_MODEL_ID = "google/gemma-3-1b-pt"
 DATA_DIR = Path("data/llm_finetune")
 
 BATCH_SIZE = 2
 NUM_LAYERS = 8
-ITERS = 1500
+ITERS = 15
 LEARNING_RATE = 1e-5
 
 
@@ -108,11 +108,189 @@ def finetune_lora(
 
     return adapter_dir
 
-def save_to_ollama() -> None:
-    # TODO using llama.cpp save the model so it can be used in ollama
-    # There is a package in this project.
-    pass 
-
+def save_to_ollama(
+    mlx_model_dir: Path,
+    adapter_dir: Path,
+    model_name: str,
+    llama_cpp_dir: Path = Path("llama.cpp"),
+) -> None:
+    """Convert fused MLX model to Ollama-compatible GGUF format."""
+    import shutil
+    import sys
+    from mlx_lm import load
+    from safetensors.torch import save_file
+    import torch
+    import json
+    
+    fused_dir = adapter_dir.parent / "fused_model"
+    hf_dir = adapter_dir.parent / "fused_model_hf"
+    
+    # Clean up any existing directories from previous runs
+    for dir_path in [fused_dir, hf_dir]:
+        if dir_path.exists():
+            shutil.rmtree(dir_path)
+    
+    fused_dir.mkdir(parents=True, exist_ok=True)
+    hf_dir.mkdir(parents=True, exist_ok=True)
+    
+    # 1. Fuse adapter with base model in MLX format
+    print("\n==> Fusing LoRA adapter with base model...")
+    sys.stdout.flush()
+    _run([
+        "python", "-m", "mlx_lm", "fuse",
+        "--model", str(mlx_model_dir),
+        "--adapter-path", str(adapter_dir),
+        "--save-path", str(fused_dir),
+        "--de-quantize",
+    ])
+    
+    # 2. Load fused MLX model and export to HuggingFace format
+    print("\n==> Converting MLX weights to HuggingFace format...")
+    sys.stdout.flush()
+    model, tokenizer = load(str(fused_dir))
+    
+    # Flatten nested parameters dict and convert to PyTorch
+    def flatten_params(params, prefix=""):
+        """Recursively flatten nested parameter dictionaries and lists."""
+        flat = {}
+        
+        if isinstance(params, dict):
+            for key, value in params.items():
+                full_key = f"{prefix}.{key}" if prefix else key
+                flat.update(flatten_params(value, full_key))
+        elif isinstance(params, list):
+            for idx, value in enumerate(params):
+                full_key = f"{prefix}.{idx}" if prefix else str(idx)
+                flat.update(flatten_params(value, full_key))
+        elif hasattr(params, 'tolist'):
+            # It's an MLX array - convert to torch tensor
+            numpy_array = params.tolist()
+            flat[prefix] = torch.tensor(numpy_array, dtype=torch.bfloat16)
+        
+        return flat
+    
+    state_dict = flatten_params(model.parameters())
+    
+    # Save as safetensors (HF format)
+    print(f"Saving {len(state_dict)} parameters to safetensors...")
+    sys.stdout.flush()
+    save_file(state_dict, hf_dir / "model.safetensors")
+    
+    # Copy config and tokenizer files
+    print("\n==> Copying config files...")
+    sys.stdout.flush()
+    for file in ["config.json", "tokenizer.json", "tokenizer_config.json", "special_tokens_map.json"]:
+        src = fused_dir / file
+        if src.exists():
+            shutil.copy(src, hf_dir / file)
+            print(f"  ✓ Copied {file}")
+            sys.stdout.flush()
+        else:
+            print(f"  ✗ Missing {file}")
+            sys.stdout.flush()
+    
+    # Fix vocab_size in config.json to match tokenizer
+    print("\n==> Fixing vocab_size in config.json...")
+    sys.stdout.flush()
+    
+    config_path = hf_dir / "config.json"
+    tokenizer_path = hf_dir / "tokenizer.json"
+    
+    if not config_path.exists():
+        raise FileNotFoundError(f"config.json not found at {config_path}")
+    if not tokenizer_path.exists():
+        raise FileNotFoundError(f"tokenizer.json not found at {tokenizer_path}")
+    
+    with open(config_path, 'r') as f:
+        config = json.load(f)
+    
+    with open(tokenizer_path, 'r') as f:
+        tokenizer_data = json.load(f)
+    
+    # Get max token ID from vocab
+    vocab = tokenizer_data.get('model', {}).get('vocab', {})
+    if vocab:
+        max_token_id = max(vocab.values())
+        required_vocab_size = max_token_id + 1
+        
+        print(f"  Current vocab_size: {config.get('vocab_size')}")
+        print(f"  Max token ID: {max_token_id}")
+        print(f"  Required vocab_size: {required_vocab_size}")
+        sys.stdout.flush()
+        
+        config['vocab_size'] = required_vocab_size
+        
+        with open(config_path, 'w') as f:
+            json.dump(config, f, indent=2)
+        
+        print(f"  ✓ Updated vocab_size to {required_vocab_size}")
+        sys.stdout.flush()
+    else:
+        raise ValueError("Could not find vocab in tokenizer.json!")
+    
+    # 3. Clone llama.cpp if needed
+    if not llama_cpp_dir.exists():
+        print("\n==> Cloning llama.cpp...")
+        sys.stdout.flush()
+        _run(["git", "clone", "https://github.com/ggerganov/llama.cpp", str(llama_cpp_dir)])
+    
+    # 4. Convert HF format to GGUF
+    gguf_path = adapter_dir.parent / "model-f16.gguf"
+    print("\n==> Converting to GGUF format...")
+    sys.stdout.flush()
+    _run([
+        "python", str(llama_cpp_dir / "convert_hf_to_gguf.py"),
+        str(hf_dir),
+        "--outfile", str(gguf_path),
+        "--outtype", "f16"
+    ])
+    
+    # 5. Quantize to Q4_K_M
+    quantized_path = adapter_dir.parent / "model-q4_k_m.gguf"
+    quantize_bin = llama_cpp_dir / "llama-quantize"
+    
+    if not quantize_bin.exists():
+        print("\n==> Building llama-quantize...")
+        sys.stdout.flush()
+        _run(["make", "llama-quantize"], cwd=llama_cpp_dir)
+    
+    print("\n==> Quantizing model to Q4_K_M...")
+    sys.stdout.flush()
+    _run([
+        str(quantize_bin),
+        str(gguf_path),
+        str(quantized_path),
+        "Q4_K_M"
+    ])
+    
+    # 6. Create Modelfile
+    modelfile_path = adapter_dir.parent / "Modelfile"
+    modelfile_path.write_text(f"""FROM {quantized_path}
+TEMPLATE \"\"\"{{{{ if .System }}}}<|im_start|>system
+{{{{ .System }}}}<|im_end|>
+{{{{ end }}}}{{{{ if .Prompt }}}}<|im_start|>user
+{{{{ .Prompt }}}}<|im_end|>
+{{{{ end }}}}<|im_start|>assistant
+\"\"\"
+PARAMETER stop "<|im_start|>"
+PARAMETER stop "<|im_end|>"
+""")
+    
+    # 7. Import to Ollama
+    print(f"\n==> Creating Ollama model '{model_name}'...")
+    sys.stdout.flush()
+    _run([
+        "ollama", "create", model_name,
+        "-f", str(modelfile_path)
+    ])
+    
+    print(f"\n{'=' * 60}")
+    print(f"✓ Model '{model_name}' successfully created in Ollama!")
+    print(f"  F16 GGUF: {gguf_path}")
+    print(f"  Q4_K_M GGUF: {quantized_path}")
+    print(f"{'=' * 60}\n")
+    sys.stdout.flush()
+    
 def gemma3_chembl_toon_finetune_flow(
     hf_model_id: str = HF_MODEL_ID,
     data_dir: str = str(DATA_DIR),
@@ -150,7 +328,12 @@ def gemma3_chembl_toon_finetune_flow(
     print(f"MLX model: {mlx_model_dir}")
     print(f"LoRA adapter: {adapter_dir}")
     print(f"{'=' * 60}\n")
-
+    
+    save_to_ollama(
+        mlx_model_dir=mlx_model_dir,
+        adapter_dir=adapter_dir,
+        model_name=f"gemma3-chembl-{run_name}"
+    )
 
 if __name__ == "__main__":
     gemma3_chembl_toon_finetune_flow()
