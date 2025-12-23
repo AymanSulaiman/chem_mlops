@@ -279,7 +279,7 @@ def write_jsonl_splits(
             f_valid.write(json.dumps({"text": text}) + "\n")
 
 
-def main() -> None:
+def create_finetuning_dataset() -> None:
     compound_structures, activities, molecule_dict = load_tables()  # Remove target_dict
 
     activities_clean = filter_activities(activities)
@@ -294,4 +294,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    create_finetuning_dataset()
