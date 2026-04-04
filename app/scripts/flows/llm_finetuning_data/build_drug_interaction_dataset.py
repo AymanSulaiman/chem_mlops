@@ -1,14 +1,18 @@
 """
 Build a QA-formatted JSONL dataset for finetuning a drug-interaction chatbot.
 
-Pulls six ChEMBL tables beyond the basic activities/structures used elsewhere
-and emits four categories of training pair:
+Pulls ChEMBL tables and emits ten categories of training pairs:
 
-  1. Mechanism of action   — "What does {drug} target?"
-  2. Therapeutic indication — "What is {drug} indicated for?"
-  3. Metabolic pathways    — "How is {drug} metabolised?" / CYP-specific
-  4. Drug-drug interactions — pairs inferred from shared CYP substrates
-  5. Bioactivity potency   — pChEMBL-based potency statements
+  1. Mechanism of action      — "What does {drug} target?"
+  2. Therapeutic indication   — "What is {drug} indicated for?"
+  3. Metabolic pathways       — "How is {drug} metabolised?" / CYP-specific
+  4. Drug-drug interactions   — pairs inferred from shared CYP substrates
+  5. Bioactivity potency      — pChEMBL-based potency statements
+  6. Drug warnings            — black box warnings and safety alerts
+  7. Drug synonyms            — trade name / INN / USAN lookups
+  8. Physicochemical props    — Lipinski, LogP, PSA, QED
+  9. ATC classification       — WHO therapeutic class hierarchy
+ 10. Approved products        — formulations, routes, dosage forms
 
 Output: data/llm_finetune/train.jsonl  (90 %)
         data/llm_finetune/valid.jsonl  (10 %)
@@ -21,15 +25,38 @@ from typing import Iterator
 
 import polars as pl
 
-from app.scripts.load_data.load_data import ChemblDataLoader
-
 DATA_DIR = Path("data/chembl_transform")
 OUTPUT_DIR = Path("data/llm_finetune")
 
 TRAIN_RATIO = 0.9
 RANDOM_SEED = 42
 MAX_DDI_PAIRS = 5_000
-MAX_ACTIVITY_RECORDS = 20_000
+MAX_ACTIVITY_RECORDS = 50_000
+MAX_COMPOUND_PROPERTY_RECORDS = 200_000
+
+# Tables that benefit from row-capping during load (large parquet files).
+# Others are loaded fully — they are small enough to fit in RAM.
+_TABLE_ROW_LIMITS: dict[str, int] = {
+    "activities": MAX_ACTIVITY_RECORDS * 3,   # 3× cap to survive pchembl filter
+    "compound_properties": MAX_COMPOUND_PROPERTY_RECORDS,
+}
+
+_REQUIRED_TABLES = {
+    "molecule_dictionary",
+    "drug_mechanism",
+    "drug_indication",
+    "metabolism",
+    "target_dictionary",
+    "compound_records",
+    "activities",
+    "drug_warning",
+    "molecule_synonyms",
+    "compound_properties",
+    "atc_classification",
+    "molecule_atc_classification",
+    "formulations",
+    "products",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -62,24 +89,26 @@ def _record_to_molregno(compound_records: pl.DataFrame) -> dict[int, int]:
 # Table loading
 # ---------------------------------------------------------------------------
 
-_REQUIRED_TABLES = {
-    "molecule_dictionary",
-    "drug_mechanism",
-    "drug_indication",
-    "metabolism",
-    "target_dictionary",
-    "compound_records",
-    "activities",
-}
-
 
 def load_tables(data_dir: Path = DATA_DIR) -> dict[str, pl.DataFrame]:
-    loader = ChemblDataLoader(data_dir=data_dir)
-    available = set(loader.list_tables())
-    missing = _REQUIRED_TABLES - available
-    if missing:
-        print(f"  Warning: tables not found (skipping): {missing}")
-    return {name: loader.load_table(name) for name in _REQUIRED_TABLES & available}
+    """
+    Load all required ChEMBL tables from parquet.
+
+    Large tables (activities, compound_properties) are lazily scanned and
+    capped to avoid OOM. All other tables are read fully.
+    """
+    tables: dict[str, pl.DataFrame] = {}
+    for name in _REQUIRED_TABLES:
+        path = data_dir / f"{name}.parquet"
+        if not path.exists():
+            print(f"  Warning: {name}.parquet not found, skipping")
+            continue
+        limit = _TABLE_ROW_LIMITS.get(name)
+        if limit:
+            tables[name] = pl.scan_parquet(path).head(limit).collect()
+        else:
+            tables[name] = pl.read_parquet(path)
+    return tables
 
 
 # ---------------------------------------------------------------------------
@@ -95,7 +124,6 @@ def generate_mechanism_qa(
     """Mechanism-of-action pairs from drug_mechanism + target_dictionary."""
     mols = _mol_lookup(molecule_dict)
 
-    # target_dictionary uses chembl_id as the natural key referenced by drug_mechanism
     target_by_chembl_id = {
         row["chembl_id"]: row
         for row in target_dict.select(["chembl_id", "pref_name", "target_type"]).to_dicts()
@@ -248,7 +276,7 @@ def generate_ddi_qa(
         for row in molecule_dict.select(
             ["molregno", "pref_name", "chembl_id"]
         ).to_dicts()
-        if row.get("pref_name")  # named drugs only
+        if row.get("pref_name")
     }
     rec_to_mol = _record_to_molregno(compound_records)
 
@@ -356,6 +384,310 @@ def generate_activity_qa(
         count += 1
 
 
+def generate_drug_warning_qa(
+    drug_warning: pl.DataFrame,
+    molecule_dict: pl.DataFrame,
+) -> Iterator[dict]:
+    """Safety warning pairs from drug_warning."""
+    mols = _mol_lookup(molecule_dict)
+
+    drug_warnings: dict[int, list[dict]] = {}
+    for row in drug_warning.to_dicts():
+        molregno = row.get("molregno")
+        if molregno:
+            drug_warnings.setdefault(molregno, []).append(row)
+
+    for molregno, warnings in drug_warnings.items():
+        mol = mols.get(molregno)
+        if not mol:
+            continue
+
+        drug = _drug_name(mol)
+        chembl_id = mol.get("chembl_id", "")
+
+        for w in warnings:
+            wtype = (w.get("warning_type") or "Warning").strip()
+            wclass = (w.get("warning_class") or "").strip()
+            wcountry = (w.get("warning_country") or "").strip()
+            wyear = w.get("warning_year")
+
+            class_str = f" ({wclass})" if wclass else ""
+            country_str = f" in {wcountry}" if wcountry else ""
+            year_str = f" ({int(wyear)})" if wyear else ""
+
+            yield {
+                "text": (
+                    f"### Question\nDoes {drug} have any safety warnings?\n\n"
+                    f"### Answer\n{drug} ({chembl_id}) has a {wtype}{class_str} issued"
+                    f"{country_str}{year_str}. "
+                    f"Prescribers should review current labeling for complete safety information."
+                )
+            }
+
+            if wtype == "Black Box Warning":
+                yield {
+                    "text": (
+                        f"### Question\nWhat is the black box warning for {drug}?\n\n"
+                        f"### Answer\n{drug} ({chembl_id}) carries a Black Box Warning{class_str}. "
+                        f"This is the most serious FDA warning, indicating significant risk of "
+                        f"serious adverse effects. Always consult current prescribing information."
+                    )
+                }
+
+
+def generate_synonym_qa(
+    molecule_synonyms: pl.DataFrame,
+    molecule_dict: pl.DataFrame,
+) -> Iterator[dict]:
+    """Trade name / INN / USAN synonym lookup pairs."""
+    mols = _mol_lookup(molecule_dict)
+
+    useful_types = {"TRADE_NAME", "INN", "USAN", "BAN"}
+    drug_names: dict[int, dict[str, list[str]]] = {}
+    for row in molecule_synonyms.filter(
+        pl.col("syn_type").is_in(list(useful_types))
+    ).to_dicts():
+        molregno = row.get("molregno")
+        syn_type = row.get("syn_type")
+        synonym = (row.get("synonyms") or "").strip()
+        if molregno and synonym:
+            drug_names.setdefault(molregno, {}).setdefault(syn_type, []).append(synonym)
+
+    for molregno, names_by_type in drug_names.items():
+        mol = mols.get(molregno)
+        if not mol:
+            continue
+
+        generic = _drug_name(mol)
+        chembl_id = mol.get("chembl_id", "")
+
+        trade_names = list(dict.fromkeys(names_by_type.get("TRADE_NAME", [])))
+        inn_names = list(dict.fromkeys(
+            names_by_type.get("INN", []) + names_by_type.get("USAN", []) + names_by_type.get("BAN", [])
+        ))
+
+        if trade_names:
+            trade_str = ", ".join(trade_names[:5])
+            yield {
+                "text": (
+                    f"### Question\nWhat are the brand names for {generic}?\n\n"
+                    f"### Answer\n{generic} ({chembl_id}) is marketed under the trade "
+                    f"name{'s' if len(trade_names) > 1 else ''}: {trade_str}."
+                )
+            }
+            for trade in trade_names[:3]:
+                yield {
+                    "text": (
+                        f"### Question\nWhat is {trade}?\n\n"
+                        f"### Answer\n{trade} is a brand name for the drug {generic} ({chembl_id})."
+                    )
+                }
+
+        if inn_names:
+            inn_str = ", ".join(inn_names[:3])
+            yield {
+                "text": (
+                    f"### Question\nWhat is the INN or generic name for {trade_names[0] if trade_names else generic}?\n\n"
+                    f"### Answer\nThe International Nonproprietary Name (INN) is {inn_str} "
+                    f"(ChEMBL ID: {chembl_id})."
+                )
+            }
+
+
+def generate_physicochemical_qa(
+    compound_properties: pl.DataFrame,
+    molecule_dict: pl.DataFrame,
+) -> Iterator[dict]:
+    """Lipinski / physicochemical property pairs."""
+    mols = {
+        row["molregno"]: row
+        for row in molecule_dict.select(["molregno", "pref_name", "chembl_id"]).to_dicts()
+        if row.get("pref_name")
+    }
+
+    for row in compound_properties.to_dicts():
+        mol = mols.get(row.get("molregno"))
+        if not mol:
+            continue
+
+        drug = _drug_name(mol)
+        chembl_id = mol.get("chembl_id", "")
+
+        mw = row.get("full_mwt")
+        logp = row.get("alogp")
+        hba = row.get("hba")
+        hbd = row.get("hbd")
+        psa = row.get("psa")
+        ro5 = row.get("num_ro5_violations")
+        qed = row.get("qed_weighted")
+        formula = row.get("full_molformula")
+
+        if not mw:
+            continue
+
+        props = []
+        if mw is not None:
+            props.append(f"MW={mw:.1f} Da")
+        if logp is not None:
+            props.append(f"LogP={logp:.2f}")
+        if hba is not None:
+            props.append(f"HBA={hba}")
+        if hbd is not None:
+            props.append(f"HBD={hbd}")
+        if psa is not None:
+            props.append(f"PSA={psa:.1f} Å²")
+
+        ro5_phrase = (
+            f" with {ro5} Lipinski rule violation{'s' if ro5 != 1 else ''}"
+            if ro5 else " (drug-like by Lipinski's rule of 5)"
+        )
+
+        yield {
+            "text": (
+                f"### Question\nWhat are the physicochemical properties of {drug}?\n\n"
+                f"### Answer\n{drug} ({chembl_id}) has: {', '.join(props)}{ro5_phrase}."
+                + (f" Molecular formula: {formula}." if formula else "")
+                + (f" QED score: {qed:.3f}." if qed is not None else "")
+            )
+        }
+
+        if ro5 and ro5 > 1:
+            yield {
+                "text": (
+                    f"### Question\nDoes {drug} follow Lipinski's rule of 5?\n\n"
+                    f"### Answer\n{drug} ({chembl_id}) has {ro5} violation{'s' if ro5 != 1 else ''} "
+                    f"of Lipinski's rule of 5, which may reduce oral bioavailability. "
+                    + (f"MW={mw:.1f} Da, LogP={logp:.2f}." if logp is not None else f"MW={mw:.1f} Da.")
+                )
+            }
+
+
+def generate_atc_classification_qa(
+    atc_classification: pl.DataFrame,
+    molecule_atc_classification: pl.DataFrame,
+    molecule_dict: pl.DataFrame,
+) -> Iterator[dict]:
+    """WHO ATC therapeutic class pairs."""
+    mols = _mol_lookup(molecule_dict)
+
+    atc_lookup = {row["level5"]: row for row in atc_classification.to_dicts()}
+
+    mol_atc: dict[int, list[str]] = {}
+    for row in molecule_atc_classification.to_dicts():
+        molregno = row.get("molregno")
+        level5 = row.get("level5")
+        if molregno and level5:
+            mol_atc.setdefault(molregno, []).append(level5)
+
+    for molregno, atc_codes in mol_atc.items():
+        mol = mols.get(molregno)
+        if not mol:
+            continue
+
+        drug = _drug_name(mol)
+        chembl_id = mol.get("chembl_id", "")
+
+        for code in atc_codes[:2]:
+            atc = atc_lookup.get(code)
+            if not atc:
+                continue
+
+            l1 = (atc.get("level1_description") or "").strip()
+            l2 = (atc.get("level2_description") or "").strip()
+            l4 = (atc.get("level4_description") or "").strip()
+            who_name = (atc.get("who_name") or "").strip()
+
+            if not who_name:
+                continue
+
+            yield {
+                "text": (
+                    f"### Question\nWhat therapeutic class does {drug} belong to?\n\n"
+                    f"### Answer\n{drug} ({chembl_id}) is classified under the WHO ATC system as "
+                    f"{who_name} (code: {code})."
+                    + (f" Anatomical group: {l1}." if l1 else "")
+                    + (f" Pharmacological subgroup: {l2}." if l2 else "")
+                    + (f" Chemical subgroup: {l4}." if l4 else "")
+                )
+            }
+
+            yield {
+                "text": (
+                    f"### Question\nWhat is the ATC code for {drug}?\n\n"
+                    f"### Answer\n{drug} ({chembl_id}) has ATC code {code}: {who_name}."
+                    + (f" It belongs to the {l1} anatomical group." if l1 else "")
+                )
+            }
+
+
+def generate_approved_product_qa(
+    formulations: pl.DataFrame,
+    products: pl.DataFrame,
+    molecule_dict: pl.DataFrame,
+) -> Iterator[dict]:
+    """Approved product / formulation pairs from FDA product data."""
+    mols = _mol_lookup(molecule_dict)
+
+    product_lookup = {row["product_id"]: row for row in products.to_dicts()}
+
+    mol_products: dict[int, list[dict]] = {}
+    for row in formulations.to_dicts():
+        molregno = row.get("molregno")
+        product_id = row.get("product_id")
+        if not molregno or not product_id:
+            continue
+        product = product_lookup.get(product_id, {})
+        trade_name = (product.get("trade_name") or "").strip()
+        if not trade_name:
+            continue
+        mol_products.setdefault(molregno, []).append(
+            {
+                "trade_name": trade_name,
+                "route": (product.get("route") or "").strip(),
+                "dosage_form": (product.get("dosage_form") or "").strip(),
+                "strength": (row.get("strength") or "").strip(),
+                "black_box": product.get("black_box_warning") == 1,
+            }
+        )
+
+    for molregno, prods in mol_products.items():
+        mol = mols.get(molregno)
+        if not mol:
+            continue
+
+        drug = _drug_name(mol)
+        chembl_id = mol.get("chembl_id", "")
+
+        seen: set[str] = set()
+        unique_prods = [p for p in prods if not (seen.add(p["trade_name"]) or p["trade_name"] in seen - {p["trade_name"]})]  # type: ignore[func-returns-value]
+
+        routes = list(dict.fromkeys(p["route"] for p in unique_prods if p["route"]))
+        forms = list(dict.fromkeys(p["dosage_form"] for p in unique_prods if p["dosage_form"]))
+        names = [p["trade_name"] for p in unique_prods[:5]]
+
+        if names:
+            yield {
+                "text": (
+                    f"### Question\nWhat are the approved formulations of {drug}?\n\n"
+                    f"### Answer\n{drug} ({chembl_id}) is available as: {', '.join(names[:3])}."
+                    + (f" Administration routes: {', '.join(routes)}." if routes else "")
+                    + (f" Dosage forms: {', '.join(forms)}." if forms else "")
+                )
+            }
+
+        bbw_prods = [p for p in unique_prods if p["black_box"]]
+        if bbw_prods:
+            bbw_names = ", ".join(p["trade_name"] for p in bbw_prods[:3])
+            yield {
+                "text": (
+                    f"### Question\nDoes any formulation of {drug} carry a black box warning?\n\n"
+                    f"### Answer\nYes, {drug} ({chembl_id}) has formulations with an FDA Black Box "
+                    f"Warning. Affected products include: {bbw_names}. "
+                    f"Review current prescribing information before use."
+                )
+            }
+
+
 # ---------------------------------------------------------------------------
 # JSONL writer
 # ---------------------------------------------------------------------------
@@ -414,32 +746,72 @@ def build_drug_interaction_dataset(
 
     all_records: list[dict] = []
 
-    if "drug_mechanism" in tables and "target_dictionary" in tables:
-        print("Generating mechanism-of-action QA pairs...")
-        pairs = list(generate_mechanism_qa(tables["drug_mechanism"], mol, tables["target_dictionary"]))
-        print(f"  -> {len(pairs):,} pairs")
-        all_records.extend(pairs)
+    _generators = [
+        (
+            "mechanism-of-action",
+            lambda: generate_mechanism_qa(
+                tables["drug_mechanism"], mol, tables["target_dictionary"]
+            ),
+            "drug_mechanism" in tables and "target_dictionary" in tables,
+        ),
+        (
+            "drug-indication",
+            lambda: generate_indication_qa(tables["drug_indication"], mol),
+            "drug_indication" in tables,
+        ),
+        (
+            "metabolism",
+            lambda: generate_metabolism_qa(tables["metabolism"], mol, compound_records),
+            "metabolism" in tables and compound_records is not None,
+        ),
+        (
+            "drug-drug interactions",
+            lambda: generate_ddi_qa(tables["metabolism"], mol, compound_records),
+            "metabolism" in tables and compound_records is not None,
+        ),
+        (
+            "bioactivity",
+            lambda: generate_activity_qa(tables["activities"], mol),
+            "activities" in tables,
+        ),
+        (
+            "drug warnings",
+            lambda: generate_drug_warning_qa(tables["drug_warning"], mol),
+            "drug_warning" in tables,
+        ),
+        (
+            "synonyms",
+            lambda: generate_synonym_qa(tables["molecule_synonyms"], mol),
+            "molecule_synonyms" in tables,
+        ),
+        (
+            "physicochemical properties",
+            lambda: generate_physicochemical_qa(tables["compound_properties"], mol),
+            "compound_properties" in tables,
+        ),
+        (
+            "ATC classification",
+            lambda: generate_atc_classification_qa(
+                tables["atc_classification"],
+                tables["molecule_atc_classification"],
+                mol,
+            ),
+            "atc_classification" in tables and "molecule_atc_classification" in tables,
+        ),
+        (
+            "approved products",
+            lambda: generate_approved_product_qa(
+                tables["formulations"], tables["products"], mol
+            ),
+            "formulations" in tables and "products" in tables,
+        ),
+    ]
 
-    if "drug_indication" in tables:
-        print("Generating drug-indication QA pairs...")
-        pairs = list(generate_indication_qa(tables["drug_indication"], mol))
-        print(f"  -> {len(pairs):,} pairs")
-        all_records.extend(pairs)
-
-    if "metabolism" in tables and compound_records is not None:
-        print("Generating metabolism QA pairs...")
-        pairs = list(generate_metabolism_qa(tables["metabolism"], mol, compound_records))
-        print(f"  -> {len(pairs):,} pairs")
-        all_records.extend(pairs)
-
-        print("Generating drug-drug interaction pairs...")
-        pairs = list(generate_ddi_qa(tables["metabolism"], mol, compound_records))
-        print(f"  -> {len(pairs):,} pairs")
-        all_records.extend(pairs)
-
-    if "activities" in tables:
-        print("Generating bioactivity QA pairs...")
-        pairs = list(generate_activity_qa(tables["activities"], mol))
+    for label, generator_fn, enabled in _generators:
+        if not enabled:
+            continue
+        print(f"Generating {label} QA pairs...")
+        pairs = list(generator_fn())
         print(f"  -> {len(pairs):,} pairs")
         all_records.extend(pairs)
 

@@ -384,3 +384,378 @@ class TestBuildDrugInteractionDataset:
             build_drug_interaction_dataset(
                 data_dir=empty_dir, output_dir=tmp_path / "out"
             )
+
+
+# ---------------------------------------------------------------------------
+# New generator fixtures
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def drug_warning():
+    return pl.DataFrame(
+        {
+            "molregno": [1, 1, 2],
+            "warning_type": ["Black Box Warning", "Black Box Warning", "Withdrawal"],
+            "warning_class": ["hepatotoxicity", "cardiac toxicity", "neurotoxicity"],
+            "warning_country": ["USA", "EU", "USA"],
+            "warning_year": [2005, 2010, 2015],
+            "efo_term": [None, None, None],
+            "efo_id": [None, None, None],
+            "efo_id_for_warning_class": [None, None, None],
+        }
+    )
+
+
+@pytest.fixture
+def molecule_synonyms():
+    return pl.DataFrame(
+        {
+            "molregno": [1, 1, 2, 2],
+            "syn_type": ["TRADE_NAME", "INN", "TRADE_NAME", "USAN"],
+            "molsyn_id": [1, 2, 3, 4],
+            "synonyms": ["Bayer Aspirin", "acetylsalicylic acid", "Coumadin", "warfarin"],
+        }
+    )
+
+
+@pytest.fixture
+def compound_properties():
+    return pl.DataFrame(
+        {
+            "molregno": [1, 2],
+            "mw_freebase": [180.16, 308.33],
+            "alogp": [1.19, 2.70],
+            "hba": [4, 4],
+            "hbd": [1, 1],
+            "psa": [63.6, 73.3],
+            "rtb": [2, 4],
+            "ro3_pass": [None, None],
+            "num_ro5_violations": [0, 0],
+            "full_mwt": [180.16, 308.33],
+            "aromatic_rings": [1, 2],
+            "heavy_atoms": [13, 21],
+            "qed_weighted": [0.55, 0.67],
+            "full_molformula": ["C9H8O4", "C19H16O4"],
+            "np_likeness_score": [-1.2, -0.8],
+        }
+    )
+
+
+@pytest.fixture
+def atc_classification():
+    return pl.DataFrame(
+        {
+            "who_name": ["ACETYLSALICYLIC ACID", "WARFARIN"],
+            "level1": ["N", "B"],
+            "level2": ["N02", "B01"],
+            "level3": ["N02B", "B01A"],
+            "level4": ["N02BA", "B01AA"],
+            "level5": ["N02BA01", "B01AA03"],
+            "level1_description": ["NERVOUS SYSTEM", "BLOOD AND BLOOD FORMING ORGANS"],
+            "level2_description": ["OTHER ANALGESICS AND ANTIPYRETICS", "ANTITHROMBOTIC AGENTS"],
+            "level3_description": [None, None],
+            "level4_description": ["Salicylic acid and derivatives", "Vitamin K antagonists"],
+        }
+    )
+
+
+@pytest.fixture
+def molecule_atc_classification():
+    return pl.DataFrame(
+        {
+            "mol_atc_id": [1, 2],
+            "level5": ["N02BA01", "B01AA03"],
+            "molregno": [1, 2],
+        }
+    )
+
+
+@pytest.fixture
+def products():
+    return pl.DataFrame(
+        {
+            "product_id": ["P001", "P002"],
+            "trade_name": ["BAYER ASPIRIN", "COUMADIN"],
+            "dosage_form": ["TABLET", "TABLET"],
+            "route": ["ORAL", "ORAL"],
+            "approval_date": ["1965-01-01", "1954-01-01"],
+            "ad_type": [None, None],
+            "oral": [1, 1],
+            "topical": [0, 0],
+            "parenteral": [0, 0],
+            "black_box_warning": [0, 1],
+            "applicant_full_name": ["Bayer", "Bristol-Myers Squibb"],
+            "innovator_company": [1, 1],
+            "nda_type": ["N", "N"],
+        }
+    )
+
+
+@pytest.fixture
+def formulations(compound_records):
+    return pl.DataFrame(
+        {
+            "product_id": ["P001", "P002"],
+            "ingredient": ["Aspirin", "Warfarin sodium"],
+            "strength": ["325 mg", "5 mg"],
+            "record_id": [101, 102],
+            "molregno": [1, 2],
+            "formulation_id": [1001, 1002],
+        }
+    )
+
+
+# ---------------------------------------------------------------------------
+# generate_drug_warning_qa
+# ---------------------------------------------------------------------------
+
+
+def test_drug_warning_qa_produces_pairs(drug_warning, molecule_dict):
+    from app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset import (
+        generate_drug_warning_qa,
+    )
+    pairs = list(generate_drug_warning_qa(drug_warning, molecule_dict))
+    assert len(pairs) > 0
+
+
+def test_drug_warning_qa_black_box_pair(drug_warning, molecule_dict):
+    from app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset import (
+        generate_drug_warning_qa,
+    )
+    pairs = list(generate_drug_warning_qa(drug_warning, molecule_dict))
+    texts = " ".join(p["text"] for p in pairs)
+    assert "Black Box Warning" in texts
+    assert "Aspirin" in texts
+
+
+def test_drug_warning_qa_skips_unknown_molregno(molecule_dict):
+    from app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset import (
+        generate_drug_warning_qa,
+    )
+    bad = pl.DataFrame({
+        "molregno": [999], "warning_type": ["Withdrawal"],
+        "warning_class": ["x"], "warning_country": ["USA"],
+        "warning_year": [2000], "efo_term": [None],
+        "efo_id": [None], "efo_id_for_warning_class": [None],
+    })
+    assert list(generate_drug_warning_qa(bad, molecule_dict)) == []
+
+
+# ---------------------------------------------------------------------------
+# generate_synonym_qa
+# ---------------------------------------------------------------------------
+
+
+def test_synonym_qa_produces_pairs(molecule_synonyms, molecule_dict):
+    from app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset import (
+        generate_synonym_qa,
+    )
+    pairs = list(generate_synonym_qa(molecule_synonyms, molecule_dict))
+    assert len(pairs) > 0
+
+
+def test_synonym_qa_trade_name_pair(molecule_synonyms, molecule_dict):
+    from app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset import (
+        generate_synonym_qa,
+    )
+    pairs = list(generate_synonym_qa(molecule_synonyms, molecule_dict))
+    texts = " ".join(p["text"] for p in pairs)
+    assert "Bayer Aspirin" in texts
+    assert "Coumadin" in texts
+
+
+def test_synonym_qa_inn_pair(molecule_synonyms, molecule_dict):
+    from app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset import (
+        generate_synonym_qa,
+    )
+    pairs = list(generate_synonym_qa(molecule_synonyms, molecule_dict))
+    texts = " ".join(p["text"] for p in pairs)
+    assert "INN" in texts or "generic" in texts.lower()
+
+
+# ---------------------------------------------------------------------------
+# generate_physicochemical_qa
+# ---------------------------------------------------------------------------
+
+
+def test_physicochemical_qa_produces_pairs(compound_properties, molecule_dict):
+    from app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset import (
+        generate_physicochemical_qa,
+    )
+    pairs = list(generate_physicochemical_qa(compound_properties, molecule_dict))
+    assert len(pairs) > 0
+
+
+def test_physicochemical_qa_contains_mw(compound_properties, molecule_dict):
+    from app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset import (
+        generate_physicochemical_qa,
+    )
+    pairs = list(generate_physicochemical_qa(compound_properties, molecule_dict))
+    texts = " ".join(p["text"] for p in pairs)
+    assert "MW=" in texts
+    assert "LogP=" in texts
+
+
+def test_physicochemical_qa_skips_null_mw(molecule_dict):
+    from app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset import (
+        generate_physicochemical_qa,
+    )
+    no_mw = pl.DataFrame({
+        "molregno": [1], "mw_freebase": [None], "alogp": [1.0], "hba": [2],
+        "hbd": [1], "psa": [60.0], "rtb": [2], "ro3_pass": [None],
+        "num_ro5_violations": [0], "full_mwt": [None], "aromatic_rings": [1],
+        "heavy_atoms": [10], "qed_weighted": [0.5], "full_molformula": [None],
+        "np_likeness_score": [-1.0],
+    })
+    assert list(generate_physicochemical_qa(no_mw, molecule_dict)) == []
+
+
+# ---------------------------------------------------------------------------
+# generate_atc_classification_qa
+# ---------------------------------------------------------------------------
+
+
+def test_atc_qa_produces_pairs(atc_classification, molecule_atc_classification, molecule_dict):
+    from app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset import (
+        generate_atc_classification_qa,
+    )
+    pairs = list(generate_atc_classification_qa(
+        atc_classification, molecule_atc_classification, molecule_dict
+    ))
+    assert len(pairs) > 0
+
+
+def test_atc_qa_contains_who_name(atc_classification, molecule_atc_classification, molecule_dict):
+    from app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset import (
+        generate_atc_classification_qa,
+    )
+    pairs = list(generate_atc_classification_qa(
+        atc_classification, molecule_atc_classification, molecule_dict
+    ))
+    texts = " ".join(p["text"] for p in pairs)
+    assert "ACETYLSALICYLIC ACID" in texts or "N02BA01" in texts
+
+
+def test_atc_qa_contains_code(atc_classification, molecule_atc_classification, molecule_dict):
+    from app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset import (
+        generate_atc_classification_qa,
+    )
+    pairs = list(generate_atc_classification_qa(
+        atc_classification, molecule_atc_classification, molecule_dict
+    ))
+    texts = " ".join(p["text"] for p in pairs)
+    assert "ATC" in texts
+
+
+# ---------------------------------------------------------------------------
+# generate_approved_product_qa
+# ---------------------------------------------------------------------------
+
+
+def test_approved_product_qa_produces_pairs(formulations, products, molecule_dict):
+    from app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset import (
+        generate_approved_product_qa,
+    )
+    pairs = list(generate_approved_product_qa(formulations, products, molecule_dict))
+    assert len(pairs) > 0
+
+
+def test_approved_product_qa_trade_name(formulations, products, molecule_dict):
+    from app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset import (
+        generate_approved_product_qa,
+    )
+    pairs = list(generate_approved_product_qa(formulations, products, molecule_dict))
+    texts = " ".join(p["text"] for p in pairs)
+    assert "BAYER ASPIRIN" in texts or "COUMADIN" in texts
+
+
+def test_approved_product_qa_black_box(formulations, products, molecule_dict):
+    from app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset import (
+        generate_approved_product_qa,
+    )
+    pairs = list(generate_approved_product_qa(formulations, products, molecule_dict))
+    texts = " ".join(p["text"] for p in pairs)
+    assert "Black Box" in texts
+    assert "COUMADIN" in texts
+
+
+# ---------------------------------------------------------------------------
+# Extended integration test — all tables present
+# ---------------------------------------------------------------------------
+
+
+class TestBuildDrugInteractionDatasetExtended:
+    @pytest.fixture
+    def full_parquet_dir(
+        self,
+        tmp_path,
+        molecule_dict,
+        drug_mechanism,
+        drug_indication,
+        metabolism,
+        compound_records,
+        activities,
+        target_dict,
+        drug_warning,
+        molecule_synonyms,
+        compound_properties,
+        atc_classification,
+        molecule_atc_classification,
+        formulations,
+        products,
+    ):
+        for name, df in [
+            ("molecule_dictionary", molecule_dict),
+            ("drug_mechanism", drug_mechanism),
+            ("drug_indication", drug_indication),
+            ("metabolism", metabolism),
+            ("compound_records", compound_records),
+            ("activities", activities),
+            ("target_dictionary", target_dict),
+            ("drug_warning", drug_warning),
+            ("molecule_synonyms", molecule_synonyms),
+            ("compound_properties", compound_properties),
+            ("atc_classification", atc_classification),
+            ("molecule_atc_classification", molecule_atc_classification),
+            ("formulations", formulations),
+            ("products", products),
+        ]:
+            df.write_parquet(tmp_path / f"{name}.parquet")
+        return tmp_path
+
+    def test_all_generators_run(self, full_parquet_dir, tmp_path):
+        output_dir = tmp_path / "output"
+        build_drug_interaction_dataset(data_dir=full_parquet_dir, output_dir=output_dir)
+        assert (output_dir / "train.jsonl").exists()
+        assert (output_dir / "valid.jsonl").exists()
+
+    def test_more_pairs_with_all_tables(self, full_parquet_dir, tmp_path):
+        """Dataset with all 14 tables should have more pairs than 7-table subset."""
+        from pathlib import Path
+        import shutil
+
+        # Build with all tables
+        full_out = tmp_path / "full"
+        build_drug_interaction_dataset(data_dir=full_parquet_dir, output_dir=full_out)
+        full_count = sum(
+            1 for _ in (full_out / "train.jsonl").read_text().splitlines()
+        ) + sum(
+            1 for _ in (full_out / "valid.jsonl").read_text().splitlines()
+        )
+
+        # Build with only the original 7 tables
+        partial_dir = tmp_path / "partial_src"
+        partial_dir.mkdir()
+        for t in ["molecule_dictionary", "drug_mechanism", "drug_indication",
+                  "metabolism", "compound_records", "activities", "target_dictionary"]:
+            shutil.copy(full_parquet_dir / f"{t}.parquet", partial_dir / f"{t}.parquet")
+        partial_out = tmp_path / "partial"
+        build_drug_interaction_dataset(data_dir=partial_dir, output_dir=partial_out)
+        partial_count = sum(
+            1 for _ in (partial_out / "train.jsonl").read_text().splitlines()
+        ) + sum(
+            1 for _ in (partial_out / "valid.jsonl").read_text().splitlines()
+        )
+
+        assert full_count > partial_count

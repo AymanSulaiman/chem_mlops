@@ -1,7 +1,6 @@
 import re
 import duckdb
 from duckdb import DuckDBPyConnection
-import polars as pl
 import os
 import shutil
 import sys
@@ -16,25 +15,37 @@ def transform_data(chembl_version: str = "36") -> None:
     conn: DuckDBPyConnection = duckdb.connect()
     alias = f"chembl{chembl_version}"
     db_path = f"data/chembl_{chembl_version}/chembl_{chembl_version}_sqlite/chembl_{chembl_version}.db"
+    output_dir = os.path.join("data", "chembl_transform")
+
     try:
         conn.execute("INSTALL sqlite;")
         conn.execute("LOAD sqlite;")
-        print("Loading data")
         conn.execute("SET arrow_large_buffer_size=true;")
-        conn.execute(
-            f"ATTACH '{db_path}' AS {alias} (TYPE sqlite);"
-        )
-        tables: pl.DataFrame = conn.execute(f"SHOW TABLES FROM {alias};").pl()
-        output_dir = os.path.join("data", "chembl_transform")
+        conn.execute(f"ATTACH '{db_path}' AS {alias} (TYPE sqlite);")
+
+        tables: list[str] = [
+            row[0] for row in conn.execute(f"SHOW TABLES FROM {alias};").fetchall()
+        ]
         os.makedirs(output_dir, exist_ok=True)
-        for table in tables.select(pl.col("name")).to_series().to_list():
+
+        for table in tables:
             print(f"Processing table: {table}")
-            result: pl.DataFrame = conn.execute(f"SELECT * FROM {alias}.{table}").pl()
-            if result.height > 0:
-                result.write_parquet(os.path.join(output_dir, f"{table}.parquet"))
-                print(f"Saved {table}.parquet")
-            else:
-                print(f"Table {table} is empty, skipping.")
+            count: int = conn.execute(
+                f"SELECT COUNT(*) FROM {alias}.{table}"
+            ).fetchone()[0]
+
+            if count == 0:
+                print(f"  Table {table} is empty, skipping.")
+                continue
+
+            parquet_path = os.path.join(output_dir, f"{table}.parquet")
+            # Stream directly from SQLite to Parquet inside DuckDB —
+            # avoids loading any table into Python/Polars memory.
+            conn.execute(
+                f"COPY (SELECT * FROM {alias}.{table}) TO '{parquet_path}' "
+                f"(FORMAT PARQUET);"
+            )
+            print(f"  Saved {table}.parquet ({count:,} rows)")
     finally:
         conn.close()
 
@@ -47,3 +58,6 @@ def transform_data(chembl_version: str = "36") -> None:
             print(f"Failed to remove {chembl_dir}: {e}", file=sys.stderr)
     else:
         print(f"{chembl_dir} does not exist, nothing to remove.")
+
+if __name__ == "__main__":
+    transform_data()

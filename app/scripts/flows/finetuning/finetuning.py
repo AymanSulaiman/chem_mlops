@@ -14,7 +14,6 @@ NUM_LAYERS = 16       # was 8; Gemma 3 1B has 18 layers — more LoRA coverage
 ITERS = 1500
 LEARNING_RATE = 1e-5
 MAX_SEQ_LEN = 2048
-WARMUP_STEPS = 100
 STEPS_PER_REPORT = 25   # was 1; reduces per-iteration I/O overhead
 STEPS_PER_EVAL = 200
 SAVE_EVERY = 500
@@ -135,7 +134,6 @@ def finetune_lora(
     iters: int = ITERS,
     learning_rate: float = LEARNING_RATE,
     max_seq_len: int = MAX_SEQ_LEN,
-    warmup: int = WARMUP_STEPS,
     steps_per_report: int = STEPS_PER_REPORT,
     steps_per_eval: int = STEPS_PER_EVAL,
     save_every: int = SAVE_EVERY,
@@ -165,11 +163,7 @@ def finetune_lora(
             str(iters),
             "--learning-rate",
             str(learning_rate),
-            "--lr-schedule",
-            "cosine_decay",
-            "--warmup",
-            str(warmup),
-            "--max-seq-len",
+            "--max-seq-length",
             str(max_seq_len),
             "--grad-checkpoint",        # ~30% lower peak memory -> fits batch_size=4
             "--adapter-path",
