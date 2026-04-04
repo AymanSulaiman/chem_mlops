@@ -91,11 +91,19 @@ def filter_activities(activities: pl.DataFrame) -> pl.DataFrame:
     return act
 
 
+OUTPUT_PATH = Path("data/chembl_activity_dataset.parquet")
+
+
 def create_finetuning_dataset() -> pl.DataFrame:
     compound_structures, activities, molecule_dict = load_tables()
 
     activities_clean = filter_activities(activities)
     joined = join_tables(compound_structures, activities_clean, molecule_dict)
+
+    OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    joined.write_parquet(OUTPUT_PATH)
+    print(f"Saved finetuning dataset to {OUTPUT_PATH} ({joined.shape[0]} rows)")
+
     return joined
 
 

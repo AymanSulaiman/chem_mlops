@@ -8,7 +8,7 @@ from unittest.mock import patch, MagicMock, mock_open
 import polars as pl
 import duckdb
 
-from app.scripts.flows.transform_data import transform_data
+from app.scripts.flows.initial_data_transformation.transform_data import transform_data
 
 
 class TestTransformData:
