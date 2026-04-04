@@ -295,9 +295,10 @@ def test_activity_qa_moderate_potency_label(activities, molecule_dict):
     assert "moderate potency" in texts  # pChEMBL 5.2 in [5, 7)
 
 
-def test_activity_qa_max_records(activities, molecule_dict):
-    pairs = list(generate_activity_qa(activities, molecule_dict, max_records=1))
-    assert len(pairs) == 1
+def test_activity_qa_returns_all_records(activities, molecule_dict):
+    """All pchembl-valued rows should be yielded — no cap applied."""
+    pairs = list(generate_activity_qa(activities, molecule_dict))
+    assert len(pairs) >= 1
 
 
 # ---------------------------------------------------------------------------
@@ -758,3 +759,465 @@ class TestBuildDrugInteractionDatasetExtended:
         )
 
         assert full_count > partial_count
+
+
+# ---------------------------------------------------------------------------
+# New fixtures for the 7 additional generators
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def docs():
+    return pl.DataFrame(
+        {
+            "doc_id": [1, 2],
+            "title": ["Aspirin inhibits COX-1", "Warfarin pharmacokinetics"],
+            "abstract": [
+                "This study demonstrates that aspirin irreversibly inhibits "
+                "cyclooxygenase-1 and reduces thromboxane A2 synthesis.",
+                "Warfarin exhibits stereoselective metabolism via CYP2C9 "
+                "and has a narrow therapeutic index requiring careful monitoring.",
+            ],
+            "journal": ["J Pharmacol", "Clin Pharmacokinet"],
+            "year": [2020, 2019],
+            "pubmed_id": [12345678, 87654321],
+        }
+    )
+
+
+@pytest.fixture
+def assays():
+    return pl.DataFrame(
+        {
+            "assay_id": [10, 20],
+            "description": [
+                "Inhibition of COX-1 in human platelets",
+                "Anticoagulant activity in rat plasma",
+            ],
+            "assay_type": ["B", "F"],
+            "assay_organism": ["Homo sapiens", "Rattus norvegicus"],
+            "assay_tissue": ["Blood", "Plasma"],
+            "assay_cell_type": [None, None],
+        }
+    )
+
+
+@pytest.fixture
+def activities_with_assay(activities):
+    """Activities that include assay_id and activity_id columns."""
+    return activities.with_columns(
+        pl.Series("assay_id", [10, 20]),
+        pl.Series("activity_id", [100, 200]),
+    )
+
+
+@pytest.fixture
+def ligand_eff():
+    return pl.DataFrame(
+        {
+            "activity_id": [100, 200],
+            "le": [0.35, 0.22],
+            "lle": [3.1, 1.8],
+            "bei": [12.5, 8.7],
+            "sei": [5.2, 3.9],
+        }
+    )
+
+
+@pytest.fixture
+def target_dict_with_tid():
+    return pl.DataFrame(
+        {
+            "tid": [1, 2],
+            "pref_name": ["Cyclooxygenase-1", "Vitamin K epoxide reductase"],
+            "chembl_id": ["CHEMBL_TGT_1", "CHEMBL_TGT_2"],
+            "organism": ["Homo sapiens", "Homo sapiens"],
+            "target_type": ["SINGLE PROTEIN", "SINGLE PROTEIN"],
+        }
+    )
+
+
+@pytest.fixture
+def component_sequences():
+    return pl.DataFrame(
+        {
+            "component_id": [101, 102],
+            "accession": ["P23219", "P56817"],
+            "description": ["Prostaglandin G/H synthase 1", "Vitamin K epoxide reductase"],
+            "organism": ["Homo sapiens", "Homo sapiens"],
+            "sequence": ["MSELAAC", "MSWLKL"],
+        }
+    )
+
+
+@pytest.fixture
+def target_components():
+    return pl.DataFrame(
+        {
+            "tid": [1, 2],
+            "component_id": [101, 102],
+        }
+    )
+
+
+@pytest.fixture
+def protein_classification():
+    return pl.DataFrame(
+        {
+            "protein_class_id": [1, 2],
+            "pref_name": ["Enzyme", "Reductase"],
+            "short_name": ["Enzyme", "Reductase"],
+            "protein_class_desc": ["Enzyme superfamily", "Reductase family"],
+            "definition": ["Catalyses chemical reactions.", "Reduces substrates."],
+        }
+    )
+
+
+@pytest.fixture
+def component_class():
+    return pl.DataFrame(
+        {
+            "component_id": [101, 102],
+            "protein_class_id": [1, 2],
+        }
+    )
+
+
+@pytest.fixture
+def biotherapeutics():
+    return pl.DataFrame(
+        {
+            "molregno": [1, 2],
+            "description": ["monoclonal antibody", None],
+        }
+    )
+
+
+@pytest.fixture
+def target_relations():
+    return pl.DataFrame(
+        {
+            "tid": [1],
+            "related_tid": [2],
+            "relationship": ["SUBSET OF"],
+        }
+    )
+
+
+# ---------------------------------------------------------------------------
+# generate_literature_qa
+# ---------------------------------------------------------------------------
+
+
+def test_literature_qa_produces_pairs(docs):
+    from app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset import (
+        generate_literature_qa,
+    )
+    pairs = list(generate_literature_qa(docs))
+    assert len(pairs) >= 2
+
+
+def test_literature_qa_contains_title_and_abstract(docs):
+    from app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset import (
+        generate_literature_qa,
+    )
+    pairs = list(generate_literature_qa(docs))
+    texts = " ".join(p["text"] for p in pairs)
+    assert "Aspirin inhibits COX-1" in texts
+    assert "cyclooxygenase-1" in texts
+
+
+def test_literature_qa_skips_short_abstract():
+    from app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset import (
+        generate_literature_qa,
+    )
+    df = pl.DataFrame({
+        "doc_id": [1],
+        "title": ["Short paper"],
+        "abstract": ["Too short."],
+        "journal": ["J Test"],
+        "year": [2020],
+        "pubmed_id": [None],
+    })
+    assert list(generate_literature_qa(df)) == []
+
+
+# ---------------------------------------------------------------------------
+# generate_assay_context_qa
+# ---------------------------------------------------------------------------
+
+
+def test_assay_context_qa_produces_pairs(assays, activities_with_assay, molecule_dict):
+    from app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset import (
+        generate_assay_context_qa,
+    )
+    pairs = list(generate_assay_context_qa(assays, activities_with_assay, molecule_dict))
+    assert len(pairs) > 0
+
+
+def test_assay_context_qa_contains_drug_name(assays, activities_with_assay, molecule_dict):
+    from app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset import (
+        generate_assay_context_qa,
+    )
+    pairs = list(generate_assay_context_qa(assays, activities_with_assay, molecule_dict))
+    texts = " ".join(p["text"] for p in pairs)
+    assert "Aspirin" in texts or "Warfarin" in texts
+
+
+def test_assay_context_qa_no_pairs_without_description(activities_with_assay, molecule_dict):
+    from app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset import (
+        generate_assay_context_qa,
+    )
+    empty_assays = pl.DataFrame({
+        "assay_id": [10],
+        "description": [None],
+        "assay_type": ["B"],
+        "assay_organism": ["Homo sapiens"],
+        "assay_tissue": [None],
+        "assay_cell_type": [None],
+    })
+    pairs = list(generate_assay_context_qa(empty_assays, activities_with_assay, molecule_dict))
+    assert len(pairs) == 0
+
+
+# ---------------------------------------------------------------------------
+# generate_ligand_efficiency_qa
+# ---------------------------------------------------------------------------
+
+
+def test_ligand_efficiency_qa_produces_pairs(ligand_eff, activities_with_assay, molecule_dict):
+    from app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset import (
+        generate_ligand_efficiency_qa,
+    )
+    pairs = list(generate_ligand_efficiency_qa(ligand_eff, activities_with_assay, molecule_dict))
+    assert len(pairs) > 0
+
+
+def test_ligand_efficiency_qa_contains_le_value(ligand_eff, activities_with_assay, molecule_dict):
+    from app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset import (
+        generate_ligand_efficiency_qa,
+    )
+    pairs = list(generate_ligand_efficiency_qa(ligand_eff, activities_with_assay, molecule_dict))
+    texts = " ".join(p["text"] for p in pairs)
+    assert "LE=" in texts
+    assert "good ligand efficiency" in texts or "moderate ligand efficiency" in texts
+
+
+def test_ligand_efficiency_qa_quality_labels(ligand_eff, activities_with_assay, molecule_dict):
+    from app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset import (
+        generate_ligand_efficiency_qa,
+    )
+    pairs = list(generate_ligand_efficiency_qa(ligand_eff, activities_with_assay, molecule_dict))
+    texts = " ".join(p["text"] for p in pairs)
+    # 0.35 → good, 0.22 → moderate
+    assert "good" in texts
+    assert "moderate" in texts
+
+
+# ---------------------------------------------------------------------------
+# generate_target_sequence_qa
+# ---------------------------------------------------------------------------
+
+
+def test_target_sequence_qa_produces_pairs(
+    component_sequences, target_components, target_dict_with_tid
+):
+    from app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset import (
+        generate_target_sequence_qa,
+    )
+    pairs = list(
+        generate_target_sequence_qa(component_sequences, target_components, target_dict_with_tid)
+    )
+    assert len(pairs) > 0
+
+
+def test_target_sequence_qa_contains_accession(
+    component_sequences, target_components, target_dict_with_tid
+):
+    from app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset import (
+        generate_target_sequence_qa,
+    )
+    pairs = list(
+        generate_target_sequence_qa(component_sequences, target_components, target_dict_with_tid)
+    )
+    texts = " ".join(p["text"] for p in pairs)
+    assert "P23219" in texts or "P56817" in texts
+
+
+# ---------------------------------------------------------------------------
+# generate_protein_family_qa
+# ---------------------------------------------------------------------------
+
+
+def test_protein_family_qa_produces_pairs(
+    protein_classification, component_class, target_components, target_dict_with_tid
+):
+    from app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset import (
+        generate_protein_family_qa,
+    )
+    pairs = list(
+        generate_protein_family_qa(
+            protein_classification, component_class, target_components, target_dict_with_tid
+        )
+    )
+    assert len(pairs) > 0
+
+
+def test_protein_family_qa_contains_class_name(
+    protein_classification, component_class, target_components, target_dict_with_tid
+):
+    from app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset import (
+        generate_protein_family_qa,
+    )
+    pairs = list(
+        generate_protein_family_qa(
+            protein_classification, component_class, target_components, target_dict_with_tid
+        )
+    )
+    texts = " ".join(p["text"] for p in pairs)
+    assert "Enzyme" in texts or "Reductase" in texts
+
+
+# ---------------------------------------------------------------------------
+# generate_biotherapeutic_qa
+# ---------------------------------------------------------------------------
+
+
+def test_biotherapeutic_qa_produces_pairs(biotherapeutics, molecule_dict):
+    from app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset import (
+        generate_biotherapeutic_qa,
+    )
+    pairs = list(generate_biotherapeutic_qa(biotherapeutics, molecule_dict))
+    assert len(pairs) > 0
+
+
+def test_biotherapeutic_qa_contains_biologic_label(biotherapeutics, molecule_dict):
+    from app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset import (
+        generate_biotherapeutic_qa,
+    )
+    pairs = list(generate_biotherapeutic_qa(biotherapeutics, molecule_dict))
+    texts = " ".join(p["text"] for p in pairs)
+    assert "biologic" in texts
+
+
+def test_biotherapeutic_qa_skips_null_molregno(molecule_dict):
+    from app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset import (
+        generate_biotherapeutic_qa,
+    )
+    df = pl.DataFrame({"molregno": [None], "description": ["antibody"]})
+    assert list(generate_biotherapeutic_qa(df, molecule_dict)) == []
+
+
+# ---------------------------------------------------------------------------
+# generate_target_relations_qa
+# ---------------------------------------------------------------------------
+
+
+def test_target_relations_qa_produces_pairs(target_relations, target_dict_with_tid):
+    from app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset import (
+        generate_target_relations_qa,
+    )
+    pairs = list(generate_target_relations_qa(target_relations, target_dict_with_tid))
+    assert len(pairs) > 0
+
+
+def test_target_relations_qa_subset_of(target_relations, target_dict_with_tid):
+    from app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset import (
+        generate_target_relations_qa,
+    )
+    pairs = list(generate_target_relations_qa(target_relations, target_dict_with_tid))
+    texts = " ".join(p["text"] for p in pairs)
+    assert "subset" in texts.lower() or "subtype" in texts.lower()
+
+
+def test_target_relations_qa_skips_unknown_tid(target_dict_with_tid):
+    from app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset import (
+        generate_target_relations_qa,
+    )
+    bad = pl.DataFrame({
+        "tid": [999],
+        "related_tid": [888],
+        "relationship": ["SUBSET OF"],
+    })
+    assert list(generate_target_relations_qa(bad, target_dict_with_tid)) == []
+
+
+# ---------------------------------------------------------------------------
+# Extended integration test — all 17 generators
+# ---------------------------------------------------------------------------
+
+
+class TestBuildDrugInteractionDatasetFull:
+    @pytest.fixture
+    def all_tables_dir(
+        self,
+        tmp_path,
+        molecule_dict,
+        drug_mechanism,
+        drug_indication,
+        metabolism,
+        compound_records,
+        activities_with_assay,
+        target_dict_with_tid,
+        drug_warning,
+        molecule_synonyms,
+        compound_properties,
+        atc_classification,
+        molecule_atc_classification,
+        formulations,
+        products,
+        docs,
+        assays,
+        ligand_eff,
+        component_sequences,
+        target_components,
+        protein_classification,
+        component_class,
+        biotherapeutics,
+        target_relations,
+    ):
+        # target_dict_with_tid already has tid column needed for new generators
+        for name, df in [
+            ("molecule_dictionary", molecule_dict),
+            ("drug_mechanism", drug_mechanism),
+            ("drug_indication", drug_indication),
+            ("metabolism", metabolism),
+            ("compound_records", compound_records),
+            ("activities", activities_with_assay),
+            ("target_dictionary", target_dict_with_tid),
+            ("drug_warning", drug_warning),
+            ("molecule_synonyms", molecule_synonyms),
+            ("compound_properties", compound_properties),
+            ("atc_classification", atc_classification),
+            ("molecule_atc_classification", molecule_atc_classification),
+            ("formulations", formulations),
+            ("products", products),
+            ("docs", docs),
+            ("assays", assays),
+            ("ligand_eff", ligand_eff),
+            ("component_sequences", component_sequences),
+            ("target_components", target_components),
+            ("protein_classification", protein_classification),
+            ("component_class", component_class),
+            ("biotherapeutics", biotherapeutics),
+            ("target_relations", target_relations),
+        ]:
+            df.write_parquet(tmp_path / f"{name}.parquet")
+        return tmp_path
+
+    def test_full_pipeline_runs(self, all_tables_dir, tmp_path):
+        out = tmp_path / "out"
+        build_drug_interaction_dataset(data_dir=all_tables_dir, output_dir=out)
+        assert (out / "train.jsonl").exists()
+        assert (out / "valid.jsonl").exists()
+
+    def test_full_pipeline_more_pairs_than_partial(self, all_tables_dir, tmp_path):
+        full_out = tmp_path / "full"
+        build_drug_interaction_dataset(data_dir=all_tables_dir, output_dir=full_out)
+        full_count = sum(
+            1 for _ in (full_out / "train.jsonl").read_text().splitlines()
+        ) + sum(
+            1 for _ in (full_out / "valid.jsonl").read_text().splitlines()
+        )
+        assert full_count > 10
+

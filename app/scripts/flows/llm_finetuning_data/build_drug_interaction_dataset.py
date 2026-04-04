@@ -1,18 +1,25 @@
 """
 Build a QA-formatted JSONL dataset for finetuning a drug-interaction chatbot.
 
-Pulls ChEMBL tables and emits ten categories of training pairs:
+Pulls ChEMBL tables and emits seventeen categories of training pairs:
 
-  1. Mechanism of action      — "What does {drug} target?"
-  2. Therapeutic indication   — "What is {drug} indicated for?"
-  3. Metabolic pathways       — "How is {drug} metabolised?" / CYP-specific
-  4. Drug-drug interactions   — pairs inferred from shared CYP substrates
-  5. Bioactivity potency      — pChEMBL-based potency statements
-  6. Drug warnings            — black box warnings and safety alerts
-  7. Drug synonyms            — trade name / INN / USAN lookups
-  8. Physicochemical props    — Lipinski, LogP, PSA, QED
-  9. ATC classification       — WHO therapeutic class hierarchy
- 10. Approved products        — formulations, routes, dosage forms
+  1.  Mechanism of action      — "What does {drug} target?"
+  2.  Therapeutic indication   — "What is {drug} indicated for?"
+  3.  Metabolic pathways       — "How is {drug} metabolised?" / CYP-specific
+  4.  Drug-drug interactions   — pairs inferred from shared CYP substrates
+  5.  Bioactivity potency      — pChEMBL-based potency statements
+  6.  Drug warnings            — black box warnings and safety alerts
+  7.  Drug synonyms            — trade name / INN / USAN lookups
+  8.  Physicochemical props    — Lipinski, LogP, PSA, QED
+  9.  ATC classification       — WHO therapeutic class hierarchy
+  10. Approved products        — formulations, routes, dosage forms
+  11. Scientific literature    — paper titles, journals, and abstracts
+  12. Assay context            — assay descriptions, organism, tissue
+  13. Ligand efficiency        — LE, LLE, BEI, SEI metrics
+  14. Protein target sequences — UniProt accession, organism, description
+  15. Protein family           — ChEMBL protein class hierarchy
+  16. Biotherapeutics          — biologics, peptides, and their descriptions
+  17. Target relations         — target hierarchy (subset/superset/overlap)
 
 Output: data/llm_finetune/train.jsonl  (90 %)
         data/llm_finetune/valid.jsonl  (10 %)
@@ -31,16 +38,6 @@ OUTPUT_DIR = Path("data/llm_finetune")
 TRAIN_RATIO = 0.9
 RANDOM_SEED = 42
 MAX_DDI_PAIRS = 5_000
-MAX_ACTIVITY_RECORDS = 50_000
-MAX_COMPOUND_PROPERTY_RECORDS = 200_000
-
-# Tables that benefit from row-capping during load (large parquet files).
-# Others are loaded fully — they are small enough to fit in RAM.
-_TABLE_ROW_LIMITS: dict[str, int] = {
-    "activities": MAX_ACTIVITY_RECORDS * 3,   # 3× cap to survive pchembl filter
-    "compound_properties": MAX_COMPOUND_PROPERTY_RECORDS,
-}
-
 _REQUIRED_TABLES = {
     "molecule_dictionary",
     "drug_mechanism",
@@ -56,6 +53,16 @@ _REQUIRED_TABLES = {
     "molecule_atc_classification",
     "formulations",
     "products",
+    # New tables
+    "docs",
+    "assays",
+    "ligand_eff",
+    "target_components",
+    "component_sequences",
+    "component_class",
+    "protein_classification",
+    "biotherapeutics",
+    "target_relations",
 }
 
 
@@ -90,12 +97,19 @@ def _record_to_molregno(compound_records: pl.DataFrame) -> dict[int, int]:
 # ---------------------------------------------------------------------------
 
 
-def load_tables(data_dir: Path = DATA_DIR) -> dict[str, pl.DataFrame]:
+def load_tables(
+    data_dir: Path = DATA_DIR,
+    row_limit: int | None = None,
+) -> dict[str, pl.DataFrame]:
     """
     Load all required ChEMBL tables from parquet.
 
-    Large tables (activities, compound_properties) are lazily scanned and
-    capped to avoid OOM. All other tables are read fully.
+    Args:
+        data_dir:  Directory containing the parquet files.
+        row_limit: Optional cap applied uniformly to every table. Useful on
+                   memory-constrained machines.  Pass e.g. ``200_000`` to load
+                   at most 200 K rows per table.  ``None`` (default) loads
+                   everything.
     """
     tables: dict[str, pl.DataFrame] = {}
     for name in _REQUIRED_TABLES:
@@ -103,11 +117,7 @@ def load_tables(data_dir: Path = DATA_DIR) -> dict[str, pl.DataFrame]:
         if not path.exists():
             print(f"  Warning: {name}.parquet not found, skipping")
             continue
-        limit = _TABLE_ROW_LIMITS.get(name)
-        if limit:
-            tables[name] = pl.read_parquet(path, n_rows=limit)
-        else:
-            tables[name] = pl.read_parquet(path)
+        tables[name] = pl.read_parquet(path, n_rows=row_limit)
     return tables
 
 
@@ -342,7 +352,6 @@ def generate_ddi_qa(
 def generate_activity_qa(
     activities: pl.DataFrame,
     molecule_dict: pl.DataFrame,
-    max_records: int = MAX_ACTIVITY_RECORDS,
 ) -> Iterator[dict]:
     """Bioactivity potency pairs from measured pChEMBL values."""
     mols = {
@@ -353,10 +362,7 @@ def generate_activity_qa(
         if row.get("pref_name")
     }
 
-    count = 0
     for row in activities.filter(pl.col("pchembl_value").is_not_null()).to_dicts():
-        if count >= max_records:
-            break
         mol = mols.get(row.get("molregno"))
         if not mol:
             continue
@@ -384,7 +390,6 @@ def generate_activity_qa(
                 f"{std_value} {std_units}."
             )
         }
-        count += 1
 
 
 def generate_drug_warning_qa(
@@ -692,6 +697,406 @@ def generate_approved_product_qa(
 
 
 # ---------------------------------------------------------------------------
+# New generators: literature, assays, ligand efficiency, target biology,
+# biotherapeutics, target relations
+# ---------------------------------------------------------------------------
+
+_ASSAY_TYPE_LABELS: dict[str, str] = {
+    "B": "binding",
+    "F": "functional",
+    "A": "ADMET",
+    "T": "toxicity",
+    "P": "physicochemical",
+}
+
+
+def generate_literature_qa(docs: pl.DataFrame) -> Iterator[dict]:
+    """Scientific-literature pairs from paper titles and abstracts."""
+    for row in docs.filter(
+        pl.col("title").is_not_null() & pl.col("abstract").is_not_null()
+    ).to_dicts():
+        title = (row.get("title") or "").strip()
+        abstract = (row.get("abstract") or "").strip()
+        journal = (row.get("journal") or "").strip()
+        year = row.get("year")
+        pubmed_id = row.get("pubmed_id")
+
+        if not title or not abstract or len(abstract) < 50:
+            continue
+
+        source_str = ""
+        if journal:
+            source_str += f" Published in {journal}"
+            if year:
+                source_str += f" ({int(year)})"
+            source_str += "."
+        if pubmed_id:
+            source_str += f" PubMed ID: {pubmed_id}."
+
+        yield {
+            "text": (
+                f"### Question\nWhat does the paper '{title}' describe?\n\n"
+                f"### Answer\n{abstract.rstrip('.')}.{source_str}"
+            )
+        }
+
+        yield {
+            "text": (
+                f"### Question\nSummarise the findings of '{title}'.\n\n"
+                f"### Answer\n{abstract.rstrip('.')}.{source_str}"
+            )
+        }
+
+
+def generate_assay_context_qa(
+    assays: pl.DataFrame,
+    activities: pl.DataFrame,
+    molecule_dict: pl.DataFrame,
+) -> Iterator[dict]:
+    """Assay-description pairs linking drugs to the experiments that measured them."""
+    mols = {
+        row["molregno"]: row
+        for row in molecule_dict.select(["molregno", "pref_name", "chembl_id"]).to_dicts()
+        if row.get("pref_name")
+    }
+
+    assay_lookup: dict[int, dict] = {
+        row["assay_id"]: row
+        for row in assays.filter(pl.col("description").is_not_null()).to_dicts()
+    }
+
+    seen: set[tuple[int, int]] = set()
+    for act_row in activities.to_dicts():
+        molregno: int | None = act_row.get("molregno")
+        assay_id: int | None = act_row.get("assay_id")
+        if molregno is None or assay_id is None:
+            continue
+
+        key = (int(molregno), int(assay_id))
+        if key in seen:
+            continue
+        seen.add(key)
+
+        mol = mols.get(int(molregno))
+        assay = assay_lookup.get(int(assay_id))
+        if not mol or not assay:
+            continue
+
+        drug = _drug_name(mol)
+        chembl_id = mol.get("chembl_id", "")
+        desc = (assay.get("description") or "").strip()
+        atype = _ASSAY_TYPE_LABELS.get(assay.get("assay_type") or "", "")
+        organism = (assay.get("assay_organism") or "").strip()
+        tissue = (assay.get("assay_tissue") or "").strip()
+        cell = (assay.get("assay_cell_type") or "").strip()
+
+        context_parts = []
+        if atype:
+            context_parts.append(f"{atype} assay")
+        if organism:
+            context_parts.append(f"in {organism}")
+        if tissue:
+            context_parts.append(f"({tissue} tissue)")
+        if cell:
+            context_parts.append(f"using {cell} cells")
+        context_str = " ".join(context_parts)
+
+        yield {
+            "text": (
+                f"### Question\nWhat assay was used to measure the activity of {drug}?\n\n"
+                f"### Answer\n{drug} ({chembl_id}) was tested in a {context_str}: {desc}"
+            ).strip()
+        }
+
+
+def generate_ligand_efficiency_qa(
+    ligand_eff: pl.DataFrame,
+    activities: pl.DataFrame,
+    molecule_dict: pl.DataFrame,
+) -> Iterator[dict]:
+    """Ligand-efficiency pairs (LE, LLE, BEI, SEI) joined via activity_id."""
+    mols = {
+        row["molregno"]: row
+        for row in molecule_dict.select(["molregno", "pref_name", "chembl_id"]).to_dicts()
+        if row.get("pref_name")
+    }
+
+    # activity_id → molregno
+    act_to_mol: dict[int, int] = {
+        int(r["activity_id"]): int(r["molregno"])
+        for r in activities.select(["activity_id", "molregno"]).to_dicts()
+        if r.get("molregno") is not None
+    }
+
+    seen_mol: set[int] = set()
+    for row in ligand_eff.to_dicts():
+        act_id: int | None = row.get("activity_id")
+        if act_id is None:
+            continue
+        molregno = act_to_mol.get(int(act_id))
+        if molregno is None or molregno in seen_mol:
+            continue
+        seen_mol.add(molregno)
+
+        mol = mols.get(molregno)
+        if not mol:
+            continue
+
+        drug = _drug_name(mol)
+        chembl_id = mol.get("chembl_id", "")
+        le = row.get("le")
+        lle = row.get("lle")
+        bei = row.get("bei")
+        sei = row.get("sei")
+
+        if le is None:
+            continue
+
+        metrics = [f"LE={le:.3f}"]
+        if lle is not None:
+            metrics.append(f"LLE={lle:.2f}")
+        if bei is not None:
+            metrics.append(f"BEI={bei:.2f}")
+        if sei is not None:
+            metrics.append(f"SEI={sei:.2f}")
+
+        le_quality = "good" if le >= 0.3 else "moderate" if le >= 0.2 else "low"
+
+        yield {
+            "text": (
+                f"### Question\nWhat is the ligand efficiency of {drug}?\n\n"
+                f"### Answer\n{drug} ({chembl_id}) has {le_quality} ligand efficiency: "
+                f"{', '.join(metrics)}. "
+                f"Ligand efficiency (LE) measures potency per heavy atom; values ≥0.3 are "
+                f"considered drug-like."
+            )
+        }
+
+
+def generate_target_sequence_qa(
+    component_sequences: pl.DataFrame,
+    target_components: pl.DataFrame,
+    target_dict: pl.DataFrame,
+) -> Iterator[dict]:
+    """Target-protein UniProt accession and organism pairs."""
+    # tid → target info
+    target_by_tid: dict[int, dict] = {
+        int(r["tid"]): r
+        for r in target_dict.select(["tid", "pref_name", "chembl_id", "organism", "target_type"]).to_dicts()
+    }
+
+    # component_id → sequence info
+    seq_by_comp: dict[int, dict] = {
+        int(r["component_id"]): r
+        for r in component_sequences.select(
+            ["component_id", "accession", "description", "organism", "sequence"]
+        ).to_dicts()
+        if r.get("accession")
+    }
+
+    for tc_row in target_components.to_dicts():
+        tid: int | None = tc_row.get("tid")
+        comp_id: int | None = tc_row.get("component_id")
+        if tid is None or comp_id is None:
+            continue
+
+        target = target_by_tid.get(int(tid))
+        seq = seq_by_comp.get(int(comp_id))
+        if not target or not seq:
+            continue
+
+        target_name = (target.get("pref_name") or "").strip()
+        target_chembl = target.get("chembl_id", "")
+        accession = (seq.get("accession") or "").strip()
+        organism = (seq.get("organism") or target.get("organism") or "").strip()
+        description = (seq.get("description") or "").strip()
+
+        if not target_name or not accession:
+            continue
+
+        yield {
+            "text": (
+                f"### Question\nWhat is the UniProt accession for {target_name}?\n\n"
+                f"### Answer\n{target_name} ({target_chembl}) has UniProt accession {accession}."
+                + (f" It is expressed in {organism}." if organism else "")
+                + (f" {description}." if description else "")
+            )
+        }
+
+        yield {
+            "text": (
+                f"### Question\nWhat organism is the drug target {target_name} from?\n\n"
+                f"### Answer\n{target_name} ({target_chembl}) is from {organism or 'an unspecified organism'}. "
+                f"UniProt: {accession}."
+            )
+        }
+
+
+def generate_protein_family_qa(
+    protein_classification: pl.DataFrame,
+    component_class: pl.DataFrame,
+    target_components: pl.DataFrame,
+    target_dict: pl.DataFrame,
+) -> Iterator[dict]:
+    """Protein family / class hierarchy pairs."""
+    target_by_tid: dict[int, dict] = {
+        int(r["tid"]): r
+        for r in target_dict.select(["tid", "pref_name", "chembl_id"]).to_dicts()
+        if r.get("pref_name")
+    }
+
+    class_by_id: dict[int, dict] = {
+        int(r["protein_class_id"]): r
+        for r in protein_classification.select(
+            ["protein_class_id", "pref_name", "short_name", "protein_class_desc", "definition"]
+        ).to_dicts()
+    }
+
+    # component_id → protein_class_id
+    comp_to_class: dict[int, int] = {
+        int(r["component_id"]): int(r["protein_class_id"])
+        for r in component_class.to_dicts()
+    }
+
+    # tid → component_id (first component only for multi-component targets)
+    tid_to_comp: dict[int, int] = {}
+    for tc in target_components.to_dicts():
+        tid_val: int | None = tc.get("tid")
+        comp_val: int | None = tc.get("component_id")
+        if tid_val is not None and comp_val is not None and int(tid_val) not in tid_to_comp:
+            tid_to_comp[int(tid_val)] = int(comp_val)
+
+    for tid, comp_id in tid_to_comp.items():
+        target = target_by_tid.get(tid)
+        class_id = comp_to_class.get(comp_id)
+        if not target or class_id is None:
+            continue
+
+        protein_class = class_by_id.get(class_id)
+        if not protein_class:
+            continue
+
+        target_name = target.get("pref_name", "")
+        target_chembl = target.get("chembl_id", "")
+        class_name = (protein_class.get("pref_name") or "").strip()
+        class_desc = (protein_class.get("protein_class_desc") or "").strip()
+        definition = (protein_class.get("definition") or "").strip()
+
+        if not class_name:
+            continue
+
+        yield {
+            "text": (
+                f"### Question\nWhat protein family does {target_name} belong to?\n\n"
+                f"### Answer\n{target_name} ({target_chembl}) belongs to the {class_name} "
+                f"protein family ({class_desc})."
+                + (f" {definition}" if definition else "")
+            )
+        }
+
+        yield {
+            "text": (
+                f"### Question\nWhat class of drug target is {target_name}?\n\n"
+                f"### Answer\n{target_name} ({target_chembl}) is classified as a {class_name}. "
+                + (f"{definition}" if definition else f"It belongs to the {class_desc} class.")
+            )
+        }
+
+
+def generate_biotherapeutic_qa(
+    biotherapeutics: pl.DataFrame,
+    molecule_dict: pl.DataFrame,
+) -> Iterator[dict]:
+    """Biologic / peptide drug pairs from the biotherapeutics table."""
+    mols = _mol_lookup(molecule_dict)
+
+    for row in biotherapeutics.to_dicts():
+        molregno: int | None = row.get("molregno")
+        if molregno is None:
+            continue
+        mol = mols.get(int(molregno))
+        if not mol:
+            continue
+
+        drug = _drug_name(mol)
+        chembl_id = mol.get("chembl_id", "")
+        description = (row.get("description") or "").strip()
+
+        yield {
+            "text": (
+                f"### Question\nIs {drug} a small molecule or a biologic?\n\n"
+                f"### Answer\n{drug} ({chembl_id}) is a biologic (large molecule) drug."
+                + (f" It is described as: {description}." if description else "")
+            )
+        }
+
+        if description:
+            yield {
+                "text": (
+                    f"### Question\nWhat type of biologic is {drug}?\n\n"
+                    f"### Answer\n{drug} ({chembl_id}) is {description}. "
+                    f"It is classified as a biotherapeutic agent in ChEMBL."
+                )
+            }
+
+
+def generate_target_relations_qa(
+    target_relations: pl.DataFrame,
+    target_dict: pl.DataFrame,
+) -> Iterator[dict]:
+    """Target hierarchy pairs (SUBSET OF / SUPERSET OF / EQUIVALENT TO)."""
+    target_by_tid: dict[int, dict] = {
+        int(r["tid"]): r
+        for r in target_dict.select(["tid", "pref_name", "chembl_id"]).to_dicts()
+        if r.get("pref_name")
+    }
+
+    for row in target_relations.filter(
+        pl.col("relationship").is_in(["SUBSET OF", "SUPERSET OF", "EQUIVALENT TO"])
+    ).to_dicts():
+        tid_a: int | None = row.get("tid")
+        tid_b: int | None = row.get("related_tid")
+        relationship: str = (row.get("relationship") or "").strip()
+        if tid_a is None or tid_b is None:
+            continue
+
+        target_a = target_by_tid.get(int(tid_a))
+        target_b = target_by_tid.get(int(tid_b))
+        if not target_a or not target_b:
+            continue
+
+        name_a = target_a.get("pref_name", "")
+        id_a = target_a.get("chembl_id", "")
+        name_b = target_b.get("pref_name", "")
+        id_b = target_b.get("chembl_id", "")
+
+        if relationship == "SUBSET OF":
+            yield {
+                "text": (
+                    f"### Question\nHow is {name_a} related to {name_b}?\n\n"
+                    f"### Answer\n{name_a} ({id_a}) is a subset of {name_b} ({id_b}). "
+                    f"Drugs targeting {name_b} may also affect {name_a}."
+                )
+            }
+        elif relationship == "SUPERSET OF":
+            yield {
+                "text": (
+                    f"### Question\nWhat targets are included in {name_a}?\n\n"
+                    f"### Answer\n{name_a} ({id_a}) is a superset that includes {name_b} ({id_b}). "
+                    f"It represents a broader target class."
+                )
+            }
+        elif relationship == "EQUIVALENT TO":
+            yield {
+                "text": (
+                    f"### Question\nAre {name_a} and {name_b} the same target?\n\n"
+                    f"### Answer\nYes, {name_a} ({id_a}) and {name_b} ({id_b}) are equivalent "
+                    f"targets in ChEMBL — they refer to the same biological entity."
+                )
+            }
+
+
+# ---------------------------------------------------------------------------
 # JSONL writer
 # ---------------------------------------------------------------------------
 
@@ -730,6 +1135,7 @@ def write_jsonl_splits(
 def build_drug_interaction_dataset(
     data_dir: Path = DATA_DIR,
     output_dir: Path = OUTPUT_DIR,
+    row_limit: int | None = None,
 ) -> None:
     """
     Build QA-formatted JSONL training data for a drug-interaction chatbot.
@@ -737,9 +1143,16 @@ def build_drug_interaction_dataset(
     Reads ChEMBL parquet files from data_dir and writes:
       output_dir/train.jsonl  (90 % of pairs)
       output_dir/valid.jsonl  (10 % of pairs)
+
+    Args:
+        data_dir:   Directory containing the ChEMBL parquet files.
+        output_dir: Directory to write train.jsonl / valid.jsonl.
+        row_limit:  Cap every table at this many rows on load.  Useful on
+                    memory-constrained machines (e.g. ``--row-limit 200000``).
+                    ``None`` (default) loads all rows.
     """
     print("Loading ChEMBL tables...")
-    tables = load_tables(data_dir)
+    tables = load_tables(data_dir, row_limit=row_limit)
 
     mol = tables.get("molecule_dictionary")
     if mol is None:
@@ -811,6 +1224,59 @@ def build_drug_interaction_dataset(
             ),
             "formulations" in tables and "products" in tables,
         ),
+        (
+            "scientific literature",
+            lambda: generate_literature_qa(tables["docs"]),
+            "docs" in tables,
+        ),
+        (
+            "assay context",
+            lambda: generate_assay_context_qa(tables["assays"], tables["activities"], mol),
+            "assays" in tables and "activities" in tables,
+        ),
+        (
+            "ligand efficiency",
+            lambda: generate_ligand_efficiency_qa(
+                tables["ligand_eff"], tables["activities"], mol
+            ),
+            "ligand_eff" in tables and "activities" in tables,
+        ),
+        (
+            "protein target sequences",
+            lambda: generate_target_sequence_qa(
+                tables["component_sequences"],
+                tables["target_components"],
+                tables["target_dictionary"],
+            ),
+            "component_sequences" in tables
+            and "target_components" in tables
+            and "target_dictionary" in tables,
+        ),
+        (
+            "protein family",
+            lambda: generate_protein_family_qa(
+                tables["protein_classification"],
+                tables["component_class"],
+                tables["target_components"],
+                tables["target_dictionary"],
+            ),
+            "protein_classification" in tables
+            and "component_class" in tables
+            and "target_components" in tables
+            and "target_dictionary" in tables,
+        ),
+        (
+            "biotherapeutics",
+            lambda: generate_biotherapeutic_qa(tables["biotherapeutics"], mol),
+            "biotherapeutics" in tables,
+        ),
+        (
+            "target relations",
+            lambda: generate_target_relations_qa(
+                tables["target_relations"], tables["target_dictionary"]
+            ),
+            "target_relations" in tables and "target_dictionary" in tables,
+        ),
     ]
 
     for label, generator_fn, enabled in _generators:
@@ -829,4 +1295,34 @@ def build_drug_interaction_dataset(
 
 
 if __name__ == "__main__":
-    build_drug_interaction_dataset()
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Build ChEMBL drug-interaction QA dataset.")
+    parser.add_argument(
+        "--data-dir",
+        type=Path,
+        default=DATA_DIR,
+        help="Directory containing ChEMBL parquet files (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=OUTPUT_DIR,
+        help="Directory to write train.jsonl / valid.jsonl (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--row-limit",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "Cap every table at N rows on load. Useful on memory-constrained "
+            "machines (e.g. --row-limit 200000). Omit to load all rows."
+        ),
+    )
+    args = parser.parse_args()
+    build_drug_interaction_dataset(
+        data_dir=args.data_dir,
+        output_dir=args.output_dir,
+        row_limit=args.row_limit,
+    )
