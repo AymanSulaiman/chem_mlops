@@ -1,5 +1,7 @@
-import polars as pl
 from pathlib import Path
+
+import polars as pl
+
 from app.scripts.load_data.load_data import ChemblDataLoader
 
 

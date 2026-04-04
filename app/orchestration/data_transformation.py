@@ -1,13 +1,14 @@
 from prefect import flow, task
+
+from app.scripts.flows.finetuning.finetuning import gemma3_chembl_toon_finetune_flow
 from app.scripts.flows.initial_data_transformation.collect_data import collect_data
 from app.scripts.flows.initial_data_transformation.transform_data import transform_data
-from app.scripts.flows.llm_finetuning_data.build_finetune_dataset import (
-    create_finetuning_dataset,
-)
 from app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset import (
     build_drug_interaction_dataset,
 )
-from app.scripts.flows.finetuning.finetuning import gemma3_chembl_toon_finetune_flow
+from app.scripts.flows.llm_finetuning_data.build_finetune_dataset import (
+    create_finetuning_dataset,
+)
 
 
 @task
@@ -37,12 +38,12 @@ def finetune_llm_task() -> None:
 
 @flow
 def chembl_pipeline(chembl_version: str = "36") -> None:
-    f1 = collect_data_task.submit(chembl_version)
-    f2 = transform_data_task.submit(chembl_version, wait_for=[f1])
+    f1 = collect_data_task.submit(chembl_version, return_state=False)  # ty: ignore[no-matching-overload]
+    f2 = transform_data_task.submit(chembl_version, return_state=False, wait_for=[f1])  # ty: ignore[no-matching-overload]
     # Build both the raw activity parquet and the QA JSONL in parallel
-    f3a = create_finetune_dataset_task.submit(wait_for=[f2])
-    f3b = build_drug_interaction_dataset_task.submit(wait_for=[f2])
-    finetune_llm_task.submit(wait_for=[f3a, f3b])
+    f3a = create_finetune_dataset_task.submit(return_state=False, wait_for=[f2])
+    f3b = build_drug_interaction_dataset_task.submit(return_state=False, wait_for=[f2])
+    finetune_llm_task.submit(return_state=False, wait_for=[f3a, f3b])
 
 
 if __name__ == "__main__":

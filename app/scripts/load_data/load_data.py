@@ -1,12 +1,13 @@
 import re
 from pathlib import Path
+
 import polars as pl
 
 
 class ChemblDataLoader:
     """Easy-to-use data loader for ChEMBL parquet files using Polars."""
 
-    def __init__(self, data_dir: str = "data/chembl_transform"):
+    def __init__(self, data_dir: str | Path = "data/chembl_transform"):
         """Initialize the data loader.
 
         Args:
@@ -162,7 +163,7 @@ class ChemblDataLoader:
         Returns:
             Polars DataFrame with sampled rows
         """
-        return self.lazy_load_table(table_name).limit(n).collect()
+        return pl.DataFrame(self.lazy_load_table(table_name).limit(n).collect())
 
     def __repr__(self) -> str:
         return f"ChemblDataLoader(data_dir='{self.data_dir}', tables={len(self.available_tables)})"

@@ -1,9 +1,9 @@
-from pathlib import Path
 import json
+import shutil
 import subprocess
 import sys
 from datetime import datetime
-import shutil
+from pathlib import Path
 
 HF_MODEL_ID = "google/gemma-3-1b-pt"
 DATA_DIR = Path("data/llm_finetune")
@@ -258,7 +258,7 @@ def gemma3_chembl_toon_finetune_flow(
     )
 
     print(f"\n{'=' * 60}")
-    print(f"Finetuning complete!")
+    print("Finetuning complete!")
     print(f"MLX model:    {mlx_model_dir}")
     print(f"LoRA adapter: {adapter_dir}")
     print(f"Training log: {log_file}")

@@ -26,12 +26,22 @@ dependencies = [
 dev = [
     "jupyterlab>=4.4.9",
     "pytest>=8.4.2",
+    "ruff>=0.15.9",
     "seaborn>=0.13.2",
+    "ty>=0.0.28",
 ]
 
 [build-system]
 requires = ["setuptools", "wheel"]
 build-backend = "setuptools.build_meta"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP"]
+ignore = ["E501"]
 
 [tool.setuptools.packages.find]
 where = ["."]

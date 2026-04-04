@@ -1,9 +1,10 @@
-import re
-import duckdb
-from duckdb import DuckDBPyConnection
 import os
+import re
 import shutil
 import sys
+
+import duckdb
+from duckdb import DuckDBPyConnection
 
 
 def transform_data(chembl_version: str = "36") -> None:
@@ -30,9 +31,10 @@ def transform_data(chembl_version: str = "36") -> None:
 
         for table in tables:
             print(f"Processing table: {table}")
-            count: int = conn.execute(
+            result = conn.execute(
                 f"SELECT COUNT(*) FROM {alias}.{table}"
-            ).fetchone()[0]
+            ).fetchone()
+            count: int = result[0] if result is not None else 0
 
             if count == 0:
                 print(f"  Table {table} is empty, skipping.")

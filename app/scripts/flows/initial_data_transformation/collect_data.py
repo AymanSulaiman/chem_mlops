@@ -1,6 +1,7 @@
 import os
-import httpx
 import tarfile
+
+import httpx
 from tqdm import tqdm
 
 # 10-second connect timeout, 5-minute read timeout for large downloads

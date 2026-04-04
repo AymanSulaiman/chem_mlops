@@ -1,23 +1,23 @@
 import json
-import pytest
-import polars as pl
-from pathlib import Path
-import tempfile
 import shutil
+import tempfile
+from pathlib import Path
+
+import polars as pl
+import pytest
 
 from app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset import (
     _drug_name,
     _mol_lookup,
     _record_to_molregno,
-    generate_mechanism_qa,
-    generate_indication_qa,
-    generate_metabolism_qa,
-    generate_ddi_qa,
-    generate_activity_qa,
-    write_jsonl_splits,
     build_drug_interaction_dataset,
+    generate_activity_qa,
+    generate_ddi_qa,
+    generate_indication_qa,
+    generate_mechanism_qa,
+    generate_metabolism_qa,
+    write_jsonl_splits,
 )
-
 
 # ---------------------------------------------------------------------------
 # Shared fixtures
@@ -732,7 +732,6 @@ class TestBuildDrugInteractionDatasetExtended:
 
     def test_more_pairs_with_all_tables(self, full_parquet_dir, tmp_path):
         """Dataset with all 14 tables should have more pairs than 7-table subset."""
-        from pathlib import Path
         import shutil
 
         # Build with all tables

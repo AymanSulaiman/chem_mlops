@@ -1,10 +1,11 @@
-import pytest
 import os
-import tempfile
 import tarfile
+import tempfile
 from pathlib import Path
-from unittest.mock import patch, mock_open, MagicMock, ANY
+from unittest.mock import ANY, MagicMock, mock_open, patch
+
 import httpx
+import pytest
 
 from app.scripts.flows.initial_data_transformation.collect_data import collect_data
 
@@ -212,7 +213,7 @@ class TestCollectData:
                 )
 
     @patch("httpx.stream")
-    @patch("builtins.open", side_effect=IOError("Disk full"))
+    @patch("builtins.open", side_effect=OSError("Disk full"))
     def test_file_write_failure(
         self, mock_open, mock_httpx_stream, temp_data_dir, mock_response
     ):

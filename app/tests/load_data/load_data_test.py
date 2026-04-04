@@ -1,9 +1,10 @@
-import pytest
-import polars as pl
-from pathlib import Path
-import tempfile
 import shutil
+import tempfile
+from pathlib import Path
 from unittest.mock import patch
+
+import polars as pl
+import pytest
 
 from app.scripts.load_data.load_data import ChemblDataLoader
 

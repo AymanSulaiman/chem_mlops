@@ -20,8 +20,8 @@ Output: data/llm_finetune/train.jsonl  (90 %)
 
 import json
 import random
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Iterator
 
 import polars as pl
 
@@ -105,7 +105,7 @@ def load_tables(data_dir: Path = DATA_DIR) -> dict[str, pl.DataFrame]:
             continue
         limit = _TABLE_ROW_LIMITS.get(name)
         if limit:
-            tables[name] = pl.scan_parquet(path).head(limit).collect()
+            tables[name] = pl.read_parquet(path, n_rows=limit)
         else:
             tables[name] = pl.read_parquet(path)
     return tables
@@ -130,7 +130,8 @@ def generate_mechanism_qa(
     }
 
     for row in drug_mechanism.to_dicts():
-        mol = mols.get(row.get("molregno"))
+        molregno: int | None = row.get("molregno")
+        mol = mols.get(molregno) if molregno is not None else None
         if not mol:
             continue
 
@@ -363,6 +364,8 @@ def generate_activity_qa(
         drug = _drug_name(mol)
         chembl_id = mol.get("chembl_id", "")
         pchembl = row.get("pchembl_value")
+        if pchembl is None:
+            continue
         std_type = row.get("standard_type") or "activity"
         std_value = row.get("standard_value")
         std_units = row.get("standard_units") or ""
@@ -451,7 +454,7 @@ def generate_synonym_qa(
         syn_type = row.get("syn_type")
         synonym = (row.get("synonyms") or "").strip()
         if molregno and synonym:
-            drug_names.setdefault(molregno, {}).setdefault(syn_type, []).append(synonym)
+            drug_names.setdefault(int(molregno), {}).setdefault(str(syn_type), []).append(synonym)
 
     for molregno, names_by_type in drug_names.items():
         mol = mols.get(molregno)
@@ -743,6 +746,9 @@ def build_drug_interaction_dataset(
         raise RuntimeError("molecule_dictionary table is required but not found")
 
     compound_records = tables.get("compound_records")
+    # Narrow to a non-None local so lambdas below pass ty's type checks.
+    # The "enabled" flag in each tuple guarantees this is only called when not None.
+    _cr: pl.DataFrame = compound_records if compound_records is not None else pl.DataFrame()
 
     all_records: list[dict] = []
 
@@ -761,12 +767,12 @@ def build_drug_interaction_dataset(
         ),
         (
             "metabolism",
-            lambda: generate_metabolism_qa(tables["metabolism"], mol, compound_records),
+            lambda: generate_metabolism_qa(tables["metabolism"], mol, _cr),
             "metabolism" in tables and compound_records is not None,
         ),
         (
             "drug-drug interactions",
-            lambda: generate_ddi_qa(tables["metabolism"], mol, compound_records),
+            lambda: generate_ddi_qa(tables["metabolism"], mol, _cr),
             "metabolism" in tables and compound_records is not None,
         ),
         (

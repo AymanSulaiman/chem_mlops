@@ -1,10 +1,10 @@
-import pytest
 import os
-import tempfile
 import shutil
-import sqlite3
+import tempfile
 from pathlib import Path
-from unittest.mock import patch, MagicMock, call
+from unittest.mock import MagicMock, patch
+
+import pytest
 
 from app.scripts.flows.initial_data_transformation.transform_data import transform_data
 
@@ -168,7 +168,7 @@ class TestTransformData:
             elif "SELECT COUNT(*)" in query:
                 result.fetchone.return_value = (100,)
             elif "COPY" in query:
-                raise IOError("Disk full")
+                raise OSError("Disk full")
             return result
 
         mock_conn.execute.side_effect = side_effect
