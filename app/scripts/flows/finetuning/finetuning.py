@@ -5,6 +5,13 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+from app.scripts.flows.finetuning.export_to_ollama import (
+    DEFAULT_MODEL_NAME as OLLAMA_MODEL_NAME,
+)
+from app.scripts.flows.finetuning.export_to_ollama import (
+    SYSTEM_PROMPT as OLLAMA_SYSTEM_PROMPT,
+)
+
 HF_MODEL_ID = "google/gemma-3-1b-pt"
 DATA_DIR = Path("data/llm_finetune")
 
@@ -59,6 +66,8 @@ def split_long_sequences(
     Resolves the mlx_lm truncation warning for sequences > 2048 tokens, which
     wastes memory on padding and causes inconsistent batch sizes on M1.
     """
+    import os
+    os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
     from transformers import AutoTokenizer
 
     print("Loading tokenizer for sequence pre-splitting...")
@@ -181,8 +190,18 @@ def finetune_lora(
     return adapter_dir
 
 
-def save_to_ollama(mlx_model_dir: Path, adapter_dir: Path, model_name: str) -> None:
-    """Fuse adapter and register model with Ollama."""
+def save_to_ollama(
+    mlx_model_dir: Path,
+    adapter_dir: Path,
+    model_name: str = OLLAMA_MODEL_NAME,
+) -> None:
+    """Fuse adapter, convert to GGUF via llama.cpp, and register with Ollama.
+
+    Uses a two-step process because mlx_lm's --export-gguf does not support
+    gemma3_text:
+      1. mlx_lm fuse --save-path  →  HuggingFace safetensors format
+      2. convert_hf_to_gguf.py    →  GGUF (F16)
+    """
     output_dir = mlx_model_dir.parent / "ollama"
 
     if output_dir.exists():
@@ -191,33 +210,39 @@ def save_to_ollama(mlx_model_dir: Path, adapter_dir: Path, model_name: str) -> N
     output_dir.mkdir(parents=True, exist_ok=True)
 
     fused_hf_dir = output_dir / "fused_hf"
+    gguf_path = output_dir / "chembl-drug-chat.gguf"
 
+    # Step 1: fuse LoRA into base model, save as HF safetensors
     _run(
         [
-            "python",
-            "-m",
-            "mlx_lm",
-            "fuse",
-            "--model",
-            str(mlx_model_dir),
-            "--adapter-path",
-            str(adapter_dir),
-            "--save-path",
-            str(fused_hf_dir),
+            "python", "-m", "mlx_lm", "fuse",
+            "--model",        str(mlx_model_dir),
+            "--adapter-path", str(adapter_dir),
+            "--save-path",    str(fused_hf_dir),
             "--de-quantize",
         ]
     )
 
+    # Step 2: convert HF safetensors → GGUF (no PyTorch needed)
+    from app.scripts.flows.finetuning.convert_gemma3_gguf import convert as _gguf_convert
+    _gguf_convert(fused_hf_dir, gguf_path)
+
     modelfile_path = output_dir / "Modelfile"
-    modelfile_path.write_text(f"""FROM {fused_hf_dir.resolve()}
-PARAMETER temperature 0.7
-PARAMETER top_p 0.9
-""")
+    modelfile_path.write_text(
+        f'FROM {gguf_path.resolve()}\n\n'
+        f'SYSTEM """\n{OLLAMA_SYSTEM_PROMPT}\n"""\n\n'
+        'TEMPLATE """'
+        '{{ if .System }}{{ .System }}\n\n{{ end }}'
+        '### Question\n{{ .Prompt }}\n\n### Answer\n"""\n\n'
+        "PARAMETER temperature 0.7\n"
+        "PARAMETER top_p 0.9\n"
+        'PARAMETER stop "### Question"\n'
+    )
 
     _run(["ollama", "create", model_name, "-f", str(modelfile_path)])
 
     print(f"\nOllama model '{model_name}' created successfully!")
-    print(f"  Test with: ollama run {model_name}")
+    print(f"  Run with: ollama run {model_name}")
 
 
 def gemma3_chembl_toon_finetune_flow(
@@ -230,8 +255,11 @@ def gemma3_chembl_toon_finetune_flow(
 
     1. Pre-split training sequences > 2048 tokens to eliminate truncation waste.
     2. Convert Gemma 3 HF model -> MLX format (4-bit quantised).
-    3. LoRA fine-tuning with gradient checkpointing, cosine LR decay, log capture.
-    4. Fuse adapter and register with Ollama.
+    3. LoRA fine-tuning with gradient checkpointing, log capture.
+
+    When run standalone, also exports the adapter to Ollama (step 4).
+    When run via the Prefect pipeline, Ollama export is handled as a
+    separate task after this flow completes.
 
     Args:
         hf_model_id: HuggingFace model ID
@@ -267,7 +295,6 @@ def gemma3_chembl_toon_finetune_flow(
     save_to_ollama(
         mlx_model_dir=mlx_model_dir,
         adapter_dir=adapter_dir,
-        model_name="chembl-toon:1b",
     )
 
 

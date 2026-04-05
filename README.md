@@ -36,7 +36,7 @@ The pipeline is orchestrated with **Prefect** and runs entirely locally.
 
 | Tool | Version |
 |------|---------|
-| Python | ≥ 3.12 |
+| Python | ≥ 3.13 |
 | [uv](https://docs.astral.sh/uv/) | any |
 | macOS + Apple Silicon | M1 / M2 / M3 |
 
@@ -59,7 +59,7 @@ uv sync
 ### Run everything
 
 ```bash
-python -m app.orchestration.data_transformation
+uv run python -m app.orchestration.data_transformation
 ```
 
 This executes the full pipeline via Prefect:
@@ -68,24 +68,70 @@ This executes the full pipeline via Prefect:
 2. Convert all tables to Parquet
 3. Build the QA JSONL dataset **and** the activity Parquet (in parallel)
 4. Fine-tune Gemma 3 1B with LoRA
+5. Fuse the LoRA adapter and register the model with Ollama
+
+### Build with the full dataset
+
+To run the complete pipeline end-to-end using **all** available ChEMBL data:
+
+```bash
+# Step 1 — Download ChEMBL (~5.6 GB, takes ~5 min on a fast connection)
+uv run python -m app.scripts.flows.initial_data_transformation.collect_data
+
+# Step 2 — Convert SQLite → Parquet for all 74 tables (~10–20 min)
+uv run python -m app.scripts.flows.initial_data_transformation.transform_data
+
+# Step 3a — Build the QA finetuning dataset from all 23 tables, no row cap
+#            (~16–24 GB RAM recommended; produces ~500 K+ training pairs)
+uv run python -m app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset
+
+# Step 3b — Build the activity Parquet dataset
+uv run python -m app.scripts.flows.llm_finetuning_data.build_finetune_dataset
+
+# Step 4 — Fine-tune Gemma 3 1B on the full dataset (~2–4 hrs on M1 Pro)
+uv run app/scripts/flows/finetuning/finetuning.py
+
+# Step 5 — Fuse adapter, export to GGUF, and register with Ollama
+uv run python -m app.scripts.flows.finetuning.export_to_ollama
+```
+
+Expected disk and time requirements:
+
+| Step | Disk | Time (approx) |
+|------|------|---------------|
+| Download ChEMBL SQLite | 5.6 GB | ~5 min |
+| Convert to Parquet | 8–10 GB | ~15 min |
+| Build QA dataset | < 1 GB output | ~30–60 min |
+| Fine-tune (1 500 iters) | ~2 GB adapter | ~2–4 hrs |
+| Export to Ollama | ~4 GB GGUF | ~5–10 min |
+
+> **Low-RAM machines:** If you have less than 16 GB of RAM, cap the table load with `--row-limit`:
+> ```bash
+> uv run python -m app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset \
+>   --row-limit 200000
+> ```
 
 ### Run steps individually
 
 ```bash
 # 1. Download ChEMBL
-python -m app.scripts.flows.initial_data_transformation.collect_data
+uv run python -m app.scripts.flows.initial_data_transformation.collect_data
 
 # 2. Transform to Parquet
-python -m app.scripts.flows.initial_data_transformation.transform_data
+uv run python -m app.scripts.flows.initial_data_transformation.transform_data
 
 # 3a. Build the QA finetuning dataset
-python -m app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset
+uv run python -m app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset
 
 # 3b. Build the activity Parquet dataset
-python -m app.scripts.flows.llm_finetuning_data.build_finetune_dataset
+uv run python -m app.scripts.flows.llm_finetuning_data.build_finetune_dataset
 
 # 4. Fine-tune
 uv run app/scripts/flows/finetuning/finetuning.py
+
+# 5. Export to Ollama and start chatting
+uv run python -m app.scripts.flows.finetuning.export_to_ollama
+ollama run chembl-drug-chat:1b
 ```
 
 ---
@@ -130,13 +176,34 @@ Each record:
 ### CLI options
 
 ```bash
-python -m app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset \
+uv run python -m app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset \
   [--data-dir PATH]       # default: data/chembl_transform
   [--output-dir PATH]     # default: data/llm_finetune
   [--row-limit N]         # cap every table at N rows (useful on low-RAM machines)
 ```
 
 The `--row-limit` flag is useful on memory-constrained machines. For example, `--row-limit 200000` limits each table to 200 K rows. Without it, all rows are loaded (the `activities` table alone has ~19 M rows).
+
+### Using all available data
+
+To build the largest possible dataset from the full ChEMBL database, run without `--row-limit`:
+
+```bash
+uv run python -m app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset
+```
+
+This loads all rows from all 23 tables. Expected scale:
+
+| Table | Rows |
+|-------|------|
+| `activities` | ~19 M |
+| `docs` | ~99 K |
+| `assays` | ~1.5 M |
+| `molecule_dictionary` | ~2.4 M |
+| `compound_properties` | ~2.3 M |
+| other tables | < 200 K each |
+
+> **Memory requirement:** ~16–24 GB of RAM is recommended. On an M1 Pro with 32 GB unified memory this runs comfortably. On machines with less RAM, use `--row-limit` to cap the load (e.g. `--row-limit 500000`).
 
 ---
 
@@ -170,7 +237,87 @@ artifacts/20260403_220717/
 
 ---
 
-## Project structure
+## Loading into Ollama
+
+After fine-tuning, you can serve the model locally via [Ollama](https://ollama.com).
+
+### 1. Install Ollama
+
+```bash
+brew install ollama
+```
+
+### 2. Export to Ollama
+
+The export script handles everything — it fuses the LoRA adapter into the base model,
+converts to GGUF via llama.cpp's conversion script (downloaded automatically on first run),
+writes a Modelfile with the system prompt, and registers the model with Ollama.
+
+**Auto-detect the latest run:**
+
+```bash
+uv run python -m app.scripts.flows.finetuning.export_to_ollama
+```
+
+**Target a specific run:**
+
+```bash
+uv run python -m app.scripts.flows.finetuning.export_to_ollama \
+  --run-dir artifacts/20260403_220717
+```
+
+**Options:**
+
+```
+--run-dir PATH        Run directory to export (default: latest in artifacts/)
+--model-name NAME     Ollama model name (default: chembl-drug-chat:1b)
+--force               Overwrite an existing export
+```
+
+The script runs 4 steps:
+
+1. `mlx_lm fuse --save-path` — merge LoRA adapter into base model (HF safetensors)
+2. `convert_hf_to_gguf.py` — convert to GGUF F16 (script fetched from llama.cpp on first run)
+3. Write `Modelfile` — system prompt + sampling parameters
+4. `ollama create` — register with Ollama
+
+The script produces:
+
+```
+artifacts/<timestamp>/mlx/ollama/
+├── fused_hf/                   # merged HF safetensors (intermediate)
+├── chembl-drug-chat.gguf       # final GGUF model
+└── Modelfile                   # system prompt + sampling parameters
+```
+
+> **Note:** The llama.cpp conversion script is downloaded once to
+> `~/.cache/chem_mlops/convert_hf_to_gguf.py` and reused on subsequent runs.
+
+### 3. Chat
+
+```bash
+ollama run chembl-drug-chat:1b
+```
+
+Example questions:
+
+```
+>>> What does Aspirin target?
+>>> How is Warfarin metabolised?
+>>> What are the black box warnings for Methotrexate?
+>>> Which drugs share the CYP2C9 metabolic pathway with Warfarin?
+>>> What is the ligand efficiency of Imatinib?
+>>> Is Adalimumab a small molecule or a biologic?
+```
+
+### Updating after a new fine-tuning run
+
+```bash
+uv run python -m app.scripts.flows.finetuning.export_to_ollama --force
+```
+
+This re-fuses from the latest artifact and replaces the existing Ollama model.
+
 
 ```
 chem_mlops/
@@ -186,7 +333,8 @@ chem_mlops/
 │       │   │   ├── build_drug_interaction_dataset.py  # 17-category QA builder
 │       │   │   └── build_finetune_dataset.py          # Activity Parquet → JSONL
 │       │   └── finetuning/
-│       │       └── finetuning.py       # MLX LoRA fine-tuning
+│       │       ├── finetuning.py       # MLX LoRA fine-tuning + Ollama export
+│       │       └── export_to_ollama.py # Standalone: export any run to Ollama
 │       └── load_data/
 │           └── load_data.py            # ChemblDataLoader helper
 ├── data/
@@ -205,13 +353,13 @@ chem_mlops/
 
 ```bash
 # Run tests
-.venv/bin/pytest
+uv run pytest
 
 # Lint
-.venv/bin/ruff check .
+uv run ruff check .
 
 # Type check
-.venv/bin/ty check
+uv run ty check
 ```
 
 All three must pass with zero errors before merging.
