@@ -232,11 +232,19 @@ def save_to_ollama(
         f'FROM {gguf_path.resolve()}\n\n'
         f'SYSTEM """\n{OLLAMA_SYSTEM_PROMPT}\n"""\n\n'
         'TEMPLATE """'
-        '{{ if .System }}{{ .System }}\n\n{{ end }}'
-        '### Question\n{{ .Prompt }}\n\n### Answer\n"""\n\n'
+        '{{- if .System }}{{ .System }}\n\n{{ end -}}'
+        '{{- range .Messages -}}'
+        '{{- if eq .Role "user" }}### Question\n{{ .Content }}\n\n### Answer\n'
+        '{{- else if eq .Role "assistant" }}{{ .Content }}\n\n{{ end -}}'
+        '{{- end -}}"""\n\n'
         "PARAMETER temperature 0.7\n"
         "PARAMETER top_p 0.9\n"
+        "PARAMETER repeat_penalty 1.5\n"   # raised from 1.3 — harder penalty for repetition
+        "PARAMETER repeat_last_n 512\n"    # raised from 256 — catches longer repeated phrases
+        "PARAMETER num_ctx 1024\n"   # reduced from 2048 — limits context carry-over
+        "PARAMETER num_predict 300\n"  # reduced from 400 — shorter, less rambling
         'PARAMETER stop "### Question"\n'
+        'PARAMETER stop "### Answer"\n'
     )
 
     _run(["ollama", "create", model_name, "-f", str(modelfile_path)])

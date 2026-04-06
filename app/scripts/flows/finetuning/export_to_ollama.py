@@ -33,10 +33,23 @@ DEFAULT_ADAPTER_SUBDIR = "adapters/gemma3-1b-pt-chembl-toon"
 DEFAULT_MODEL_NAME = "chembl-drug-chat:1b"
 
 SYSTEM_PROMPT = """\
-You are a chemistry and pharmacology assistant with expert knowledge of drug \
-interactions, mechanisms of action, pharmacokinetics, and clinical pharmacology. \
-Your knowledge is sourced from the ChEMBL database. Answer questions clearly \
-and cite ChEMBL identifiers where relevant.\
+You are ChEMBL Drug Chat, a conversational pharmacology assistant specialising in \
+drug-drug interactions, mechanisms of action, and clinical pharmacology. \
+Your knowledge comes from the ChEMBL database.
+
+Rules:
+- Greetings ("hi", "hello", "hey"): respond with a short, friendly introduction. \
+Do NOT mention specific compounds.
+- Capability questions ("what can you do", "help", "tell me what you can do"): list \
+your topic areas briefly. Do NOT reference compounds from earlier in the conversation.
+- Drug interaction questions: name the shared metabolic enzyme (e.g. CYP3A4), explain \
+what competition for that enzyme means for plasma levels, and state the clinical risk. \
+Be specific — do not use vague filler like "consult guidelines" as your main answer.
+- If you don't have data on a specific drug pair, say so clearly: \
+"I don't have specific interaction data for that pair in ChEMBL."
+- Do NOT repeat sentences or phrases you have already written in this response.
+- Do not role-play as a doctor, pharmacist, or any other professional.
+- If a question is off-topic, say so in one sentence and offer to help with a drug question.\
 """
 
 
@@ -133,12 +146,23 @@ def export_to_ollama(
     modelfile_path.write_text(
         f'FROM {gguf_path.resolve()}\n\n'
         f'SYSTEM """\n{SYSTEM_PROMPT}\n"""\n\n'
+        # Multi-turn template: each user message is wrapped in ### Question / ### Answer
+        # so the model sees the exact format it was trained on, while Ollama passes the
+        # full conversation history via .Messages on every turn.
         'TEMPLATE """'
-        '{{ if .System }}{{ .System }}\n\n{{ end }}'
-        '### Question\n{{ .Prompt }}\n\n### Answer\n"""\n\n'
+        '{{- if .System }}{{ .System }}\n\n{{ end -}}'
+        '{{- range .Messages -}}'
+        '{{- if eq .Role "user" }}### Question\n{{ .Content }}\n\n### Answer\n'
+        '{{- else if eq .Role "assistant" }}{{ .Content }}\n\n{{ end -}}'
+        '{{- end -}}"""\n\n'
         "PARAMETER temperature 0.7\n"
         "PARAMETER top_p 0.9\n"
+        "PARAMETER repeat_penalty 1.5\n"   # raised from 1.3 — harder penalty for repetition
+        "PARAMETER repeat_last_n 512\n"    # raised from 256 — catches longer repeated phrases
+        "PARAMETER num_ctx 1024\n"   # reduced from 2048 — limits context carry-over
+        "PARAMETER num_predict 300\n"  # reduced from 400 — shorter, less rambling
         'PARAMETER stop "### Question"\n'
+        'PARAMETER stop "### Answer"\n'
     )
     print(f"  Written to {modelfile_path}")
 

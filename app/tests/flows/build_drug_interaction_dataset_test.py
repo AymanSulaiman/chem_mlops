@@ -262,8 +262,8 @@ def test_ddi_qa_max_pairs_respected(metabolism, molecule_dict, compound_records)
     pairs = list(
         generate_ddi_qa(metabolism, molecule_dict, compound_records, max_pairs=1)
     )
-    # max_pairs=1 yields at most 2 records (2 QA variants per pair)
-    assert len(pairs) <= 2
+    # max_pairs=1 yields at most 6 records (6 QA variants per pair)
+    assert len(pairs) <= 6
 
 
 def test_ddi_qa_only_named_drugs(metabolism, molecule_dict, compound_records):

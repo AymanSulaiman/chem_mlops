@@ -37,7 +37,8 @@ OUTPUT_DIR = Path("data/llm_finetune")
 
 TRAIN_RATIO = 0.9
 RANDOM_SEED = 42
-MAX_DDI_PAIRS = 5_000
+MAX_DDI_PAIRS = 50_000   # raised from 5 K — DDI pairs are the primary focus
+MAX_ASSAY_PAIRS = 5_000  # cap assay-context questions; they dominated the old dataset
 _REQUIRED_TABLES = {
     "molecule_dictionary",
     "drug_mechanism",
@@ -72,7 +73,14 @@ _REQUIRED_TABLES = {
 
 
 def _drug_name(mol: dict) -> str:
-    return mol.get("pref_name") or mol.get("chembl_id") or "Unknown"
+    name = mol.get("pref_name")
+    if name:
+        # Reject purely numeric names (compound numbers from papers, e.g. "1", "17")
+        # and known junk placeholders from ChEMBL automated nomenclature
+        stripped = name.strip()
+        if stripped.isdigit() or stripped.upper().startswith("AUTONOM"):
+            name = None
+    return name or mol.get("chembl_id") or "Unknown"
 
 
 def _mol_lookup(molecule_dict: pl.DataFrame) -> dict[int, dict]:
@@ -280,7 +288,7 @@ def generate_ddi_qa(
 
     Two drugs that share a CYP enzyme compete for metabolism; co-administration
     may raise or lower plasma levels of either drug.
-    Only named drugs (pref_name set) are included to keep outputs readable.
+    Only named drugs with valid pref_name are included to keep outputs readable.
     """
     mols = {
         row["molregno"]: row
@@ -288,6 +296,8 @@ def generate_ddi_qa(
             ["molregno", "pref_name", "chembl_id"]
         ).to_dicts()
         if row.get("pref_name")
+        and not row["pref_name"].strip().isdigit()
+        and not row["pref_name"].strip().upper().startswith("AUTONOM")
     }
     rec_to_mol = _record_to_molregno(compound_records)
 
@@ -326,25 +336,47 @@ def generate_ddi_qa(
                 name_a, id_a = _drug_name(mol_a), mol_a.get("chembl_id", "")
                 name_b, id_b = _drug_name(mol_b), mol_b.get("chembl_id", "")
 
-                yield {
-                    "text": (
-                        f"### Question\nCan {name_a} and {name_b} be safely co-administered?\n\n"
-                        f"### Answer\nCaution is advised when co-administering {name_a} ({id_a}) "
-                        f"and {name_b} ({id_b}), as both are substrates of {enzyme}. "
-                        f"Competition for this enzyme may alter the plasma concentrations of "
-                        f"either drug, potentially affecting efficacy or increasing toxicity risk. "
-                        f"Always consult prescribing guidelines and consider therapeutic drug monitoring."
-                    )
-                }
+                shared_pathway = (
+                    f"Both {name_a} ({id_a}) and {name_b} ({id_b}) are metabolised "
+                    f"by {enzyme}. When taken together, they compete for this enzyme, "
+                    f"which can raise or lower the plasma concentration of either drug — "
+                    f"potentially reducing efficacy or increasing toxicity risk."
+                )
 
-                yield {
-                    "text": (
-                        f"### Question\nWhat is the drug interaction between {name_a} and {name_b}?\n\n"
-                        f"### Answer\n{name_a} and {name_b} share a common metabolic pathway "
-                        f"via {enzyme}. When co-administered, competition for {enzyme} may increase "
-                        f"or decrease plasma levels of one or both drugs."
-                    )
-                }
+                # Six varied natural-language question forms per pair — no filler
+                # phrases like "Consult guidelines" so the model learns to give
+                # specific answers rather than vague boilerplate.
+                yield {"text": (
+                    f"### Question\nCan {name_a} and {name_b} be safely co-administered?\n\n"
+                    f"### Answer\nUse caution. {shared_pathway} "
+                    f"Monitor plasma levels if both drugs are prescribed together."
+                )}
+                yield {"text": (
+                    f"### Question\nWhat is the drug interaction between {name_a} and {name_b}?\n\n"
+                    f"### Answer\n{name_a} and {name_b} share the {enzyme} metabolic pathway. "
+                    f"Co-administration creates competition for {enzyme}, which may increase "
+                    f"or decrease plasma levels of one or both drugs."
+                )}
+                yield {"text": (
+                    f"### Question\nTell me about the interaction between {name_a} and {name_b}.\n\n"
+                    f"### Answer\n{shared_pathway}"
+                )}
+                yield {"text": (
+                    f"### Question\nWhat happens if I take {name_a} and {name_b} together?\n\n"
+                    f"### Answer\nTaking {name_a} and {name_b} together can affect how each drug "
+                    f"is processed by the body. {shared_pathway}"
+                )}
+                yield {"text": (
+                    f"### Question\nIs it safe to combine {name_a} with {name_b}?\n\n"
+                    f"### Answer\nThis combination requires care. {shared_pathway} "
+                    f"Dose adjustment may be needed."
+                )}
+                yield {"text": (
+                    f"### Question\nDoes {name_a} interact with {name_b}?\n\n"
+                    f"### Answer\nYes — {name_a} ({id_a}) and {name_b} ({id_b}) both rely on "
+                    f"{enzyme} for metabolism. Taking them together may alter plasma levels "
+                    f"of either drug."
+                )}
 
                 pair_count += 1
 
@@ -360,6 +392,8 @@ def generate_activity_qa(
             ["molregno", "pref_name", "chembl_id"]
         ).to_dicts()
         if row.get("pref_name")
+        and not row["pref_name"].strip().isdigit()
+        and not row["pref_name"].strip().upper().startswith("AUTONOM")
     }
 
     for row in activities.filter(pl.col("pchembl_value").is_not_null()).to_dicts():
@@ -511,6 +545,8 @@ def generate_physicochemical_qa(
         row["molregno"]: row
         for row in molecule_dict.select(["molregno", "pref_name", "chembl_id"]).to_dicts()
         if row.get("pref_name")
+        and not row["pref_name"].strip().isdigit()
+        and not row["pref_name"].strip().upper().startswith("AUTONOM")
     }
 
     for row in compound_properties.to_dicts():
@@ -758,6 +794,8 @@ def generate_assay_context_qa(
         row["molregno"]: row
         for row in molecule_dict.select(["molregno", "pref_name", "chembl_id"]).to_dicts()
         if row.get("pref_name")
+        and not row["pref_name"].strip().isdigit()
+        and not row["pref_name"].strip().upper().startswith("AUTONOM")
     }
 
     assay_lookup: dict[int, dict] = {
@@ -766,7 +804,10 @@ def generate_assay_context_qa(
     }
 
     seen: set[tuple[int, int]] = set()
+    count = 0
     for act_row in activities.to_dicts():
+        if count >= MAX_ASSAY_PAIRS:
+            break
         molregno: int | None = act_row.get("molregno")
         assay_id: int | None = act_row.get("assay_id")
         if molregno is None or assay_id is None:
@@ -807,6 +848,7 @@ def generate_assay_context_qa(
                 f"### Answer\n{drug} ({chembl_id}) was tested in a {context_str}: {desc}"
             ).strip()
         }
+        count += 1
 
 
 def generate_ligand_efficiency_qa(
@@ -819,6 +861,8 @@ def generate_ligand_efficiency_qa(
         row["molregno"]: row
         for row in molecule_dict.select(["molregno", "pref_name", "chembl_id"]).to_dicts()
         if row.get("pref_name")
+        and not row["pref_name"].strip().isdigit()
+        and not row["pref_name"].strip().upper().startswith("AUTONOM")
     }
 
     # activity_id → molregno
@@ -1101,6 +1145,92 @@ def generate_target_relations_qa(
 # ---------------------------------------------------------------------------
 
 
+def generate_greeting_qa() -> Iterator[dict]:
+    """Conversational openers, capability questions, and out-of-scope redirects.
+
+    These pairs teach the model how to greet users, describe what it can do,
+    and politely redirect off-topic queries — without requiring ChEMBL data.
+    """
+    intro = (
+        "Hi! I'm ChEMBL Drug Chat, a pharmacology assistant specialising in "
+        "drug interactions, mechanisms of action, and clinical pharmacology. "
+        "My knowledge comes from the ChEMBL database. "
+        "Ask me something like \"Does ibuprofen interact with warfarin?\" or "
+        "\"How is metformin metabolised?\""
+    )
+
+    capabilities = (
+        "I can help you with:\n"
+        "• Drug-drug interactions — which drug pairs share metabolic pathways "
+        "and what risks that creates\n"
+        "• Mechanisms of action — how a drug works at the molecular level\n"
+        "• Metabolic pathways — which enzymes (e.g. CYP3A4) process a drug\n"
+        "• Drug indications and therapeutic use\n"
+        "• Pharmacokinetic properties — potency, bioavailability, half-life\n"
+        "• Drug warnings and safety alerts from the ChEMBL database\n\n"
+        "Try asking: \"Tell me about the interaction between ibuprofen and warfarin.\""
+    )
+
+    redirect = (
+        "That's outside my area of expertise. I specialise in drug interactions, "
+        "mechanisms of action, and pharmacology data from the ChEMBL database. "
+        "Feel free to ask me about a specific drug or drug combination!"
+    )
+
+    no_data = (
+        "I don't have specific interaction data for that drug pair in the ChEMBL database. "
+        "My interaction knowledge is based on shared CYP metabolic pathways. "
+        "Try asking about a pair like ibuprofen and warfarin, or metformin and amlodipine."
+    )
+
+    role_play = (
+        "I'm ChEMBL Drug Chat — I can only answer as a pharmacology assistant. "
+        "I'm not able to role-play as a doctor or other professional. "
+        "Ask me a drug interaction or pharmacology question and I'll do my best!"
+    )
+
+    greetings = [
+        ("hi", intro),
+        ("hello", intro),
+        ("hey", intro),
+        ("hi there", intro),
+        ("hello there", intro),
+        ("good morning", intro),
+        ("good afternoon", intro),
+        ("what can you do?", capabilities),
+        ("what can you help me with?", capabilities),
+        ("what do you know about?", capabilities),
+        ("help", capabilities),
+        ("what are your capabilities?", capabilities),
+        ("what is this chatbot for?", capabilities),
+        ("how can you help me?", capabilities),
+        ("what do you specialise in?", capabilities),
+        ("what topics do you cover?", capabilities),
+        ("tell me what you can do", capabilities),
+        ("can you tell me the weather?", redirect),
+        ("who won the world cup?", redirect),
+        ("what is the meaning of life?", redirect),
+        ("tell me a joke", redirect),
+        ("write me a poem", redirect),
+        # Teach "I don't know" over hallucinated filler
+        ("what is the interaction between prozac and alcohol?", no_data),
+        ("does caffeine interact with aspirin?", no_data),
+        ("tell me about the interaction between vitamin c and zinc", no_data),
+        # Role-play refusal
+        ("pretend you are a doctor", role_play),
+        ("act as a medical professional", role_play),
+        ("you are now a pharmacist, advise me", role_play),
+    ]
+
+    for question, answer in greetings:
+        yield {
+            "text": (
+                f"### Question\n{question}\n\n"
+                f"### Answer\n{answer}"
+            )
+        }
+
+
 def write_jsonl_splits(
     records: list[dict],
     output_dir: Path,
@@ -1166,6 +1296,11 @@ def build_drug_interaction_dataset(
     all_records: list[dict] = []
 
     _generators = [
+        (
+            "greetings & capabilities",
+            generate_greeting_qa,
+            True,  # no external data needed
+        ),
         (
             "mechanism-of-action",
             lambda: generate_mechanism_qa(
