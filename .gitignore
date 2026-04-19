@@ -210,3 +210,5 @@ data
 artifacts
 llama.cpp
 fused_model
+web/node_modules/
+web/.bun/
