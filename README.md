@@ -28,7 +28,7 @@ build_drug_interaction_dataset    create_finetuning_dataset
               Gemma 3 1B-PT → adapter
 ```
 
-The pipeline is orchestrated with **Prefect** and runs entirely locally.
+The pipeline is orchestrated with **Dagster** and runs entirely locally.
 
 ---
 
@@ -56,13 +56,21 @@ uv sync
 
 ## Pipeline
 
-### Run everything
+### Start the Dagster UI
+
+```bash
+dagster dev -w deployments/workspace.yaml
+```
+
+Open [http://localhost:3000](http://localhost:3000) to browse ops, trigger runs, and inspect logs. The `chembl_pipeline` job is pre-configured with a daily midnight UTC schedule.
+
+### Run everything (headless)
 
 ```bash
 uv run python -m app.orchestration.data_transformation
 ```
 
-This executes the full pipeline via Prefect:
+This executes the full pipeline via Dagster:
 
 1. Download ChEMBL SQLite archive
 2. Convert all tables to Parquet
@@ -323,7 +331,7 @@ This re-fuses from the latest artifact and replaces the existing Ollama model.
 chem_mlops/
 ├── app/
 │   ├── orchestration/
-│   │   └── data_transformation.py      # Prefect pipeline DAG
+│   │   └── data_transformation.py      # Dagster pipeline (@op / @graph / Definitions)
 │   └── scripts/
 │       ├── flows/
 │       │   ├── initial_data_transformation/
@@ -341,7 +349,7 @@ chem_mlops/
 │   ├── chembl_transform/               # Parquet files (one per table)
 │   └── llm_finetune/                   # train.jsonl / valid.jsonl
 ├── deployments/
-│   └── chembl_pipeline_deployments.yaml
+│   └── workspace.yaml                  # Dagster code-location config
 ├── notebooks/                          # Exploratory data analysis
 ├── artifacts/                          # Fine-tuning run outputs
 └── pyproject.toml

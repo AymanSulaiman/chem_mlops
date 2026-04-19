@@ -50,9 +50,9 @@ def join_tables(
         "standard_inchi_key",
     ]
 
-    joined = activities.join(
-        molecule_dict.select(mol_cols), on="molregno", how="inner"
-    ).join(compound_structures.select(struct_cols), on="molregno", how="left")
+    joined = activities.join(molecule_dict.select(mol_cols), on="molregno", how="inner").join(
+        compound_structures.select(struct_cols), on="molregno", how="left"
+    )
 
     print("Joined dataframe:", joined.shape)
     return joined

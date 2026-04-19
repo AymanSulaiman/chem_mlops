@@ -16,12 +16,12 @@ HF_MODEL_ID = "google/gemma-3-1b-pt"
 DATA_DIR = Path("data/llm_finetune")
 
 # M1 Pro / 32 GB unified memory — tuned for ~22 GB peak with grad checkpointing
-BATCH_SIZE = 4        # was 2; safe after --grad-checkpoint frees ~30% peak memory
-NUM_LAYERS = 16       # was 8; Gemma 3 1B has 18 layers — more LoRA coverage
+BATCH_SIZE = 4  # was 2; safe after --grad-checkpoint frees ~30% peak memory
+NUM_LAYERS = 16  # was 8; Gemma 3 1B has 18 layers — more LoRA coverage
 ITERS = 1500
 LEARNING_RATE = 1e-5
 MAX_SEQ_LEN = 2048
-STEPS_PER_REPORT = 25   # was 1; reduces per-iteration I/O overhead
+STEPS_PER_REPORT = 25  # was 1; reduces per-iteration I/O overhead
 STEPS_PER_EVAL = 200
 SAVE_EVERY = 500
 
@@ -67,6 +67,7 @@ def split_long_sequences(
     wastes memory on padding and causes inconsistent batch sizes on M1.
     """
     import os
+
     os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
     from transformers import AutoTokenizer
 
@@ -78,11 +79,7 @@ def split_long_sequences(
         if not jsonl_path.exists():
             continue
 
-        records = [
-            json.loads(line)
-            for line in jsonl_path.read_text().splitlines()
-            if line.strip()
-        ]
+        records = [json.loads(line) for line in jsonl_path.read_text().splitlines() if line.strip()]
         output: list[dict] = []
         long_count = 0
 
@@ -174,7 +171,7 @@ def finetune_lora(
             str(learning_rate),
             "--max-seq-length",
             str(max_seq_len),
-            "--grad-checkpoint",        # ~30% lower peak memory -> fits batch_size=4
+            "--grad-checkpoint",  # ~30% lower peak memory -> fits batch_size=4
             "--adapter-path",
             str(adapter_dir),
             "--steps-per-report",
@@ -215,33 +212,40 @@ def save_to_ollama(
     # Step 1: fuse LoRA into base model, save as HF safetensors
     _run(
         [
-            "python", "-m", "mlx_lm", "fuse",
-            "--model",        str(mlx_model_dir),
-            "--adapter-path", str(adapter_dir),
-            "--save-path",    str(fused_hf_dir),
+            "python",
+            "-m",
+            "mlx_lm",
+            "fuse",
+            "--model",
+            str(mlx_model_dir),
+            "--adapter-path",
+            str(adapter_dir),
+            "--save-path",
+            str(fused_hf_dir),
             "--de-quantize",
         ]
     )
 
     # Step 2: convert HF safetensors → GGUF (no PyTorch needed)
     from app.scripts.flows.finetuning.convert_gemma3_gguf import convert as _gguf_convert
+
     _gguf_convert(fused_hf_dir, gguf_path)
 
     modelfile_path = output_dir / "Modelfile"
     modelfile_path.write_text(
-        f'FROM {gguf_path.resolve()}\n\n'
+        f"FROM {gguf_path.resolve()}\n\n"
         f'SYSTEM """\n{OLLAMA_SYSTEM_PROMPT}\n"""\n\n'
         'TEMPLATE """'
-        '{{- if .System }}{{ .System }}\n\n{{ end -}}'
-        '{{- range .Messages -}}'
+        "{{- if .System }}{{ .System }}\n\n{{ end -}}"
+        "{{- range .Messages -}}"
         '{{- if eq .Role "user" }}### Question\n{{ .Content }}\n\n### Answer\n'
         '{{- else if eq .Role "assistant" }}{{ .Content }}\n\n{{ end -}}'
         '{{- end -}}"""\n\n'
         "PARAMETER temperature 0.7\n"
         "PARAMETER top_p 0.9\n"
-        "PARAMETER repeat_penalty 1.5\n"   # raised from 1.3 — harder penalty for repetition
-        "PARAMETER repeat_last_n 512\n"    # raised from 256 — catches longer repeated phrases
-        "PARAMETER num_ctx 1024\n"   # reduced from 2048 — limits context carry-over
+        "PARAMETER repeat_penalty 1.5\n"  # raised from 1.3 — harder penalty for repetition
+        "PARAMETER repeat_last_n 512\n"  # raised from 256 — catches longer repeated phrases
+        "PARAMETER num_ctx 1024\n"  # reduced from 2048 — limits context carry-over
         "PARAMETER num_predict 300\n"  # reduced from 400 — shorter, less rambling
         'PARAMETER stop "### Question"\n'
         'PARAMETER stop "### Answer"\n'
@@ -289,9 +293,7 @@ def gemma3_chembl_toon_finetune_flow(
 
     split_long_sequences(Path(data_dir), hf_model_id)
     mlx_model_dir = convert_to_mlx(hf_model_id, mlx_model_dir)
-    adapter_dir = finetune_lora(
-        mlx_model_dir, adapter_dir, Path(data_dir), log_file=log_file
-    )
+    adapter_dir = finetune_lora(mlx_model_dir, adapter_dir, Path(data_dir), log_file=log_file)
 
     print(f"\n{'=' * 60}")
     print("Finetuning complete!")

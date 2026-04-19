@@ -20,9 +20,7 @@ def collect_data(chembl_version: str = "36") -> None:
             total_size = int(r.headers.get("content-length", 0) or 0)
             with (
                 open(archive_path, "wb") as f,
-                tqdm(
-                    total=total_size, unit="B", unit_scale=True, desc="Downloading"
-                ) as pbar,
+                tqdm(total=total_size, unit="B", unit_scale=True, desc="Downloading") as pbar,
             ):
                 for chunk in r.iter_bytes(chunk_size=8192):
                     f.write(chunk)

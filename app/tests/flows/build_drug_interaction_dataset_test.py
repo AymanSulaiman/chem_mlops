@@ -251,17 +251,13 @@ def test_ddi_qa_no_duplicate_pairs(metabolism, molecule_dict, compound_records):
     pairs = list(generate_ddi_qa(metabolism, molecule_dict, compound_records))
     # Each drug pair should appear at most once across the two pair types per enzyme
     drug_pair_questions = [
-        p["text"].split("\n\n")[0]
-        for p in pairs
-        if "co-administered" in p["text"]
+        p["text"].split("\n\n")[0] for p in pairs if "co-administered" in p["text"]
     ]
     assert len(drug_pair_questions) == len(set(drug_pair_questions))
 
 
 def test_ddi_qa_max_pairs_respected(metabolism, molecule_dict, compound_records):
-    pairs = list(
-        generate_ddi_qa(metabolism, molecule_dict, compound_records, max_pairs=1)
-    )
+    pairs = list(generate_ddi_qa(metabolism, molecule_dict, compound_records, max_pairs=1))
     # max_pairs=1 yields at most 6 records (6 QA variants per pair)
     assert len(pairs) <= 6
 
@@ -358,17 +354,13 @@ class TestBuildDrugInteractionDataset:
 
     def test_creates_train_and_valid(self, parquet_data_dir, tmp_path):
         output_dir = tmp_path / "output"
-        build_drug_interaction_dataset(
-            data_dir=parquet_data_dir, output_dir=output_dir
-        )
+        build_drug_interaction_dataset(data_dir=parquet_data_dir, output_dir=output_dir)
         assert (output_dir / "train.jsonl").exists()
         assert (output_dir / "valid.jsonl").exists()
 
     def test_all_records_are_valid_json(self, parquet_data_dir, tmp_path):
         output_dir = tmp_path / "output"
-        build_drug_interaction_dataset(
-            data_dir=parquet_data_dir, output_dir=output_dir
-        )
+        build_drug_interaction_dataset(data_dir=parquet_data_dir, output_dir=output_dir)
         for fname in ("train.jsonl", "valid.jsonl"):
             for line in (output_dir / fname).read_text().splitlines():
                 obj = json.loads(line)
@@ -382,9 +374,7 @@ class TestBuildDrugInteractionDataset:
         # Write a dummy parquet so ChemblDataLoader doesn't raise FileNotFoundError
         pl.DataFrame({"x": [1]}).write_parquet(empty_dir / "dummy.parquet")
         with pytest.raises(RuntimeError, match="molecule_dictionary"):
-            build_drug_interaction_dataset(
-                data_dir=empty_dir, output_dir=tmp_path / "out"
-            )
+            build_drug_interaction_dataset(data_dir=empty_dir, output_dir=tmp_path / "out")
 
 
 # ---------------------------------------------------------------------------
@@ -516,6 +506,7 @@ def test_drug_warning_qa_produces_pairs(drug_warning, molecule_dict):
     from app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset import (
         generate_drug_warning_qa,
     )
+
     pairs = list(generate_drug_warning_qa(drug_warning, molecule_dict))
     assert len(pairs) > 0
 
@@ -524,6 +515,7 @@ def test_drug_warning_qa_black_box_pair(drug_warning, molecule_dict):
     from app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset import (
         generate_drug_warning_qa,
     )
+
     pairs = list(generate_drug_warning_qa(drug_warning, molecule_dict))
     texts = " ".join(p["text"] for p in pairs)
     assert "Black Box Warning" in texts
@@ -534,12 +526,19 @@ def test_drug_warning_qa_skips_unknown_molregno(molecule_dict):
     from app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset import (
         generate_drug_warning_qa,
     )
-    bad = pl.DataFrame({
-        "molregno": [999], "warning_type": ["Withdrawal"],
-        "warning_class": ["x"], "warning_country": ["USA"],
-        "warning_year": [2000], "efo_term": [None],
-        "efo_id": [None], "efo_id_for_warning_class": [None],
-    })
+
+    bad = pl.DataFrame(
+        {
+            "molregno": [999],
+            "warning_type": ["Withdrawal"],
+            "warning_class": ["x"],
+            "warning_country": ["USA"],
+            "warning_year": [2000],
+            "efo_term": [None],
+            "efo_id": [None],
+            "efo_id_for_warning_class": [None],
+        }
+    )
     assert list(generate_drug_warning_qa(bad, molecule_dict)) == []
 
 
@@ -552,6 +551,7 @@ def test_synonym_qa_produces_pairs(molecule_synonyms, molecule_dict):
     from app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset import (
         generate_synonym_qa,
     )
+
     pairs = list(generate_synonym_qa(molecule_synonyms, molecule_dict))
     assert len(pairs) > 0
 
@@ -560,6 +560,7 @@ def test_synonym_qa_trade_name_pair(molecule_synonyms, molecule_dict):
     from app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset import (
         generate_synonym_qa,
     )
+
     pairs = list(generate_synonym_qa(molecule_synonyms, molecule_dict))
     texts = " ".join(p["text"] for p in pairs)
     assert "Bayer Aspirin" in texts
@@ -570,6 +571,7 @@ def test_synonym_qa_inn_pair(molecule_synonyms, molecule_dict):
     from app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset import (
         generate_synonym_qa,
     )
+
     pairs = list(generate_synonym_qa(molecule_synonyms, molecule_dict))
     texts = " ".join(p["text"] for p in pairs)
     assert "INN" in texts or "generic" in texts.lower()
@@ -584,6 +586,7 @@ def test_physicochemical_qa_produces_pairs(compound_properties, molecule_dict):
     from app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset import (
         generate_physicochemical_qa,
     )
+
     pairs = list(generate_physicochemical_qa(compound_properties, molecule_dict))
     assert len(pairs) > 0
 
@@ -592,6 +595,7 @@ def test_physicochemical_qa_contains_mw(compound_properties, molecule_dict):
     from app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset import (
         generate_physicochemical_qa,
     )
+
     pairs = list(generate_physicochemical_qa(compound_properties, molecule_dict))
     texts = " ".join(p["text"] for p in pairs)
     assert "MW=" in texts
@@ -602,13 +606,26 @@ def test_physicochemical_qa_skips_null_mw(molecule_dict):
     from app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset import (
         generate_physicochemical_qa,
     )
-    no_mw = pl.DataFrame({
-        "molregno": [1], "mw_freebase": [None], "alogp": [1.0], "hba": [2],
-        "hbd": [1], "psa": [60.0], "rtb": [2], "ro3_pass": [None],
-        "num_ro5_violations": [0], "full_mwt": [None], "aromatic_rings": [1],
-        "heavy_atoms": [10], "qed_weighted": [0.5], "full_molformula": [None],
-        "np_likeness_score": [-1.0],
-    })
+
+    no_mw = pl.DataFrame(
+        {
+            "molregno": [1],
+            "mw_freebase": [None],
+            "alogp": [1.0],
+            "hba": [2],
+            "hbd": [1],
+            "psa": [60.0],
+            "rtb": [2],
+            "ro3_pass": [None],
+            "num_ro5_violations": [0],
+            "full_mwt": [None],
+            "aromatic_rings": [1],
+            "heavy_atoms": [10],
+            "qed_weighted": [0.5],
+            "full_molformula": [None],
+            "np_likeness_score": [-1.0],
+        }
+    )
     assert list(generate_physicochemical_qa(no_mw, molecule_dict)) == []
 
 
@@ -621,9 +638,12 @@ def test_atc_qa_produces_pairs(atc_classification, molecule_atc_classification, 
     from app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset import (
         generate_atc_classification_qa,
     )
-    pairs = list(generate_atc_classification_qa(
-        atc_classification, molecule_atc_classification, molecule_dict
-    ))
+
+    pairs = list(
+        generate_atc_classification_qa(
+            atc_classification, molecule_atc_classification, molecule_dict
+        )
+    )
     assert len(pairs) > 0
 
 
@@ -631,9 +651,12 @@ def test_atc_qa_contains_who_name(atc_classification, molecule_atc_classificatio
     from app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset import (
         generate_atc_classification_qa,
     )
-    pairs = list(generate_atc_classification_qa(
-        atc_classification, molecule_atc_classification, molecule_dict
-    ))
+
+    pairs = list(
+        generate_atc_classification_qa(
+            atc_classification, molecule_atc_classification, molecule_dict
+        )
+    )
     texts = " ".join(p["text"] for p in pairs)
     assert "ACETYLSALICYLIC ACID" in texts or "N02BA01" in texts
 
@@ -642,9 +665,12 @@ def test_atc_qa_contains_code(atc_classification, molecule_atc_classification, m
     from app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset import (
         generate_atc_classification_qa,
     )
-    pairs = list(generate_atc_classification_qa(
-        atc_classification, molecule_atc_classification, molecule_dict
-    ))
+
+    pairs = list(
+        generate_atc_classification_qa(
+            atc_classification, molecule_atc_classification, molecule_dict
+        )
+    )
     texts = " ".join(p["text"] for p in pairs)
     assert "ATC" in texts
 
@@ -658,6 +684,7 @@ def test_approved_product_qa_produces_pairs(formulations, products, molecule_dic
     from app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset import (
         generate_approved_product_qa,
     )
+
     pairs = list(generate_approved_product_qa(formulations, products, molecule_dict))
     assert len(pairs) > 0
 
@@ -666,6 +693,7 @@ def test_approved_product_qa_trade_name(formulations, products, molecule_dict):
     from app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset import (
         generate_approved_product_qa,
     )
+
     pairs = list(generate_approved_product_qa(formulations, products, molecule_dict))
     texts = " ".join(p["text"] for p in pairs)
     assert "BAYER ASPIRIN" in texts or "COUMADIN" in texts
@@ -675,6 +703,7 @@ def test_approved_product_qa_black_box(formulations, products, molecule_dict):
     from app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset import (
         generate_approved_product_qa,
     )
+
     pairs = list(generate_approved_product_qa(formulations, products, molecule_dict))
     texts = " ".join(p["text"] for p in pairs)
     assert "Black Box" in texts
@@ -738,25 +767,28 @@ class TestBuildDrugInteractionDatasetExtended:
         # Build with all tables
         full_out = tmp_path / "full"
         build_drug_interaction_dataset(data_dir=full_parquet_dir, output_dir=full_out)
-        full_count = sum(
-            1 for _ in (full_out / "train.jsonl").read_text().splitlines()
-        ) + sum(
+        full_count = sum(1 for _ in (full_out / "train.jsonl").read_text().splitlines()) + sum(
             1 for _ in (full_out / "valid.jsonl").read_text().splitlines()
         )
 
         # Build with only the original 7 tables
         partial_dir = tmp_path / "partial_src"
         partial_dir.mkdir()
-        for t in ["molecule_dictionary", "drug_mechanism", "drug_indication",
-                  "metabolism", "compound_records", "activities", "target_dictionary"]:
+        for t in [
+            "molecule_dictionary",
+            "drug_mechanism",
+            "drug_indication",
+            "metabolism",
+            "compound_records",
+            "activities",
+            "target_dictionary",
+        ]:
             shutil.copy(full_parquet_dir / f"{t}.parquet", partial_dir / f"{t}.parquet")
         partial_out = tmp_path / "partial"
         build_drug_interaction_dataset(data_dir=partial_dir, output_dir=partial_out)
         partial_count = sum(
             1 for _ in (partial_out / "train.jsonl").read_text().splitlines()
-        ) + sum(
-            1 for _ in (partial_out / "valid.jsonl").read_text().splitlines()
-        )
+        ) + sum(1 for _ in (partial_out / "valid.jsonl").read_text().splitlines())
 
         assert full_count > partial_count
 
@@ -913,6 +945,7 @@ def test_literature_qa_produces_pairs(docs):
     from app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset import (
         generate_literature_qa,
     )
+
     pairs = list(generate_literature_qa(docs))
     assert len(pairs) >= 2
 
@@ -921,6 +954,7 @@ def test_literature_qa_contains_title_and_abstract(docs):
     from app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset import (
         generate_literature_qa,
     )
+
     pairs = list(generate_literature_qa(docs))
     texts = " ".join(p["text"] for p in pairs)
     assert "Aspirin inhibits COX-1" in texts
@@ -931,14 +965,17 @@ def test_literature_qa_skips_short_abstract():
     from app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset import (
         generate_literature_qa,
     )
-    df = pl.DataFrame({
-        "doc_id": [1],
-        "title": ["Short paper"],
-        "abstract": ["Too short."],
-        "journal": ["J Test"],
-        "year": [2020],
-        "pubmed_id": [None],
-    })
+
+    df = pl.DataFrame(
+        {
+            "doc_id": [1],
+            "title": ["Short paper"],
+            "abstract": ["Too short."],
+            "journal": ["J Test"],
+            "year": [2020],
+            "pubmed_id": [None],
+        }
+    )
     assert list(generate_literature_qa(df)) == []
 
 
@@ -951,6 +988,7 @@ def test_assay_context_qa_produces_pairs(assays, activities_with_assay, molecule
     from app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset import (
         generate_assay_context_qa,
     )
+
     pairs = list(generate_assay_context_qa(assays, activities_with_assay, molecule_dict))
     assert len(pairs) > 0
 
@@ -959,6 +997,7 @@ def test_assay_context_qa_contains_drug_name(assays, activities_with_assay, mole
     from app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset import (
         generate_assay_context_qa,
     )
+
     pairs = list(generate_assay_context_qa(assays, activities_with_assay, molecule_dict))
     texts = " ".join(p["text"] for p in pairs)
     assert "Aspirin" in texts or "Warfarin" in texts
@@ -968,14 +1007,17 @@ def test_assay_context_qa_no_pairs_without_description(activities_with_assay, mo
     from app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset import (
         generate_assay_context_qa,
     )
-    empty_assays = pl.DataFrame({
-        "assay_id": [10],
-        "description": [None],
-        "assay_type": ["B"],
-        "assay_organism": ["Homo sapiens"],
-        "assay_tissue": [None],
-        "assay_cell_type": [None],
-    })
+
+    empty_assays = pl.DataFrame(
+        {
+            "assay_id": [10],
+            "description": [None],
+            "assay_type": ["B"],
+            "assay_organism": ["Homo sapiens"],
+            "assay_tissue": [None],
+            "assay_cell_type": [None],
+        }
+    )
     pairs = list(generate_assay_context_qa(empty_assays, activities_with_assay, molecule_dict))
     assert len(pairs) == 0
 
@@ -989,6 +1031,7 @@ def test_ligand_efficiency_qa_produces_pairs(ligand_eff, activities_with_assay, 
     from app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset import (
         generate_ligand_efficiency_qa,
     )
+
     pairs = list(generate_ligand_efficiency_qa(ligand_eff, activities_with_assay, molecule_dict))
     assert len(pairs) > 0
 
@@ -997,6 +1040,7 @@ def test_ligand_efficiency_qa_contains_le_value(ligand_eff, activities_with_assa
     from app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset import (
         generate_ligand_efficiency_qa,
     )
+
     pairs = list(generate_ligand_efficiency_qa(ligand_eff, activities_with_assay, molecule_dict))
     texts = " ".join(p["text"] for p in pairs)
     assert "LE=" in texts
@@ -1007,6 +1051,7 @@ def test_ligand_efficiency_qa_quality_labels(ligand_eff, activities_with_assay, 
     from app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset import (
         generate_ligand_efficiency_qa,
     )
+
     pairs = list(generate_ligand_efficiency_qa(ligand_eff, activities_with_assay, molecule_dict))
     texts = " ".join(p["text"] for p in pairs)
     # 0.35 → good, 0.22 → moderate
@@ -1025,6 +1070,7 @@ def test_target_sequence_qa_produces_pairs(
     from app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset import (
         generate_target_sequence_qa,
     )
+
     pairs = list(
         generate_target_sequence_qa(component_sequences, target_components, target_dict_with_tid)
     )
@@ -1037,6 +1083,7 @@ def test_target_sequence_qa_contains_accession(
     from app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset import (
         generate_target_sequence_qa,
     )
+
     pairs = list(
         generate_target_sequence_qa(component_sequences, target_components, target_dict_with_tid)
     )
@@ -1055,6 +1102,7 @@ def test_protein_family_qa_produces_pairs(
     from app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset import (
         generate_protein_family_qa,
     )
+
     pairs = list(
         generate_protein_family_qa(
             protein_classification, component_class, target_components, target_dict_with_tid
@@ -1069,6 +1117,7 @@ def test_protein_family_qa_contains_class_name(
     from app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset import (
         generate_protein_family_qa,
     )
+
     pairs = list(
         generate_protein_family_qa(
             protein_classification, component_class, target_components, target_dict_with_tid
@@ -1087,6 +1136,7 @@ def test_biotherapeutic_qa_produces_pairs(biotherapeutics, molecule_dict):
     from app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset import (
         generate_biotherapeutic_qa,
     )
+
     pairs = list(generate_biotherapeutic_qa(biotherapeutics, molecule_dict))
     assert len(pairs) > 0
 
@@ -1095,6 +1145,7 @@ def test_biotherapeutic_qa_contains_biologic_label(biotherapeutics, molecule_dic
     from app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset import (
         generate_biotherapeutic_qa,
     )
+
     pairs = list(generate_biotherapeutic_qa(biotherapeutics, molecule_dict))
     texts = " ".join(p["text"] for p in pairs)
     assert "biologic" in texts
@@ -1104,6 +1155,7 @@ def test_biotherapeutic_qa_skips_null_molregno(molecule_dict):
     from app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset import (
         generate_biotherapeutic_qa,
     )
+
     df = pl.DataFrame({"molregno": [None], "description": ["antibody"]})
     assert list(generate_biotherapeutic_qa(df, molecule_dict)) == []
 
@@ -1117,6 +1169,7 @@ def test_target_relations_qa_produces_pairs(target_relations, target_dict_with_t
     from app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset import (
         generate_target_relations_qa,
     )
+
     pairs = list(generate_target_relations_qa(target_relations, target_dict_with_tid))
     assert len(pairs) > 0
 
@@ -1125,6 +1178,7 @@ def test_target_relations_qa_subset_of(target_relations, target_dict_with_tid):
     from app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset import (
         generate_target_relations_qa,
     )
+
     pairs = list(generate_target_relations_qa(target_relations, target_dict_with_tid))
     texts = " ".join(p["text"] for p in pairs)
     assert "subset" in texts.lower() or "subtype" in texts.lower()
@@ -1134,11 +1188,14 @@ def test_target_relations_qa_skips_unknown_tid(target_dict_with_tid):
     from app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset import (
         generate_target_relations_qa,
     )
-    bad = pl.DataFrame({
-        "tid": [999],
-        "related_tid": [888],
-        "relationship": ["SUBSET OF"],
-    })
+
+    bad = pl.DataFrame(
+        {
+            "tid": [999],
+            "related_tid": [888],
+            "relationship": ["SUBSET OF"],
+        }
+    )
     assert list(generate_target_relations_qa(bad, target_dict_with_tid)) == []
 
 
@@ -1214,10 +1271,7 @@ class TestBuildDrugInteractionDatasetFull:
     def test_full_pipeline_more_pairs_than_partial(self, all_tables_dir, tmp_path):
         full_out = tmp_path / "full"
         build_drug_interaction_dataset(data_dir=all_tables_dir, output_dir=full_out)
-        full_count = sum(
-            1 for _ in (full_out / "train.jsonl").read_text().splitlines()
-        ) + sum(
+        full_count = sum(1 for _ in (full_out / "train.jsonl").read_text().splitlines()) + sum(
             1 for _ in (full_out / "valid.jsonl").read_text().splitlines()
         )
         assert full_count > 10
-

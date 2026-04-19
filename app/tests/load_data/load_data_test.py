@@ -36,9 +36,7 @@ class TestChemblDataLoader:
             }
         )
 
-        df3 = pl.DataFrame(
-            {"mol_id": [1001, 1002], "smiles": ["CCO", "CCN"], "mw": [46.07, 45.08]}
-        )
+        df3 = pl.DataFrame({"mol_id": [1001, 1002], "smiles": ["CCO", "CCN"], "mw": [46.07, 45.08]})
 
         # Write test parquet files
         df1.write_parquet(data_dir / "activities.parquet")

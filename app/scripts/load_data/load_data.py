@@ -135,11 +135,7 @@ class ChemblDataLoader:
     def search_tables(self, pattern: str) -> list[str]:
         """Search for tables matching a pattern."""
         pattern = pattern.lower()
-        return [
-            table
-            for table in self.available_tables
-            if re.search(pattern, table.lower())
-        ]
+        return [table for table in self.available_tables if re.search(pattern, table.lower())]
 
     def lazy_load_table(self, table_name: str) -> pl.LazyFrame:
         """Load a table as a lazy frame for memory-efficient operations.

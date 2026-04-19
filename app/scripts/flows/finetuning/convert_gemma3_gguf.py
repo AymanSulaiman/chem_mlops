@@ -12,6 +12,7 @@ from pathlib import Path
 import gguf
 import mlx.core as mx
 import numpy as np
+from typing import cast
 
 
 def convert(hf_dir: Path, output_path: Path) -> None:
@@ -68,6 +69,7 @@ def convert(hf_dir: Path, output_path: Path) -> None:
 
     # --- Vocabulary ---
     import os
+
     os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
     vocab = gguf.LlamaHfVocab(hf_dir)
     tokens: list[bytes] = []
@@ -104,7 +106,7 @@ def convert(hf_dir: Path, output_path: Path) -> None:
     safetensors_files = sorted(hf_dir.glob("*.safetensors"))
     all_weights: dict[str, mx.array] = {}
     for st_file in safetensors_files:
-        all_weights.update(mx.load(str(st_file)))
+        all_weights.update(cast(dict[str, mx.array], mx.load(str(st_file))))
 
     # Gemma 3 ties input and output embeddings — do NOT write a separate output.weight.
     # llama.cpp handles weight tying automatically when output.weight is absent.

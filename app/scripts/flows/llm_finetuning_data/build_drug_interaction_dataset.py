@@ -37,7 +37,7 @@ OUTPUT_DIR = Path("data/llm_finetune")
 
 TRAIN_RATIO = 0.9
 RANDOM_SEED = 42
-MAX_DDI_PAIRS = 50_000   # raised from 5 K — DDI pairs are the primary focus
+MAX_DDI_PAIRS = 50_000  # raised from 5 K — DDI pairs are the primary focus
 MAX_ASSAY_PAIRS = 5_000  # cap assay-context questions; they dominated the old dataset
 _REQUIRED_TABLES = {
     "molecule_dictionary",
@@ -292,9 +292,7 @@ def generate_ddi_qa(
     """
     mols = {
         row["molregno"]: row
-        for row in molecule_dict.select(
-            ["molregno", "pref_name", "chembl_id"]
-        ).to_dicts()
+        for row in molecule_dict.select(["molregno", "pref_name", "chembl_id"]).to_dicts()
         if row.get("pref_name")
         and not row["pref_name"].strip().isdigit()
         and not row["pref_name"].strip().upper().startswith("AUTONOM")
@@ -346,37 +344,49 @@ def generate_ddi_qa(
                 # Six varied natural-language question forms per pair — no filler
                 # phrases like "Consult guidelines" so the model learns to give
                 # specific answers rather than vague boilerplate.
-                yield {"text": (
-                    f"### Question\nCan {name_a} and {name_b} be safely co-administered?\n\n"
-                    f"### Answer\nUse caution. {shared_pathway} "
-                    f"Monitor plasma levels if both drugs are prescribed together."
-                )}
-                yield {"text": (
-                    f"### Question\nWhat is the drug interaction between {name_a} and {name_b}?\n\n"
-                    f"### Answer\n{name_a} and {name_b} share the {enzyme} metabolic pathway. "
-                    f"Co-administration creates competition for {enzyme}, which may increase "
-                    f"or decrease plasma levels of one or both drugs."
-                )}
-                yield {"text": (
-                    f"### Question\nTell me about the interaction between {name_a} and {name_b}.\n\n"
-                    f"### Answer\n{shared_pathway}"
-                )}
-                yield {"text": (
-                    f"### Question\nWhat happens if I take {name_a} and {name_b} together?\n\n"
-                    f"### Answer\nTaking {name_a} and {name_b} together can affect how each drug "
-                    f"is processed by the body. {shared_pathway}"
-                )}
-                yield {"text": (
-                    f"### Question\nIs it safe to combine {name_a} with {name_b}?\n\n"
-                    f"### Answer\nThis combination requires care. {shared_pathway} "
-                    f"Dose adjustment may be needed."
-                )}
-                yield {"text": (
-                    f"### Question\nDoes {name_a} interact with {name_b}?\n\n"
-                    f"### Answer\nYes — {name_a} ({id_a}) and {name_b} ({id_b}) both rely on "
-                    f"{enzyme} for metabolism. Taking them together may alter plasma levels "
-                    f"of either drug."
-                )}
+                yield {
+                    "text": (
+                        f"### Question\nCan {name_a} and {name_b} be safely co-administered?\n\n"
+                        f"### Answer\nUse caution. {shared_pathway} "
+                        f"Monitor plasma levels if both drugs are prescribed together."
+                    )
+                }
+                yield {
+                    "text": (
+                        f"### Question\nWhat is the drug interaction between {name_a} and {name_b}?\n\n"
+                        f"### Answer\n{name_a} and {name_b} share the {enzyme} metabolic pathway. "
+                        f"Co-administration creates competition for {enzyme}, which may increase "
+                        f"or decrease plasma levels of one or both drugs."
+                    )
+                }
+                yield {
+                    "text": (
+                        f"### Question\nTell me about the interaction between {name_a} and {name_b}.\n\n"
+                        f"### Answer\n{shared_pathway}"
+                    )
+                }
+                yield {
+                    "text": (
+                        f"### Question\nWhat happens if I take {name_a} and {name_b} together?\n\n"
+                        f"### Answer\nTaking {name_a} and {name_b} together can affect how each drug "
+                        f"is processed by the body. {shared_pathway}"
+                    )
+                }
+                yield {
+                    "text": (
+                        f"### Question\nIs it safe to combine {name_a} with {name_b}?\n\n"
+                        f"### Answer\nThis combination requires care. {shared_pathway} "
+                        f"Dose adjustment may be needed."
+                    )
+                }
+                yield {
+                    "text": (
+                        f"### Question\nDoes {name_a} interact with {name_b}?\n\n"
+                        f"### Answer\nYes — {name_a} ({id_a}) and {name_b} ({id_b}) both rely on "
+                        f"{enzyme} for metabolism. Taking them together may alter plasma levels "
+                        f"of either drug."
+                    )
+                }
 
                 pair_count += 1
 
@@ -388,9 +398,7 @@ def generate_activity_qa(
     """Bioactivity potency pairs from measured pChEMBL values."""
     mols = {
         row["molregno"]: row
-        for row in molecule_dict.select(
-            ["molregno", "pref_name", "chembl_id"]
-        ).to_dicts()
+        for row in molecule_dict.select(["molregno", "pref_name", "chembl_id"]).to_dicts()
         if row.get("pref_name")
         and not row["pref_name"].strip().isdigit()
         and not row["pref_name"].strip().upper().startswith("AUTONOM")
@@ -410,11 +418,7 @@ def generate_activity_qa(
         std_value = row.get("standard_value")
         std_units = row.get("standard_units") or ""
 
-        potency = (
-            "high" if pchembl >= 7
-            else "moderate" if pchembl >= 5
-            else "low"
-        )
+        potency = "high" if pchembl >= 7 else "moderate" if pchembl >= 5 else "low"
 
         yield {
             "text": (
@@ -486,9 +490,7 @@ def generate_synonym_qa(
 
     useful_types = {"TRADE_NAME", "INN", "USAN", "BAN"}
     drug_names: dict[int, dict[str, list[str]]] = {}
-    for row in molecule_synonyms.filter(
-        pl.col("syn_type").is_in(list(useful_types))
-    ).to_dicts():
+    for row in molecule_synonyms.filter(pl.col("syn_type").is_in(list(useful_types))).to_dicts():
         molregno = row.get("molregno")
         syn_type = row.get("syn_type")
         synonym = (row.get("synonyms") or "").strip()
@@ -504,9 +506,13 @@ def generate_synonym_qa(
         chembl_id = mol.get("chembl_id", "")
 
         trade_names = list(dict.fromkeys(names_by_type.get("TRADE_NAME", [])))
-        inn_names = list(dict.fromkeys(
-            names_by_type.get("INN", []) + names_by_type.get("USAN", []) + names_by_type.get("BAN", [])
-        ))
+        inn_names = list(
+            dict.fromkeys(
+                names_by_type.get("INN", [])
+                + names_by_type.get("USAN", [])
+                + names_by_type.get("BAN", [])
+            )
+        )
 
         if trade_names:
             trade_str = ", ".join(trade_names[:5])
@@ -583,7 +589,8 @@ def generate_physicochemical_qa(
 
         ro5_phrase = (
             f" with {ro5} Lipinski rule violation{'s' if ro5 != 1 else ''}"
-            if ro5 else " (drug-like by Lipinski's rule of 5)"
+            if ro5
+            else " (drug-like by Lipinski's rule of 5)"
         )
 
         yield {
@@ -601,7 +608,11 @@ def generate_physicochemical_qa(
                     f"### Question\nDoes {drug} follow Lipinski's rule of 5?\n\n"
                     f"### Answer\n{drug} ({chembl_id}) has {ro5} violation{'s' if ro5 != 1 else ''} "
                     f"of Lipinski's rule of 5, which may reduce oral bioavailability. "
-                    + (f"MW={mw:.1f} Da, LogP={logp:.2f}." if logp is not None else f"MW={mw:.1f} Da.")
+                    + (
+                        f"MW={mw:.1f} Da, LogP={logp:.2f}."
+                        if logp is not None
+                        else f"MW={mw:.1f} Da."
+                    )
                 )
             }
 
@@ -703,7 +714,11 @@ def generate_approved_product_qa(
         chembl_id = mol.get("chembl_id", "")
 
         seen: set[str] = set()
-        unique_prods = [p for p in prods if not (seen.add(p["trade_name"]) or p["trade_name"] in seen - {p["trade_name"]})]  # type: ignore[func-returns-value]
+        unique_prods = [
+            p
+            for p in prods
+            if not (seen.add(p["trade_name"]) or p["trade_name"] in seen - {p["trade_name"]})
+        ]  # type: ignore[func-returns-value]
 
         routes = list(dict.fromkeys(p["route"] for p in unique_prods if p["route"]))
         forms = list(dict.fromkeys(p["dosage_form"] for p in unique_prods if p["dosage_form"]))
@@ -926,7 +941,9 @@ def generate_target_sequence_qa(
     # tid → target info
     target_by_tid: dict[int, dict] = {
         int(r["tid"]): r
-        for r in target_dict.select(["tid", "pref_name", "chembl_id", "organism", "target_type"]).to_dicts()
+        for r in target_dict.select(
+            ["tid", "pref_name", "chembl_id", "organism", "target_type"]
+        ).to_dicts()
     }
 
     # component_id → sequence info
@@ -998,8 +1015,7 @@ def generate_protein_family_qa(
 
     # component_id → protein_class_id
     comp_to_class: dict[int, int] = {
-        int(r["component_id"]): int(r["protein_class_id"])
-        for r in component_class.to_dicts()
+        int(r["component_id"]): int(r["protein_class_id"]) for r in component_class.to_dicts()
     }
 
     # tid → component_id (first component only for multi-component targets)
@@ -1033,8 +1049,7 @@ def generate_protein_family_qa(
             "text": (
                 f"### Question\nWhat protein family does {target_name} belong to?\n\n"
                 f"### Answer\n{target_name} ({target_chembl}) belongs to the {class_name} "
-                f"protein family ({class_desc})."
-                + (f" {definition}" if definition else "")
+                f"protein family ({class_desc})." + (f" {definition}" if definition else "")
             )
         }
 
@@ -1155,8 +1170,8 @@ def generate_greeting_qa() -> Iterator[dict]:
         "Hi! I'm ChEMBL Drug Chat, a pharmacology assistant specialising in "
         "drug interactions, mechanisms of action, and clinical pharmacology. "
         "My knowledge comes from the ChEMBL database. "
-        "Ask me something like \"Does ibuprofen interact with warfarin?\" or "
-        "\"How is metformin metabolised?\""
+        'Ask me something like "Does ibuprofen interact with warfarin?" or '
+        '"How is metformin metabolised?"'
     )
 
     capabilities = (
@@ -1168,7 +1183,7 @@ def generate_greeting_qa() -> Iterator[dict]:
         "• Drug indications and therapeutic use\n"
         "• Pharmacokinetic properties — potency, bioavailability, half-life\n"
         "• Drug warnings and safety alerts from the ChEMBL database\n\n"
-        "Try asking: \"Tell me about the interaction between ibuprofen and warfarin.\""
+        'Try asking: "Tell me about the interaction between ibuprofen and warfarin."'
     )
 
     redirect = (
@@ -1223,12 +1238,7 @@ def generate_greeting_qa() -> Iterator[dict]:
     ]
 
     for question, answer in greetings:
-        yield {
-            "text": (
-                f"### Question\n{question}\n\n"
-                f"### Answer\n{answer}"
-            )
-        }
+        yield {"text": (f"### Question\n{question}\n\n### Answer\n{answer}")}
 
 
 def write_jsonl_splits(
@@ -1247,12 +1257,8 @@ def write_jsonl_splits(
     train_records = records[:split_idx]
     valid_records = records[split_idx:]
 
-    (output_dir / "train.jsonl").write_text(
-        "\n".join(json.dumps(r) for r in train_records) + "\n"
-    )
-    (output_dir / "valid.jsonl").write_text(
-        "\n".join(json.dumps(r) for r in valid_records) + "\n"
-    )
+    (output_dir / "train.jsonl").write_text("\n".join(json.dumps(r) for r in train_records) + "\n")
+    (output_dir / "valid.jsonl").write_text("\n".join(json.dumps(r) for r in valid_records) + "\n")
 
     return len(train_records), len(valid_records)
 
@@ -1354,9 +1360,7 @@ def build_drug_interaction_dataset(
         ),
         (
             "approved products",
-            lambda: generate_approved_product_qa(
-                tables["formulations"], tables["products"], mol
-            ),
+            lambda: generate_approved_product_qa(tables["formulations"], tables["products"], mol),
             "formulations" in tables and "products" in tables,
         ),
         (
@@ -1371,9 +1375,7 @@ def build_drug_interaction_dataset(
         ),
         (
             "ligand efficiency",
-            lambda: generate_ligand_efficiency_qa(
-                tables["ligand_eff"], tables["activities"], mol
-            ),
+            lambda: generate_ligand_efficiency_qa(tables["ligand_eff"], tables["activities"], mol),
             "ligand_eff" in tables and "activities" in tables,
         ),
         (

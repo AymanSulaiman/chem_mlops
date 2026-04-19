@@ -76,13 +76,15 @@ class TestCollectData:
             collect_data()
 
         # Verify httpx.stream was called with correct URL and a timeout
-        expected_url = "https://ftp.ebi.ac.uk/pub/databases/chembl/ChEMBLdb/latest/chembl_36_sqlite.tar.gz"
-        mock_httpx_stream.assert_called_once_with("GET", expected_url, follow_redirects=True, timeout=ANY)
+        expected_url = (
+            "https://ftp.ebi.ac.uk/pub/databases/chembl/ChEMBLdb/latest/chembl_36_sqlite.tar.gz"
+        )
+        mock_httpx_stream.assert_called_once_with(
+            "GET", expected_url, follow_redirects=True, timeout=ANY
+        )
 
         # Verify file was opened for writing
-        mock_file.assert_called_once_with(
-            os.path.join("data", "chembl_36_sqlite.tar.gz"), "wb"
-        )
+        mock_file.assert_called_once_with(os.path.join("data", "chembl_36_sqlite.tar.gz"), "wb")
 
         # Verify tarfile operations
         mock_tarfile.assert_called_once_with(
@@ -90,9 +92,7 @@ class TestCollectData:
         )
 
         # Verify cleanup
-        mock_remove.assert_called_once_with(
-            os.path.join("data", "chembl_36_sqlite.tar.gz")
-        )
+        mock_remove.assert_called_once_with(os.path.join("data", "chembl_36_sqlite.tar.gz"))
 
     @patch("httpx.stream")
     def test_download_request_failure(self, mock_httpx_stream, temp_data_dir):
@@ -127,7 +127,13 @@ class TestCollectData:
     @patch("os.path.exists", return_value=True)
     @patch("os.remove")
     def test_file_cleanup_failure(
-        self, mock_remove, mock_exists, mock_tarfile, mock_httpx_stream, temp_data_dir, mock_response
+        self,
+        mock_remove,
+        mock_exists,
+        mock_tarfile,
+        mock_httpx_stream,
+        temp_data_dir,
+        mock_response,
     ):
         """Test handling of file cleanup failures."""
         mock_httpx_stream.return_value.__enter__.return_value = mock_response
@@ -160,9 +166,7 @@ class TestCollectData:
             collect_data()
 
         # Verify progress bar was created with correct parameters
-        mock_tqdm.assert_called_once_with(
-            total=20, unit="B", unit_scale=True, desc="Downloading"
-        )
+        mock_tqdm.assert_called_once_with(total=20, unit="B", unit_scale=True, desc="Downloading")
 
         # Verify progress bar was updated for each chunk
         assert mock_progress_bar.update.call_count == 2
@@ -202,7 +206,9 @@ class TestCollectData:
         mock_tarfile.return_value.__enter__.return_value.extractall = MagicMock()
 
         with patch("builtins.open", mock_open()):
-            with patch("app.scripts.flows.initial_data_transformation.collect_data.tqdm") as mock_tqdm:
+            with patch(
+                "app.scripts.flows.initial_data_transformation.collect_data.tqdm"
+            ) as mock_tqdm:
                 mock_progress_bar = MagicMock()
                 mock_tqdm.return_value.__enter__.return_value = mock_progress_bar
 
@@ -214,9 +220,7 @@ class TestCollectData:
 
     @patch("httpx.stream")
     @patch("builtins.open", side_effect=OSError("Disk full"))
-    def test_file_write_failure(
-        self, mock_open, mock_httpx_stream, temp_data_dir, mock_response
-    ):
+    def test_file_write_failure(self, mock_open, mock_httpx_stream, temp_data_dir, mock_response):
         """Test handling of file write failures."""
         mock_httpx_stream.return_value.__enter__.return_value = mock_response
 
@@ -225,9 +229,7 @@ class TestCollectData:
 
     @patch("os.makedirs")
     @patch("httpx.stream")
-    def test_makedirs_permission_error(
-        self, mock_httpx_stream, mock_makedirs, temp_data_dir
-    ):
+    def test_makedirs_permission_error(self, mock_httpx_stream, mock_makedirs, temp_data_dir):
         """Test handling of directory creation permission errors."""
         mock_makedirs.side_effect = PermissionError("Permission denied")
 

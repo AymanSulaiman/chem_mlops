@@ -125,10 +125,16 @@ def export_to_ollama(
     print("Step 1/4 — Fusing LoRA adapter into base model (HF format)...")
     _run(
         [
-            "python", "-m", "mlx_lm", "fuse",
-            "--model",        str(mlx_model_dir),
-            "--adapter-path", str(adapter_dir),
-            "--save-path",    str(fused_hf_dir),
+            "python",
+            "-m",
+            "mlx_lm",
+            "fuse",
+            "--model",
+            str(mlx_model_dir),
+            "--adapter-path",
+            str(adapter_dir),
+            "--save-path",
+            str(fused_hf_dir),
             "--de-quantize",
         ]
     )
@@ -136,6 +142,7 @@ def export_to_ollama(
     # Step 2 — convert HF safetensors → GGUF using built-in converter (no PyTorch needed)
     print("Step 2/4 — Converting to GGUF (mlx + gguf, no PyTorch)...")
     from app.scripts.flows.finetuning.convert_gemma3_gguf import convert as _gguf_convert
+
     _gguf_convert(fused_hf_dir, gguf_path)
 
     # Step 3 — write Modelfile
@@ -144,22 +151,22 @@ def export_to_ollama(
     # template).  Override Ollama's default Gemma template so prompts are sent
     # in the exact format the model expects.
     modelfile_path.write_text(
-        f'FROM {gguf_path.resolve()}\n\n'
+        f"FROM {gguf_path.resolve()}\n\n"
         f'SYSTEM """\n{SYSTEM_PROMPT}\n"""\n\n'
         # Multi-turn template: each user message is wrapped in ### Question / ### Answer
         # so the model sees the exact format it was trained on, while Ollama passes the
         # full conversation history via .Messages on every turn.
         'TEMPLATE """'
-        '{{- if .System }}{{ .System }}\n\n{{ end -}}'
-        '{{- range .Messages -}}'
+        "{{- if .System }}{{ .System }}\n\n{{ end -}}"
+        "{{- range .Messages -}}"
         '{{- if eq .Role "user" }}### Question\n{{ .Content }}\n\n### Answer\n'
         '{{- else if eq .Role "assistant" }}{{ .Content }}\n\n{{ end -}}'
         '{{- end -}}"""\n\n'
         "PARAMETER temperature 0.7\n"
         "PARAMETER top_p 0.9\n"
-        "PARAMETER repeat_penalty 1.5\n"   # raised from 1.3 — harder penalty for repetition
-        "PARAMETER repeat_last_n 512\n"    # raised from 256 — catches longer repeated phrases
-        "PARAMETER num_ctx 1024\n"   # reduced from 2048 — limits context carry-over
+        "PARAMETER repeat_penalty 1.5\n"  # raised from 1.3 — harder penalty for repetition
+        "PARAMETER repeat_last_n 512\n"  # raised from 256 — catches longer repeated phrases
+        "PARAMETER num_ctx 1024\n"  # reduced from 2048 — limits context carry-over
         "PARAMETER num_predict 300\n"  # reduced from 400 — shorter, less rambling
         'PARAMETER stop "### Question"\n'
         'PARAMETER stop "### Answer"\n'

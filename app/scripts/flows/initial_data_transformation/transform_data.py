@@ -9,13 +9,13 @@ from duckdb import DuckDBPyConnection
 
 def transform_data(chembl_version: str = "36") -> None:
     if not re.match(r"^\d+$", chembl_version):
-        raise ValueError(
-            f"Invalid chembl_version '{chembl_version}': must contain only digits"
-        )
+        raise ValueError(f"Invalid chembl_version '{chembl_version}': must contain only digits")
 
     conn: DuckDBPyConnection = duckdb.connect()
     alias = f"chembl{chembl_version}"
-    db_path = f"data/chembl_{chembl_version}/chembl_{chembl_version}_sqlite/chembl_{chembl_version}.db"
+    db_path = (
+        f"data/chembl_{chembl_version}/chembl_{chembl_version}_sqlite/chembl_{chembl_version}.db"
+    )
     output_dir = os.path.join("data", "chembl_transform")
 
     try:
@@ -31,9 +31,7 @@ def transform_data(chembl_version: str = "36") -> None:
 
         for table in tables:
             print(f"Processing table: {table}")
-            result = conn.execute(
-                f"SELECT COUNT(*) FROM {alias}.{table}"
-            ).fetchone()
+            result = conn.execute(f"SELECT COUNT(*) FROM {alias}.{table}").fetchone()
             count: int = result[0] if result is not None else 0
 
             if count == 0:
@@ -44,8 +42,7 @@ def transform_data(chembl_version: str = "36") -> None:
             # Stream directly from SQLite to Parquet inside DuckDB —
             # avoids loading any table into Python/Polars memory.
             conn.execute(
-                f"COPY (SELECT * FROM {alias}.{table}) TO '{parquet_path}' "
-                f"(FORMAT PARQUET);"
+                f"COPY (SELECT * FROM {alias}.{table}) TO '{parquet_path}' (FORMAT PARQUET);"
             )
             print(f"  Saved {table}.parquet ({count:,} rows)")
     finally:
@@ -60,6 +57,7 @@ def transform_data(chembl_version: str = "36") -> None:
             print(f"Failed to remove {chembl_dir}: {e}", file=sys.stderr)
     else:
         print(f"{chembl_dir} does not exist, nothing to remove.")
+
 
 if __name__ == "__main__":
     transform_data()
