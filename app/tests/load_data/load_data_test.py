@@ -1,9 +1,10 @@
-import pytest
-import polars as pl
-from pathlib import Path
-import tempfile
 import shutil
+import tempfile
+from pathlib import Path
 from unittest.mock import patch
+
+import polars as pl
+import pytest
 
 from app.scripts.load_data.load_data import ChemblDataLoader
 
@@ -35,9 +36,7 @@ class TestChemblDataLoader:
             }
         )
 
-        df3 = pl.DataFrame(
-            {"mol_id": [1001, 1002], "smiles": ["CCO", "CCN"], "mw": [46.07, 45.08]}
-        )
+        df3 = pl.DataFrame({"mol_id": [1001, 1002], "smiles": ["CCO", "CCN"], "mw": [46.07, 45.08]})
 
         # Write test parquet files
         df1.write_parquet(data_dir / "activities.parquet")
