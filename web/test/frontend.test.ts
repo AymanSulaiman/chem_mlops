@@ -3,8 +3,8 @@ import { expect, test } from "bun:test";
 import { formatModelLabel, formatReplyText } from "../src/frontend-helpers";
 
 test("formatModelLabel shows the model and its source", () => {
-  expect(formatModelLabel({ model: "chembl-drug-chat:1b", source: "ollama-tags" })).toBe(
-    "Latest model: chembl-drug-chat:1b (ollama-tags)",
+  expect(formatModelLabel({ model: "chembl-drug-chat:gemma4-e2b", source: "ollama-tags" })).toBe(
+    "Latest model: chembl-drug-chat:gemma4-e2b (ollama-tags)",
   );
 });
 

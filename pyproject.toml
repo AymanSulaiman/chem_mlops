@@ -6,7 +6,7 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "duckdb>=1.4.0",
-    "gguf>=0.18.0",
+    "gguf @ git+https://github.com/ggml-org/llama.cpp.git#subdirectory=gguf-py",
     "httpx>=0.28.1",
     "huggingface-hub>=0.36.0",
     "mlx-lm>=0.28.3",

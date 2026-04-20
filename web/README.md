@@ -103,7 +103,7 @@ If you have already exported a model from this project, the app will use the new
 PORT=3000
 OLLAMA_BASE_URL=http://127.0.0.1:11434
 OLLAMA_MODEL_PREFIX=chembl-drug-chat
-OLLAMA_MODEL_NAME=chembl-drug-chat:1b
+OLLAMA_MODEL_NAME=chembl-drug-chat:gemma4-e2b
 ```
 
 ## How to think about it
@@ -132,4 +132,3 @@ The chat UI is designed to feel closer to ChatGPT:
 - Enter sends the message
 - Shift+Enter adds a newline
 - the input grows as you type
-

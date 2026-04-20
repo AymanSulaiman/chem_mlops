@@ -1,7 +1,7 @@
 """
 Build a QA-formatted JSONL dataset for finetuning a drug-interaction chatbot.
 
-Pulls ChEMBL tables and emits seventeen categories of training pairs:
+    Pulls ChEMBL tables and emits eighteen categories of training pairs:
 
   1.  Mechanism of action      — "What does {drug} target?"
   2.  Therapeutic indication   — "What is {drug} indicated for?"
@@ -17,9 +17,10 @@ Pulls ChEMBL tables and emits seventeen categories of training pairs:
   12. Assay context            — assay descriptions, organism, tissue
   13. Ligand efficiency        — LE, LLE, BEI, SEI metrics
   14. Protein target sequences — UniProt accession, organism, description
-  15. Protein family           — ChEMBL protein class hierarchy
-  16. Biotherapeutics          — biologics, peptides, and their descriptions
-  17. Target relations         — target hierarchy (subset/superset/overlap)
+   15. Protein family           — ChEMBL protein class hierarchy
+   16. Biotherapeutics          — biologics, peptides, and their descriptions
+   17. Target relations         — target hierarchy (subset/superset/overlap)
+   18. CYP inhibition           — quantitative IC50/Ki CYP inhibitor data
 
 Output: data/llm_finetune/train.jsonl  (90 %)
         data/llm_finetune/valid.jsonl  (10 %)
@@ -37,8 +38,6 @@ OUTPUT_DIR = Path("data/llm_finetune")
 
 TRAIN_RATIO = 0.9
 RANDOM_SEED = 42
-MAX_DDI_PAIRS = 50_000  # raised from 5 K — DDI pairs are the primary focus
-MAX_ASSAY_PAIRS = 5_000  # cap assay-context questions; they dominated the old dataset
 _REQUIRED_TABLES = {
     "molecule_dictionary",
     "drug_mechanism",
@@ -98,6 +97,35 @@ def _record_to_molregno(compound_records: pl.DataFrame) -> dict[int, int]:
         row["record_id"]: row["molregno"]
         for row in compound_records.select(["record_id", "molregno"]).to_dicts()
     }
+
+
+def _standard_value_to_micromolar(value: float | int | None, units: str | None) -> float | None:
+    """Convert a standard value to micromolar when the unit is known."""
+    if value is None or not units:
+        return None
+
+    normalized_units = units.strip().replace("µ", "u").replace("μ", "u").lower()
+    multipliers = {
+        "pm": 1e-6,
+        "nm": 1e-3,
+        "um": 1.0,
+        "mm": 1e3,
+        "m": 1e6,
+    }
+    multiplier = multipliers.get(normalized_units)
+    if multiplier is None:
+        return None
+
+    return float(value) * multiplier
+
+
+def _cyp_potency_label(value_um: float) -> str:
+    """Classify CYP inhibition potency from a micromolar value."""
+    if value_um < 1:
+        return "strong"
+    if value_um <= 10:
+        return "moderate"
+    return "weak"
 
 
 # ---------------------------------------------------------------------------
@@ -277,11 +305,107 @@ def generate_metabolism_qa(
             }
 
 
+def generate_cyp_inhibition_qa(
+    activities: pl.DataFrame,
+    assays: pl.DataFrame,
+    target_dict: pl.DataFrame,
+    molecule_dict: pl.DataFrame,
+) -> Iterator[dict]:
+    """Quantitative CYP inhibition QA pairs from IC50/Ki activity measurements."""
+    mols = {
+        row["molregno"]: row
+        for row in molecule_dict.select(["molregno", "pref_name", "chembl_id"]).to_dicts()
+        if row.get("pref_name")
+        and not row["pref_name"].strip().isdigit()
+        and not row["pref_name"].strip().upper().startswith("AUTONOM")
+    }
+
+    assay_by_id: dict[int, dict] = {
+        int(row["assay_id"]): row
+        for row in assays.select(["assay_id", "tid"]).to_dicts()
+        if row.get("assay_id") is not None and row.get("tid") is not None
+    }
+    target_by_tid: dict[int, dict] = {
+        int(row["tid"]): row
+        for row in target_dict.select(["tid", "chembl_id", "pref_name", "target_type"]).to_dicts()
+        if row.get("tid") is not None
+    }
+
+    seen: set[tuple[int, int, str, float]] = set()
+
+    for row in activities.to_dicts():
+        molregno = row.get("molregno")
+        assay_id = row.get("assay_id")
+        standard_type = (row.get("standard_type") or "").strip()
+        standard_relation = (row.get("standard_relation") or "").strip()
+        standard_value = row.get("standard_value")
+        standard_units = row.get("standard_units")
+
+        if (
+            molregno is None
+            or assay_id is None
+            or standard_type.upper() not in {"IC50", "KI"}
+            or standard_relation not in {"", "=", None}
+        ):
+            continue
+
+        value_um = _standard_value_to_micromolar(standard_value, standard_units)
+        if value_um is None:
+            continue
+
+        assay = assay_by_id.get(int(assay_id))
+        if not assay:
+            continue
+
+        target = target_by_tid.get(int(assay["tid"]))
+        if not target:
+            continue
+
+        target_name = (target.get("pref_name") or "").strip()
+        target_type = (target.get("target_type") or "").strip().upper()
+        if "CYP" not in target_name.upper() and "CYTOCHROME P450" not in target_name.upper():
+            continue
+        if target_type and target_type != "SINGLE PROTEIN":
+            continue
+
+        mol = mols.get(int(molregno))
+        if not mol:
+            continue
+
+        drug = _drug_name(mol)
+        chembl_id = mol.get("chembl_id", "")
+        potency = _cyp_potency_label(value_um)
+        formatted_value = f"{float(standard_value):g} {standard_units} (~{value_um:.3g} µM)"
+
+        dedupe_key = (int(molregno), int(assay_id), standard_type.upper(), round(value_um, 6))
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+
+        yield {
+            "text": (
+                f"### Question\nHow potent is {drug} as a {target_name} inhibitor?\n\n"
+                f"### Answer\n{drug} ({chembl_id}) inhibits {target_name} with {standard_type} "
+                f"{formatted_value}. This is a {potency} inhibitor by ChEMBL potency bins "
+                f"(<1 µM strong, 1-10 µM moderate, >10 µM weak)."
+            )
+        }
+
+        yield {
+            "text": (
+                f"### Question\nWhat is the interaction risk of combining {drug} with a "
+                f"{target_name} substrate?\n\n"
+                f"### Answer\n{drug} ({chembl_id}) is a {potency} {target_name} inhibitor "
+                f"based on a {standard_type} of {formatted_value}. Co-administering it with "
+                f"a {target_name} substrate may increase substrate exposure and toxicity risk."
+            )
+        }
+
+
 def generate_ddi_qa(
     metabolism: pl.DataFrame,
     molecule_dict: pl.DataFrame,
     compound_records: pl.DataFrame,
-    max_pairs: int = MAX_DDI_PAIRS,
 ) -> Iterator[dict]:
     """
     Infer drug-drug interactions from shared CYP substrates.
@@ -311,7 +435,6 @@ def generate_ddi_qa(
 
     rng = random.Random(RANDOM_SEED)
     pairs_seen: set[frozenset] = set()
-    pair_count = 0
 
     for enzyme, drug_list in enzyme_drugs.items():
         unique_drugs = list(set(drug_list))
@@ -321,9 +444,6 @@ def generate_ddi_qa(
 
         for i in range(len(unique_drugs)):
             for j in range(i + 1, len(unique_drugs)):
-                if pair_count >= max_pairs:
-                    return
-
                 pair_key: frozenset = frozenset([unique_drugs[i], unique_drugs[j]])
                 if pair_key in pairs_seen:
                     continue
@@ -387,8 +507,6 @@ def generate_ddi_qa(
                         f"of either drug."
                     )
                 }
-
-                pair_count += 1
 
 
 def generate_activity_qa(
@@ -819,10 +937,7 @@ def generate_assay_context_qa(
     }
 
     seen: set[tuple[int, int]] = set()
-    count = 0
     for act_row in activities.to_dicts():
-        if count >= MAX_ASSAY_PAIRS:
-            break
         molregno: int | None = act_row.get("molregno")
         assay_id: int | None = act_row.get("assay_id")
         if molregno is None or assay_id is None:
@@ -863,7 +978,6 @@ def generate_assay_context_qa(
                 f"### Answer\n{drug} ({chembl_id}) was tested in a {context_str}: {desc}"
             ).strip()
         }
-        count += 1
 
 
 def generate_ligand_efficiency_qa(
@@ -1323,6 +1437,13 @@ def build_drug_interaction_dataset(
             "metabolism",
             lambda: generate_metabolism_qa(tables["metabolism"], mol, _cr),
             "metabolism" in tables and compound_records is not None,
+        ),
+        (
+            "CYP inhibition",
+            lambda: generate_cyp_inhibition_qa(
+                tables["activities"], tables["assays"], tables["target_dictionary"], mol
+            ),
+            "activities" in tables and "assays" in tables and "target_dictionary" in tables,
         ),
         (
             "drug-drug interactions",

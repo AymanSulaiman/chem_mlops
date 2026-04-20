@@ -5,7 +5,7 @@ from app.scripts.flows.finetuning.export_to_ollama import (
     export_to_ollama,
     latest_run_dir,
 )
-from app.scripts.flows.finetuning.finetuning import gemma3_chembl_toon_finetune_flow
+from app.scripts.flows.finetuning.finetuning import gemma4_chembl_toon_finetune_flow
 from app.scripts.flows.initial_data_transformation.collect_data import collect_data
 from app.scripts.flows.initial_data_transformation.transform_data import transform_data
 from app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset import (
@@ -43,7 +43,7 @@ def build_drug_interaction_dataset_op() -> None:
 # Both f3a/f3b must complete before finetuning begins (fan-in via Nothing inputs)
 @op(ins={"start_a": In(Nothing), "start_b": In(Nothing)}, out=Out(Nothing))
 def finetune_llm_op() -> None:
-    gemma3_chembl_toon_finetune_flow()
+    gemma4_chembl_toon_finetune_flow()
 
 
 @op(ins={"start": In(Nothing)})

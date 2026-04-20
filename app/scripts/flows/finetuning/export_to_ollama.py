@@ -18,7 +18,7 @@ Usage
         --model-name my-chem-model:latest
 
     # After export, start a chat:
-    ollama run chembl-drug-chat:1b
+    ollama run chembl-drug-chat:gemma4-e2b
 """
 
 import argparse
@@ -28,9 +28,9 @@ import sys
 from pathlib import Path
 
 ARTIFACTS_DIR = Path("artifacts")
-DEFAULT_MLX_SUBDIR = "mlx/gemma-3-1b-pt-mlx"
-DEFAULT_ADAPTER_SUBDIR = "adapters/gemma3-1b-pt-chembl-toon"
-DEFAULT_MODEL_NAME = "chembl-drug-chat:1b"
+DEFAULT_MLX_SUBDIR = "mlx/gemma-4-e2b-it-mlx"
+DEFAULT_ADAPTER_SUBDIR = "adapters/gemma4-e2b-it-chembl-toon"
+DEFAULT_MODEL_NAME = "chembl-drug-chat:gemma4-e2b"
 
 SYSTEM_PROMPT = """\
 You are ChEMBL Drug Chat, a conversational pharmacology assistant specialising in \
@@ -83,7 +83,7 @@ def export_to_ollama(
 
     Args:
         run_dir:        Artifact run directory (e.g. ``artifacts/20260403_220717``).
-        model_name:     Ollama model name to create (e.g. ``chembl-drug-chat:1b``).
+    model_name:     Ollama model name to create (e.g. ``chembl-drug-chat:gemma4-e2b``).
         mlx_subdir:     Subdirectory within run_dir containing the MLX base model.
         adapter_subdir: Subdirectory within run_dir containing the LoRA adapter.
         force:          If True, overwrite an existing ollama export directory.
@@ -120,8 +120,8 @@ def export_to_ollama(
     fused_hf_dir = output_dir / "fused_hf"
 
     # Step 1 — fuse adapter into base model, save as HF safetensors
-    # (mlx_lm --export-gguf does not support gemma3_text, so we use --save-path
-    #  and convert to GGUF in step 2 via llama.cpp's convert script)
+    # (mlx_lm --export-gguf does not support the Gemma 4 export path we use here,
+    #  so we use --save-path and convert to GGUF in step 2 via llama.cpp's converter)
     print("Step 1/4 — Fusing LoRA adapter into base model (HF format)...")
     _run(
         [

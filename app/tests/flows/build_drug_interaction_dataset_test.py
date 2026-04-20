@@ -1,3 +1,4 @@
+import inspect
 import json
 import shutil
 import tempfile
@@ -6,12 +7,14 @@ from pathlib import Path
 import polars as pl
 import pytest
 
+import app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset as dataset_module
 from app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset import (
     _drug_name,
     _mol_lookup,
     _record_to_molregno,
     build_drug_interaction_dataset,
     generate_activity_qa,
+    generate_cyp_inhibition_qa,
     generate_ddi_qa,
     generate_indication_qa,
     generate_mechanism_qa,
@@ -104,6 +107,39 @@ def activities():
             "standard_type": ["IC50", "Ki"],
             "standard_value": [30.0, 600.0],
             "standard_units": ["nM", "nM"],
+        }
+    )
+
+
+@pytest.fixture
+def cyp_assays():
+    return pl.DataFrame(
+        {
+            "assay_id": [30, 40],
+            "tid": [3, 4],
+            "description": [
+                "CYP3A4 inhibition assay in human liver microsomes",
+                "CYP2D6 inhibition assay in human recombinant enzyme",
+            ],
+            "assay_type": ["B", "B"],
+            "assay_organism": ["Homo sapiens", "Homo sapiens"],
+            "assay_tissue": ["Liver", "Recombinant enzyme"],
+            "assay_cell_type": [None, None],
+        }
+    )
+
+
+@pytest.fixture
+def cyp_inhibition_activities():
+    return pl.DataFrame(
+        {
+            "activity_id": [300, 400],
+            "assay_id": [30, 40],
+            "molregno": [1, 2],
+            "standard_type": ["IC50", "Ki"],
+            "standard_relation": ["=", "="],
+            "standard_value": [45.0, 6.0],
+            "standard_units": ["nM", "uM"],
         }
     )
 
@@ -236,6 +272,69 @@ def test_metabolism_qa_no_enzyme_skipped(molecule_dict, compound_records):
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# generate_cyp_inhibition_qa
+# ---------------------------------------------------------------------------
+
+
+def test_cyp_inhibition_qa_produces_pairs(
+    cyp_inhibition_activities, cyp_assays, target_dict_with_tid, molecule_dict
+):
+    pairs = list(
+        generate_cyp_inhibition_qa(
+            cyp_inhibition_activities, cyp_assays, target_dict_with_tid, molecule_dict
+        )
+    )
+    assert len(pairs) > 0
+
+
+def test_cyp_inhibition_qa_mentions_potency(
+    cyp_inhibition_activities, cyp_assays, target_dict_with_tid, molecule_dict
+):
+    pairs = list(
+        generate_cyp_inhibition_qa(
+            cyp_inhibition_activities, cyp_assays, target_dict_with_tid, molecule_dict
+        )
+    )
+    texts = " ".join(p["text"] for p in pairs)
+    assert "strong inhibitor" in texts
+    assert "moderate inhibitor" in texts
+    assert "CYP3A4" in texts
+    assert "CYP2D6" in texts
+
+
+def test_cyp_inhibition_qa_weak_label(target_dict_with_tid, molecule_dict):
+    cyp_assays = pl.DataFrame(
+        {
+            "assay_id": [50],
+            "tid": [3],
+            "description": ["CYP3A4 inhibition assay"],
+            "assay_type": ["B"],
+            "assay_organism": ["Homo sapiens"],
+            "assay_tissue": [None],
+            "assay_cell_type": [None],
+        }
+    )
+    weak_activity = pl.DataFrame(
+        {
+            "activity_id": [500],
+            "assay_id": [50],
+            "molregno": [1],
+            "standard_type": ["IC50"],
+            "standard_relation": ["="],
+            "standard_value": [20.0],
+            "standard_units": ["uM"],
+        }
+    )
+    texts = " ".join(
+        p["text"]
+        for p in generate_cyp_inhibition_qa(
+            weak_activity, cyp_assays, target_dict_with_tid, molecule_dict
+        )
+    )
+    assert "weak inhibitor" in texts
+
+
 def test_ddi_qa_generates_pairs(metabolism, molecule_dict, compound_records):
     pairs = list(generate_ddi_qa(metabolism, molecule_dict, compound_records))
     assert len(pairs) > 0
@@ -256,10 +355,9 @@ def test_ddi_qa_no_duplicate_pairs(metabolism, molecule_dict, compound_records):
     assert len(drug_pair_questions) == len(set(drug_pair_questions))
 
 
-def test_ddi_qa_max_pairs_respected(metabolism, molecule_dict, compound_records):
-    pairs = list(generate_ddi_qa(metabolism, molecule_dict, compound_records, max_pairs=1))
-    # max_pairs=1 yields at most 6 records (6 QA variants per pair)
-    assert len(pairs) <= 6
+def test_ddi_qa_has_no_pair_limit_parameter():
+    assert "max_pairs" not in inspect.signature(generate_ddi_qa).parameters
+    assert not hasattr(dataset_module, "MAX_DDI_PAIRS")
 
 
 def test_ddi_qa_only_named_drugs(metabolism, molecule_dict, compound_records):
@@ -675,6 +773,10 @@ def test_atc_qa_contains_code(atc_classification, molecule_atc_classification, m
     assert "ATC" in texts
 
 
+def test_assay_context_qa_has_no_pair_cap():
+    assert not hasattr(dataset_module, "MAX_ASSAY_PAIRS")
+
+
 # ---------------------------------------------------------------------------
 # generate_approved_product_qa
 # ---------------------------------------------------------------------------
@@ -794,7 +896,7 @@ class TestBuildDrugInteractionDatasetExtended:
 
 
 # ---------------------------------------------------------------------------
-# New fixtures for the 7 additional generators
+# New fixtures for the 8 additional generators
 # ---------------------------------------------------------------------------
 
 
@@ -821,15 +923,18 @@ def docs():
 def assays():
     return pl.DataFrame(
         {
-            "assay_id": [10, 20],
+            "assay_id": [10, 20, 30, 40],
+            "tid": [1, 2, 3, 4],
             "description": [
                 "Inhibition of COX-1 in human platelets",
                 "Anticoagulant activity in rat plasma",
+                "CYP3A4 inhibition assay in human liver microsomes",
+                "CYP2D6 inhibition assay in human recombinant enzyme",
             ],
-            "assay_type": ["B", "F"],
-            "assay_organism": ["Homo sapiens", "Rattus norvegicus"],
-            "assay_tissue": ["Blood", "Plasma"],
-            "assay_cell_type": [None, None],
+            "assay_type": ["B", "F", "B", "B"],
+            "assay_organism": ["Homo sapiens", "Rattus norvegicus", "Homo sapiens", "Homo sapiens"],
+            "assay_tissue": ["Blood", "Plasma", "Liver", "Recombinant enzyme"],
+            "assay_cell_type": [None, None, None, None],
         }
     )
 
@@ -837,9 +942,17 @@ def assays():
 @pytest.fixture
 def activities_with_assay(activities):
     """Activities that include assay_id and activity_id columns."""
-    return activities.with_columns(
-        pl.Series("assay_id", [10, 20]),
-        pl.Series("activity_id", [100, 200]),
+    return pl.DataFrame(
+        {
+            "molregno": [1, 2, 1, 2],
+            "pchembl_value": [7.5, 5.2, None, None],
+            "standard_type": ["IC50", "Ki", "IC50", "Ki"],
+            "standard_relation": ["=", "=", "=", "="],
+            "standard_value": [30.0, 600.0, 45.0, 6.0],
+            "standard_units": ["nM", "nM", "nM", "uM"],
+            "assay_id": [10, 20, 30, 40],
+            "activity_id": [100, 200, 300, 400],
+        }
     )
 
 
@@ -860,11 +973,21 @@ def ligand_eff():
 def target_dict_with_tid():
     return pl.DataFrame(
         {
-            "tid": [1, 2],
-            "pref_name": ["Cyclooxygenase-1", "Vitamin K epoxide reductase"],
-            "chembl_id": ["CHEMBL_TGT_1", "CHEMBL_TGT_2"],
-            "organism": ["Homo sapiens", "Homo sapiens"],
-            "target_type": ["SINGLE PROTEIN", "SINGLE PROTEIN"],
+            "tid": [1, 2, 3, 4],
+            "pref_name": [
+                "Cyclooxygenase-1",
+                "Vitamin K epoxide reductase",
+                "CYP3A4",
+                "CYP2D6",
+            ],
+            "chembl_id": ["CHEMBL_TGT_1", "CHEMBL_TGT_2", "CHEMBL_TGT_3", "CHEMBL_TGT_4"],
+            "organism": ["Homo sapiens", "Homo sapiens", "Homo sapiens", "Homo sapiens"],
+            "target_type": [
+                "SINGLE PROTEIN",
+                "SINGLE PROTEIN",
+                "SINGLE PROTEIN",
+                "SINGLE PROTEIN",
+            ],
         }
     )
 
