@@ -374,6 +374,28 @@ All three must pass with zero errors before merging.
 
 ---
 
+## Bun web app
+
+The repository also includes a small Bun chat app in `web/` that talks to the latest Ollama model exported by this project.
+
+Run it with:
+
+```bash
+cd web
+bun run server.ts
+```
+
+Run its Bun-native tests with:
+
+```bash
+cd web
+bun test
+```
+
+Full details live in `web/README.md`.
+
+---
+
 ## Data sources
 
 - **ChEMBL**: [https://www.ebi.ac.uk/chembl/](https://www.ebi.ac.uk/chembl/)

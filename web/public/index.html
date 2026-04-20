@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Chem MLOps Chat</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <main class="chat">
+      <!-- Page header shows the app name and the model currently being used. -->
+      <header class="chat__header">
+        <h1>Chem MLOps Chat</h1>
+        <p id="model-label">Loading latest model...</p>
+      </header>
+
+      <!-- Message feed keeps the full conversation visible. -->
+      <section id="messages" class="messages" aria-live="polite" aria-label="Chat messages"></section>
+
+      <!-- The form supports Enter-to-send and Shift+Enter for a newline. -->
+      <form id="chat-form" class="input-row">
+        <textarea
+          id="input"
+          placeholder="Message Chem MLOps Chat..."
+          rows="2"
+          aria-label="Chat message"
+        ></textarea>
+        <button id="btn" type="submit">Send</button>
+      </form>
+    </main>
+
+    <script type="module" src="/frontend.js"></script>
+  </body>
+</html>
