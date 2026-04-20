@@ -1,6 +1,6 @@
 # chem_mlops
 
-An end-to-end MLOps pipeline that downloads ChEMBL, transforms it into a structured QA dataset, and fine-tunes a Gemma 4 E2B language model to answer drug-interaction questions — optimised for Apple Silicon (M1 Pro / M2 / M3).
+An end-to-end MLOps pipeline that downloads ChEMBL, transforms it into a structured QA dataset, and fine-tunes a Gemma 3 4B language model to answer drug-interaction questions — optimised for Apple Silicon (M1 Pro / M2 / M3).
 
 ---
 
@@ -25,7 +25,7 @@ build_drug_interaction_dataset    create_finetuning_dataset
         └──────────────┬───────────────────┘
                        ▼
               finetune_lora (MLX LoRA)
-              Gemma 4 E2B-it → adapter
+              Gemma 3 4B-it → adapter
 ```
 
 The pipeline is orchestrated with **Dagster** and runs entirely locally.
@@ -75,7 +75,7 @@ This executes the full pipeline via Dagster:
 1. Download ChEMBL SQLite archive
 2. Convert all tables to Parquet
 3. Build the QA JSONL dataset **and** the activity Parquet (in parallel)
-4. Fine-tune Gemma 4 E2B with LoRA
+4. Fine-tune Gemma 3 4B with LoRA
 5. Fuse the LoRA adapter and register the model with Ollama
 
 ### Build with the full dataset
@@ -96,7 +96,7 @@ uv run python -m app.scripts.flows.llm_finetuning_data.build_drug_interaction_da
 # Step 3b — Build the activity Parquet dataset
 uv run python -m app.scripts.flows.llm_finetuning_data.build_finetune_dataset
 
-# Step 4 — Fine-tune Gemma 4 E2B on the full dataset
+# Step 4 — Fine-tune Gemma 3 4B on the full dataset
 uv run app/scripts/flows/finetuning/finetuning.py
 
 # Step 5 — Fuse adapter, export to GGUF, and register with Ollama
@@ -139,7 +139,7 @@ uv run app/scripts/flows/finetuning/finetuning.py
 
 # 5. Export to Ollama and start chatting
 uv run python -m app.scripts.flows.finetuning.export_to_ollama
-ollama run chembl-drug-chat:gemma4-e2b
+ollama run chembl-drug-chat:gemma3-4b
 ```
 
 ---
@@ -218,7 +218,7 @@ This loads all rows from all 23 tables. Expected scale:
 
 ## Fine-tuning
 
-Fine-tuning runs `mlx-lm` LoRA on **Gemma 4 E2B** (`google/gemma-4-E2B-it`), optimised for Apple Silicon unified memory:
+Fine-tuning runs `mlx-lm` LoRA on **Gemma 3 4B** (`google/gemma-3-4b-it`), optimised for Apple Silicon unified memory:
 
 | Parameter | Value |
 |-----------|-------|
@@ -240,8 +240,8 @@ Artifacts are written to `artifacts/<timestamp>/`:
 
 ```
 artifacts/20260403_220717/
-├── mlx/gemma-4-e2b-it-mlx/        # quantised base model
-└── adapters/gemma4-e2b-it-chembl-toon/  # LoRA adapter weights
+├── mlx/gemma-3-4b-it-mlx/         # quantised base model
+└── adapters/gemma3-4b-it-chembl-toon/  # LoRA adapter weights
 ```
 
 ---
@@ -279,7 +279,7 @@ uv run python -m app.scripts.flows.finetuning.export_to_ollama \
 
 ```
 --run-dir PATH        Run directory to export (default: latest in artifacts/)
---model-name NAME     Ollama model name (default: chembl-drug-chat:gemma4-e2b)
+--model-name NAME     Ollama model name (default: chembl-drug-chat:gemma3-4b)
 --force               Overwrite an existing export
 ```
 
@@ -305,7 +305,7 @@ artifacts/<timestamp>/mlx/ollama/
 ### 3. Chat
 
 ```bash
-ollama run chembl-drug-chat:gemma4-e2b
+ollama run chembl-drug-chat:gemma3-4b
 ```
 
 Example questions:

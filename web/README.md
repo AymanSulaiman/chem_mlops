@@ -103,7 +103,7 @@ If you have already exported a model from this project, the app will use the new
 PORT=3000
 OLLAMA_BASE_URL=http://127.0.0.1:11434
 OLLAMA_MODEL_PREFIX=chembl-drug-chat
-OLLAMA_MODEL_NAME=chembl-drug-chat:gemma4-e2b
+OLLAMA_MODEL_NAME=chembl-drug-chat:gemma3-4b
 ```
 
 ## How to think about it

@@ -12,12 +12,12 @@ from app.scripts.flows.finetuning.export_to_ollama import (
     SYSTEM_PROMPT as OLLAMA_SYSTEM_PROMPT,
 )
 
-HF_MODEL_ID = "google/gemma-4-E2B-it"
+HF_MODEL_ID = "google/gemma-3-4b-it"
 DATA_DIR = Path("data/llm_finetune")
 
-# M1 Pro / 32 GB unified memory — tuned for ~22 GB peak with grad checkpointing
+# M1 Pro / 32 GB unified memory — tuned for low peak memory with grad checkpointing
 BATCH_SIZE = 2
-NUM_LAYERS = 16  # Gemma 4 E2B has 35 layers; 16 LoRA layers keeps training practical
+NUM_LAYERS = 16  # Gemma 3 4B has 34 layers; 16 LoRA layers keeps training practical
 ITERS = 1500
 LEARNING_RATE = 1e-5
 MAX_SEQ_LEN = 2048
@@ -72,7 +72,7 @@ def split_long_sequences(
     from transformers import AutoTokenizer
 
     print("Loading tokenizer for sequence pre-splitting...")
-    # Gemma 4's tokenizer_config ships `extra_special_tokens` as a list, but
+    # Gemma tokenizer_config ships `extra_special_tokens` as a list, but
     # transformers expects a mapping here; override it with an empty dict.
     tokenizer = AutoTokenizer.from_pretrained(hf_model_id, extra_special_tokens={})
 
@@ -197,7 +197,7 @@ def save_to_ollama(
     """Fuse adapter, convert to GGUF via llama.cpp, and register with Ollama.
 
     Uses a two-step process because mlx_lm's --export-gguf does not support
-    the Gemma 4 text export path used here:
+    the Gemma 3 text export path used here:
       1. mlx_lm fuse --save-path  →  HuggingFace safetensors format
       2. convert_hf_to_gguf.py    →  GGUF (F16)
     """
@@ -259,7 +259,7 @@ def save_to_ollama(
     print(f"  Run with: ollama run {model_name}")
 
 
-def gemma4_chembl_toon_finetune_flow(
+def gemma3_chembl_toon_finetune_flow(
     hf_model_id: str = HF_MODEL_ID,
     data_dir: str = str(DATA_DIR),
     run_name: str | None = None,
@@ -268,7 +268,7 @@ def gemma4_chembl_toon_finetune_flow(
     Finetuning pipeline optimised for Apple Silicon (M1 Pro, 32 GB):
 
     1. Pre-split training sequences > 2048 tokens to eliminate truncation waste.
-    2. Convert Gemma 4 HF model -> MLX format (4-bit quantised).
+    2. Convert Gemma 3 HF model -> MLX format (4-bit quantised).
     3. LoRA fine-tuning with gradient checkpointing, log capture.
 
     When run standalone, also exports the adapter to Ollama (step 4).
@@ -284,8 +284,8 @@ def gemma4_chembl_toon_finetune_flow(
         run_name = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     run_dir = Path("artifacts") / run_name
-    mlx_model_dir = run_dir / "mlx" / "gemma-4-e2b-it-mlx"
-    adapter_dir = run_dir / "adapters" / "gemma4-e2b-it-chembl-toon"
+    mlx_model_dir = run_dir / "mlx" / "gemma-3-4b-it-mlx"
+    adapter_dir = run_dir / "adapters" / "gemma3-4b-it-chembl-toon"
     log_file = run_dir / "logs" / "finetune.log"
 
     print(f"\n{'=' * 60}")
@@ -310,8 +310,8 @@ def gemma4_chembl_toon_finetune_flow(
     )
 
 
-gemma3_chembl_toon_finetune_flow = gemma4_chembl_toon_finetune_flow
+gemma4_chembl_toon_finetune_flow = gemma3_chembl_toon_finetune_flow
 
 
 if __name__ == "__main__":
-    gemma4_chembl_toon_finetune_flow()
+    gemma3_chembl_toon_finetune_flow()
