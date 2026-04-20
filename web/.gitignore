@@ -1,6 +1,7 @@
 # dependencies (bun install)
 node_modules
 .bun
+public/frontend.js
 
 # output
 out
