@@ -15,9 +15,9 @@ from app.scripts.flows.finetuning.export_to_ollama import (
 HF_MODEL_ID = "google/gemma-3-4b-it"
 DATA_DIR = Path("data/llm_finetune")
 
-# M1 Pro / 32 GB unified memory — tuned for low peak memory with grad checkpointing
+# M1-friendly default — keeps peak memory low with grad checkpointing
 BATCH_SIZE = 2
-NUM_LAYERS = 16  # Gemma 3 4B has 34 layers; 16 LoRA layers keeps training practical
+NUM_LAYERS = 12  # Gemma 3 4B has 34 layers; 12 LoRA layers keeps training practical on M1
 ITERS = 1500
 LEARNING_RATE = 1e-5
 MAX_SEQ_LEN = 2048
@@ -245,7 +245,7 @@ def save_to_ollama(
         '{{- end -}}"""\n\n'
         "PARAMETER temperature 0.7\n"
         "PARAMETER top_p 0.9\n"
-        "PARAMETER repeat_penalty 1.5\n"  # raised from 1.3 — harder penalty for repetition
+        "PARAMETER repeat_penalty 1.1\n"  # conservative — 1.5 was penalising normal tokens into special-token territory
         "PARAMETER repeat_last_n 512\n"  # raised from 256 — catches longer repeated phrases
         "PARAMETER num_ctx 1024\n"  # reduced from 2048 — limits context carry-over
         "PARAMETER num_predict 300\n"  # reduced from 400 — shorter, less rambling

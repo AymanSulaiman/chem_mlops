@@ -138,7 +138,7 @@ uv run python -m app.scripts.flows.llm_finetuning_data.build_finetune_dataset
 uv run app/scripts/flows/finetuning/finetuning.py
 
 # 5. Export to Ollama and start chatting
-uv run python -m app.scripts.flows.finetuning.export_to_ollama
+uv run python -m app.scripts.flows.finetuning.export_to_ollama --force
 ollama run chembl-drug-chat:gemma3-4b
 ```
 
@@ -223,8 +223,8 @@ Fine-tuning runs `mlx-lm` LoRA on **Gemma 3 4B** (`google/gemma-3-4b-it`), optim
 | Parameter | Value |
 |-----------|-------|
 | Method | LoRA |
-| Layers | 16 of 18 |
-| Batch size | 4 |
+| Layers | 12 of 34 |
+| Batch size | 2 |
 | Iterations | 1 500 |
 | Learning rate | 1e-5 |
 | Max sequence length | 2 048 |

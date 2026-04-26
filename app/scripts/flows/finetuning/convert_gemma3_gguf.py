@@ -11,7 +11,6 @@ import gguf
 import mlx.core as mx
 import numpy as np
 
-
 VISIBLE_GEMMA4_TOKENS = {
     "<|channel>",
     "<channel|>",
@@ -27,6 +26,8 @@ def _load_model_config(hf_dir: Path) -> tuple[dict, gguf.MODEL_ARCH, bool]:
     config = json.loads((hf_dir / "config.json").read_text())
     if config.get("model_type") == "gemma4":
         return config["text_config"], gguf.MODEL_ARCH.GEMMA4, True
+    if "text_config" in config:
+        return config["text_config"], gguf.MODEL_ARCH.GEMMA3, False
     return config, gguf.MODEL_ARCH.GEMMA3, False
 
 
@@ -72,10 +73,9 @@ def _add_vocab(
     token_types = token_types[:vocab_size]
 
     writer.add_tokenizer_model("gemma4" if gemma4 else vocab.tokenizer_model)
-    writer.add_string("tokenizer.ggml.pre", "default")
+    writer.add_string("tokenizer.ggml.pre", "gemma4" if gemma4 else "gemma3")
     writer.add_add_space_prefix(False)
-    if gemma4:
-        writer.add_add_bos_token(True)
+    writer.add_add_bos_token(True)
     writer.add_token_list(tokens)
     writer.add_token_scores(scores)
     writer.add_token_types(token_types)
@@ -86,13 +86,17 @@ def _add_vocab(
 
 def _write_gemma3_params(writer: gguf.GGUFWriter, hparams: dict) -> None:
     writer.add_context_length(hparams.get("max_position_embeddings", 131072))
+    writer.add_embedding_length(hparams["hidden_size"])
+    writer.add_feed_forward_length(hparams["intermediate_size"])
     writer.add_head_count(hparams.get("num_attention_heads", 8))
     writer.add_layer_norm_rms_eps(hparams.get("rms_norm_eps", 1e-6))
-    writer.add_key_length(hparams.get("head_dim", 256))
-    writer.add_value_length(hparams.get("head_dim", 256))
-    writer.add_rope_freq_base(
-        hparams.get("rope_parameters", {}).get("full_attention", {}).get("rope_theta", 1_000_000.0)
-    )
+    head_dim = hparams.get("head_dim") or (hparams["hidden_size"] // hparams["num_attention_heads"])
+    writer.add_key_length(head_dim)
+    writer.add_value_length(head_dim)
+    rope_params = hparams.get("rope_parameters") or {}
+    rope_theta = (rope_params.get("full_attention") or {}).get("rope_theta") \
+        or hparams.get("rope_theta", 1_000_000.0)
+    writer.add_rope_freq_base(rope_theta)
     if (final_logit_softcap := hparams.get("final_logit_softcapping")):
         writer.add_final_logit_softcapping(final_logit_softcap)
     if hparams.get("sliding_window_pattern") != 1:

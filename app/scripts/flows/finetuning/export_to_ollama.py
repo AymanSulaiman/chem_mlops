@@ -164,7 +164,7 @@ def export_to_ollama(
         '{{- end -}}"""\n\n'
         "PARAMETER temperature 0.7\n"
         "PARAMETER top_p 0.9\n"
-        "PARAMETER repeat_penalty 1.5\n"  # raised from 1.3 — harder penalty for repetition
+        "PARAMETER repeat_penalty 1.1\n"  # conservative — 1.5 was penalising normal tokens into special-token territory
         "PARAMETER repeat_last_n 512\n"  # raised from 256 — catches longer repeated phrases
         "PARAMETER num_ctx 1024\n"  # reduced from 2048 — limits context carry-over
         "PARAMETER num_predict 300\n"  # reduced from 400 — shorter, less rambling
