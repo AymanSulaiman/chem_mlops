@@ -73,7 +73,7 @@ def _add_vocab(
     token_types = token_types[:vocab_size]
 
     writer.add_tokenizer_model("gemma4" if gemma4 else vocab.tokenizer_model)
-    writer.add_string("tokenizer.ggml.pre", "gemma4" if gemma4 else "gemma3")
+    writer.add_string("tokenizer.ggml.pre", "gemma4" if gemma4 else "default")
     writer.add_add_space_prefix(False)
     writer.add_add_bos_token(True)
     writer.add_token_list(tokens)
@@ -94,9 +94,16 @@ def _write_gemma3_params(writer: gguf.GGUFWriter, hparams: dict) -> None:
     writer.add_key_length(head_dim)
     writer.add_value_length(head_dim)
     rope_params = hparams.get("rope_parameters") or {}
-    rope_theta = (rope_params.get("full_attention") or {}).get("rope_theta") \
+    global_rope_theta = float(
+        (rope_params.get("full_attention") or {}).get("rope_theta")
         or hparams.get("rope_theta", 1_000_000.0)
-    writer.add_rope_freq_base(rope_theta)
+    )
+    local_rope_theta = float(
+        (rope_params.get("sliding_attention") or {}).get("rope_theta") or 10_000.0
+    )
+    # Ollama/llama.cpp requires separate keys for global and local (SWA) attention.
+    writer.add_float32(f"{writer.arch}.rope.global.freq_base", global_rope_theta)
+    writer.add_float32(f"{writer.arch}.rope.local.freq_base", local_rope_theta)
     if (final_logit_softcap := hparams.get("final_logit_softcapping")):
         writer.add_final_logit_softcapping(final_logit_softcap)
     if hparams.get("sliding_window_pattern") != 1:
