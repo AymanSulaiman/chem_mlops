@@ -100,7 +100,7 @@ uv run python -m app.scripts.flows.llm_finetuning_data.build_finetune_dataset
 uv run app/scripts/flows/finetuning/finetuning.py
 
 # Step 5 — Fuse adapter, export to GGUF, and register with Ollama
-uv run python -m app.scripts.flows.finetuning.export_to_ollama
+uv run python -m app.scripts.flows.finetuning.export_to_ollama --force
 ```
 
 Expected disk and time requirements:

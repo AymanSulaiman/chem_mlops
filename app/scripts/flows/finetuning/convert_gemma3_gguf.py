@@ -194,11 +194,10 @@ def convert(hf_dir: Path, output_path: Path) -> None:
         all_weights.update(cast(dict[str, mx.array], mx.load(str(st_file))))
 
     skipped: list[str] = []
-    for hf_name, tensor in all_weights.items():
-        if hf_name == "lm_head.weight":
-            skipped.append(hf_name)
-            continue
+    written_gguf_names: set[str] = set()
+    embed_weights: np.ndarray | None = None
 
+    for hf_name, tensor in all_weights.items():
         suffix = _tensor_suffix(hf_name, tensor)
         if suffix is None:
             skipped.append(hf_name)
@@ -221,7 +220,19 @@ def convert(hf_dir: Path, output_path: Path) -> None:
         else:
             arr = np.array(tensor.astype(mx.float16), dtype=np.float16)
 
-        writer.add_tensor(gguf_base + suffix, arr)
+        gguf_name = gguf_base + suffix
+        writer.add_tensor(gguf_name, arr)
+        written_gguf_names.add(gguf_name)
+
+        if gguf_name == "token_embd.weight":
+            embed_weights = arr
+
+    # Gemma uses tied embeddings: mlx_lm fuse never writes lm_head.weight as a
+    # separate tensor, so output.weight is absent from the safetensors.
+    # llama.cpp requires it explicitly; write a copy of the embedding matrix.
+    if "output.weight" not in written_gguf_names and embed_weights is not None:
+        print("  Note: output.weight missing — writing tied copy of token_embd.weight")
+        writer.add_tensor("output.weight", embed_weights)
 
     if skipped:
         print(f"  Note: skipped {len(skipped)} unrecognised tensor(s): {skipped[:5]}")
