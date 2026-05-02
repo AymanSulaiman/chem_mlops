@@ -31,6 +31,15 @@ web/
 
 ## How it works
 
+```mermaid
+flowchart LR
+    BR([Browser\nindex.html]) -->|POST /api/chat\nJSON message list| BUN[Bun backend\nsrc/app.ts]
+    BUN -->|resolve latest model\nchembl-drug-chat*| OLL[(Ollama\nlocalhost:11434)]
+    OLL -->|streamed token reply| BUN
+    BUN -->|JSON response| BR
+    BR -->|render in\nmessage feed| UI([Chat UI\nfrontend.ts])
+```
+
 ### `server.ts`
 
 - builds `src/frontend.ts` into `public/frontend.js`
@@ -105,24 +114,6 @@ OLLAMA_BASE_URL=http://127.0.0.1:11434
 OLLAMA_MODEL_PREFIX=chembl-drug-chat
 OLLAMA_MODEL_NAME=chembl-drug-chat:1b
 ```
-
-## How to think about it
-
-Browser:
-
-- user types a question
-- browser sends JSON to the Bun backend
-
-Backend:
-
-- validates the message list
-- picks the latest model
-- calls Ollama
-- returns JSON
-
-Ollama:
-
-- generates the answer
 
 ## UI behavior
 

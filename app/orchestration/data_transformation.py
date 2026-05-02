@@ -14,6 +14,9 @@ from app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset import
 from app.scripts.flows.llm_finetuning_data.build_finetune_dataset import (
     create_finetuning_dataset,
 )
+from app.scripts.flows.vector_store.ingest_to_lancedb import (
+    ingest_compounds_to_lancedb,
+)
 
 
 class ChemblConfig(Config):
@@ -46,6 +49,11 @@ def finetune_llm_op() -> None:
     gemma3_chembl_toon_finetune_flow()
 
 
+@op(ins={"start": In(Nothing)}, out=Out(Nothing))
+def ingest_to_lancedb_op() -> None:
+    ingest_compounds_to_lancedb()
+
+
 @op(ins={"start": In(Nothing)})
 def export_to_ollama_op() -> None:
     export_to_ollama(run_dir=latest_run_dir(ARTIFACTS_DIR), force=True)
@@ -55,9 +63,10 @@ def export_to_ollama_op() -> None:
 def chembl_pipeline_graph() -> None:
     collected = collect_data_op()
     transformed = transform_data_op(start=collected)
-    # Build raw activity parquet and QA JSONL in parallel, then fan-in
+    # Build finetune data, drug interaction data, and LanceDB index in parallel
     finetune_data = create_finetune_dataset_op(start=transformed)
     drug_data = build_drug_interaction_dataset_op(start=transformed)
+    ingest_to_lancedb_op(start=transformed)
     finetuned = finetune_llm_op(start_a=finetune_data, start_b=drug_data)
     export_to_ollama_op(start=finetuned)
 
