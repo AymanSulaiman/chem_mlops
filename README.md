@@ -1,31 +1,30 @@
 # chem_mlops
 
-An end-to-end MLOps pipeline that downloads ChEMBL, transforms it into a structured QA dataset, and fine-tunes a Gemma 3 1B language model to answer drug-interaction questions — optimised for Apple Silicon (M1 Pro / M2 / M3).
+An end-to-end MLOps pipeline that downloads ChEMBL, builds a 2.85 M-compound vector store for RAG, generates a structured QA dataset, and fine-tunes a Gemma 3 1B language model to answer drug-interaction questions — optimised for Apple Silicon (M1 Pro / M2 / M3).
 
 ---
 
 ## Overview
 
-```
-ChEMBL SQLite (5.6 GB)
-        │
-        ▼
-  collect_data          Download & extract chembl_XX.db
-        │
-        ▼
-  transform_data        Convert all tables → Parquet via DuckDB
-        │
-        ├──────────────────────────────────┐
-        ▼                                  ▼
-build_drug_interaction_dataset    create_finetuning_dataset
-  23 ChEMBL tables                 activities parquet → JSONL
-  17 QA categories
-  ~500 K training pairs
-        │
-        └──────────────┬───────────────────┘
-                       ▼
-              finetune_lora (MLX LoRA)
-              Gemma 3 1B-PT → adapter
+```mermaid
+flowchart LR
+    EBI[(ChEMBL SQLite\n5.6 GB EBI FTP)] --> COL[collect_data\nDownload & extract\nchembl_XX.db]
+    COL --> TRF[transform_data\nSQLite → Parquet\nvia DuckDB]
+
+    TRF --> DDI[build_drug_interaction_dataset\n23 tables · 17 QA categories\n~500K training pairs]
+    TRF --> FDS[create_finetuning_dataset\nactivities Parquet → JSONL]
+    TRF --> ING[ingest_to_lancedb\n2.85M compound vectors\nMorgan fingerprints · ~6 min]
+
+    ING --> LDB[(LanceDB\nchembl_CHEMBL_36\ncompounds table)]
+
+    DDI --> FT[finetune_lora\nMLX LoRA on Gemma 3 1B-PT\n~1500 iters · Apple Silicon]
+    FDS --> FT
+
+    FT --> EXP[export_to_ollama\nfuse adapter → GGUF\nollama create]
+    EXP --> OLL[(Ollama\nchembl-drug-chat:1b)]
+
+    USR([User query\nSMILES / ChEMBL ID]) -->|query_compounds\nget_compound| LDB
+    LDB -->|top-n similar\ncompounds + metadata| OLL
 ```
 
 The pipeline is orchestrated with **Dagster** and runs entirely locally.
@@ -74,7 +73,10 @@ This executes the full pipeline via Dagster:
 
 1. Download ChEMBL SQLite archive
 2. Convert all tables to Parquet
-3. Build the QA JSONL dataset **and** the activity Parquet (in parallel)
+3. In parallel:
+   - Build the QA JSONL dataset
+   - Build the activity Parquet
+   - **Ingest 2.85 M compounds into LanceDB** (vector store for RAG)
 4. Fine-tune Gemma 3 1B with LoRA
 5. Fuse the LoRA adapter and register the model with Ollama
 
@@ -96,6 +98,9 @@ uv run python -m app.scripts.flows.llm_finetuning_data.build_drug_interaction_da
 # Step 3b — Build the activity Parquet dataset
 uv run python -m app.scripts.flows.llm_finetuning_data.build_finetune_dataset
 
+# Step 3c — Ingest 2.85 M compounds into LanceDB (~6 min)
+uv run python -m app.scripts.flows.vector_store.ingest_to_lancedb
+
 # Step 4 — Fine-tune Gemma 3 1B on the full dataset (~2–4 hrs on M1 Pro)
 uv run app/scripts/flows/finetuning/finetuning.py
 
@@ -110,6 +115,7 @@ Expected disk and time requirements:
 | Download ChEMBL SQLite | 5.6 GB | ~5 min |
 | Convert to Parquet | 8–10 GB | ~15 min |
 | Build QA dataset | < 1 GB output | ~30–60 min |
+| **Ingest to LanceDB** | ~15 GB | **~6 min** |
 | Fine-tune (1 500 iters) | ~2 GB adapter | ~2–4 hrs |
 | Export to Ollama | ~4 GB GGUF | ~5–10 min |
 
@@ -134,6 +140,9 @@ uv run python -m app.scripts.flows.llm_finetuning_data.build_drug_interaction_da
 # 3b. Build the activity Parquet dataset
 uv run python -m app.scripts.flows.llm_finetuning_data.build_finetune_dataset
 
+# 3c. Ingest compounds into LanceDB (vector store)
+uv run python -m app.scripts.flows.vector_store.ingest_to_lancedb
+
 # 4. Fine-tune
 uv run app/scripts/flows/finetuning/finetuning.py
 
@@ -141,6 +150,52 @@ uv run app/scripts/flows/finetuning/finetuning.py
 uv run python -m app.scripts.flows.finetuning.export_to_ollama
 ollama run chembl-drug-chat:1b
 ```
+
+---
+
+## Vector Store (RAG)
+
+The pipeline builds a **LanceDB vector store** alongside fine-tuning — 2,854,996 compounds from ChEMBL, each represented as a 2048-bit Morgan fingerprint (ECFP4, radius 2).
+
+This enables **Retrieval-Augmented Generation (RAG)** at inference time: instead of relying on the model to remember facts, query the vector store first and inject the retrieved record directly into the prompt.
+
+### Why RAG alongside fine-tuning?
+
+Fine-tuning teaches the model to *sound like* a domain expert. It cannot guarantee factual accuracy for specific compounds. RAG grounds answers in real ChEMBL records — mechanisms, indications, warnings, metabolic enzymes — that the model only needs to format.
+
+### Ingest
+
+```bash
+# Runs automatically as part of the Dagster pipeline, or standalone:
+uv run python -m app.scripts.flows.vector_store.ingest_to_lancedb
+```
+
+Re-runs are safe — the table is always overwritten. Output: `data/lancedb/chembl_CHEMBL_36/`.
+
+### Query
+
+```python
+from app.scripts.flows.vector_store.query_lancedb import query_compounds, get_compound
+
+# Similarity search — top 5 compounds most similar to aspirin
+hits = query_compounds("CC(=O)Oc1ccccc1C(=O)O", n=5)
+# Returns list of dicts with all metadata columns + _distance
+
+# Exact lookup by ChEMBL ID
+record = get_compound("CHEMBL25")
+# Returns dict or None
+```
+
+### Internal sanity check
+
+```bash
+# Queries the live store with known molecules and asserts correctness
+uv run python -m app.scripts.flows.vector_store.query_lancedb
+```
+
+Checks: top similarity hit is aspirin itself, exact lookup returns the right record, invalid SMILES raises `ValueError`, unknown ID returns `None`.
+
+Full details: [`app/scripts/flows/vector_store/README.md`](app/scripts/flows/vector_store/README.md)
 
 ---
 
@@ -331,7 +386,8 @@ This re-fuses from the latest artifact and replaces the existing Ollama model.
 chem_mlops/
 ├── app/
 │   ├── orchestration/
-│   │   └── data_transformation.py      # Dagster pipeline (@op / @graph / Definitions)
+│   │   ├── data_transformation.py      # Dagster pipeline (@op / @graph / Definitions)
+│   │   └── README.md                   # Pipeline architecture and stage docs
 │   └── scripts/
 │       ├── flows/
 │       │   ├── initial_data_transformation/
@@ -340,14 +396,20 @@ chem_mlops/
 │       │   ├── llm_finetuning_data/
 │       │   │   ├── build_drug_interaction_dataset.py  # 17-category QA builder
 │       │   │   └── build_finetune_dataset.py          # Activity Parquet → JSONL
-│       │   └── finetuning/
-│       │       ├── finetuning.py       # MLX LoRA fine-tuning + Ollama export
-│       │       └── export_to_ollama.py # Standalone: export any run to Ollama
+│       │   ├── finetuning/
+│       │   │   ├── finetuning.py       # MLX LoRA fine-tuning
+│       │   │   └── export_to_ollama.py # Standalone: export any run to Ollama
+│       │   └── vector_store/
+│       │       ├── ingest_to_lancedb.py  # Join 13 tables → fingerprint → LanceDB
+│       │       ├── query_lancedb.py      # query_compounds / get_compound / sanity check
+│       │       └── README.md             # Vector store architecture and tradeoffs
 │       └── load_data/
 │           └── load_data.py            # ChemblDataLoader helper
 ├── data/
 │   ├── chembl_transform/               # Parquet files (one per table)
-│   └── llm_finetune/                   # train.jsonl / valid.jsonl
+│   ├── llm_finetune/                   # train.jsonl / valid.jsonl
+│   └── lancedb/                        # LanceDB vector store
+│       └── chembl_CHEMBL_36/           # 2,854,996 compounds · 2048-bit vectors
 ├── deployments/
 │   └── workspace.yaml                  # Dagster code-location config
 ├── notebooks/                          # Exploratory data analysis
