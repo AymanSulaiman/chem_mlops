@@ -30,10 +30,9 @@ INVALID_SMILES = "not_a_smiles"
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
+
 def _make_record(smiles: str, chembl_id: str, pref_name: str, mw: float) -> dict[str, Any]:
-    fp = _FP_GEN.GetFingerprintAsNumPy(
-        Chem.MolFromSmiles(smiles)
-    ).astype(np.float32)
+    fp = _FP_GEN.GetFingerprintAsNumPy(Chem.MolFromSmiles(smiles)).astype(np.float32)
     return {
         "chembl_id": chembl_id,
         "pref_name": pref_name,
@@ -49,8 +48,8 @@ def lancedb_dir(tmp_path: Path) -> str:
     uri = str(tmp_path / "chembl_CHEMBL_36")
     db = lancedb.connect(uri)
     records = [
-        _make_record(ASPIRIN_SMILES,   "CHEMBL25",  "Aspirin",   180.16),
-        _make_record(CAFFEINE_SMILES,  "CHEMBL113", "Caffeine",  194.19),
+        _make_record(ASPIRIN_SMILES, "CHEMBL25", "Aspirin", 180.16),
+        _make_record(CAFFEINE_SMILES, "CHEMBL113", "Caffeine", 194.19),
         _make_record(IBUPROFEN_SMILES, "CHEMBL521", "Ibuprofen", 206.29),
     ]
     db.create_table(COMPOUNDS_TABLE, data=records, mode="overwrite")
@@ -58,6 +57,7 @@ def lancedb_dir(tmp_path: Path) -> str:
 
 
 # ── _resolve_lancedb_uri ──────────────────────────────────────────────────────
+
 
 class TestResolveLancedbUri:
     def test_returns_latest_versioned_dir(self, lancedb_dir: str) -> None:
@@ -81,6 +81,7 @@ class TestResolveLancedbUri:
 
 # ── _smiles_to_query_vector ───────────────────────────────────────────────────
 
+
 class TestSmilesToQueryVector:
     def test_valid_smiles_returns_float_list(self) -> None:
         vec = _smiles_to_query_vector(ASPIRIN_SMILES)
@@ -99,6 +100,7 @@ class TestSmilesToQueryVector:
 
 # ── _open_table ───────────────────────────────────────────────────────────────
 
+
 class TestOpenTable:
     def test_opens_table_successfully(self, lancedb_dir: str) -> None:
         table = _open_table(lancedb_dir)
@@ -112,6 +114,7 @@ class TestOpenTable:
 
 
 # ── query_compounds ───────────────────────────────────────────────────────────
+
 
 class TestQueryCompounds:
     def test_returns_n_results(self, lancedb_dir: str) -> None:
@@ -148,6 +151,7 @@ class TestQueryCompounds:
 
 # ── get_compound ──────────────────────────────────────────────────────────────
 
+
 class TestGetCompound:
     def test_returns_correct_record(self, lancedb_dir: str) -> None:
         record = get_compound("CHEMBL25", lancedb_dir=lancedb_dir)
@@ -175,6 +179,7 @@ class TestGetCompound:
 
 
 # ── _run_sanity_check ─────────────────────────────────────────────────────────
+
 
 class TestRunSanityCheck:
     def test_passes_against_known_data(self, lancedb_dir: str) -> None:

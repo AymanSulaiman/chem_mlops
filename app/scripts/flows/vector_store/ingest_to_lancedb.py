@@ -36,6 +36,7 @@ _FP_GEN = rdFingerprintGenerator.GetMorganGenerator(radius=MORGAN_RADIUS, fpSize
 
 # ── Private helpers ───────────────────────────────────────────────────────────
 
+
 def _collect(lf: pl.LazyFrame) -> pl.DataFrame:
     """Collect a LazyFrame, asserting the result is a DataFrame for type checkers."""
     result = lf.collect()
@@ -72,37 +73,49 @@ def _build_flat_df(parquet_dir: str) -> pl.DataFrame:
     """
     # ── Base + 1:1 joins ──────────────────────────────────────────────────
     base: pl.DataFrame = _collect(
-        pl.scan_parquet(f"{parquet_dir}/molecule_dictionary.parquet")
-        .filter(pl.col("structure_type") == "MOL")
+        pl.scan_parquet(f"{parquet_dir}/molecule_dictionary.parquet").filter(
+            pl.col("structure_type") == "MOL"
+        )
     )
 
     cs: pl.DataFrame = _collect(
-        pl.scan_parquet(f"{parquet_dir}/compound_structures.parquet")
-        .select(["molregno", "canonical_smiles", "standard_inchi_key"])
+        pl.scan_parquet(f"{parquet_dir}/compound_structures.parquet").select(
+            ["molregno", "canonical_smiles", "standard_inchi_key"]
+        )
     )
     cp: pl.DataFrame = _collect(
-        pl.scan_parquet(f"{parquet_dir}/compound_properties.parquet")
-        .select([
-            "molregno", "mw_freebase", "alogp", "hba", "hbd", "psa",
-            "qed_weighted", "full_molformula", "num_ro5_violations", "heavy_atoms",
-        ])
+        pl.scan_parquet(f"{parquet_dir}/compound_properties.parquet").select(
+            [
+                "molregno",
+                "mw_freebase",
+                "alogp",
+                "hba",
+                "hbd",
+                "psa",
+                "qed_weighted",
+                "full_molformula",
+                "num_ro5_violations",
+                "heavy_atoms",
+            ]
+        )
     )
     mh: pl.DataFrame = _collect(
-        pl.scan_parquet(f"{parquet_dir}/molecule_hierarchy.parquet")
-        .select(["molregno", "parent_molregno", "active_molregno"])
+        pl.scan_parquet(f"{parquet_dir}/molecule_hierarchy.parquet").select(
+            ["molregno", "parent_molregno", "active_molregno"]
+        )
     )
     usan: pl.DataFrame = _collect(
-        pl.scan_parquet(f"{parquet_dir}/usan_stems.parquet")
-        .select([
-            "stem",
-            pl.col("annotation").alias("usan_stem_annotation"),
-            pl.col("stem_class").alias("usan_stem_class"),
-        ])
+        pl.scan_parquet(f"{parquet_dir}/usan_stems.parquet").select(
+            [
+                "stem",
+                pl.col("annotation").alias("usan_stem_annotation"),
+                pl.col("stem_class").alias("usan_stem_class"),
+            ]
+        )
     )
 
     base = (
-        base
-        .join(cs, on="molregno", how="left")
+        base.join(cs, on="molregno", how="left")
         .join(cp, on="molregno", how="left")
         .join(mh, on="molregno", how="left")
         .join(usan, left_on="usan_stem", right_on="stem", how="left")
@@ -118,41 +131,73 @@ def _build_flat_df(parquet_dir: str) -> pl.DataFrame:
         pl.scan_parquet(f"{parquet_dir}/drug_mechanism.parquet")
         .join(_target_dict, on="tid", how="left")
         .group_by("molregno")
-        .agg([
-            pl.col("mechanism_of_action").drop_nulls().unique().str.join("; ").alias("mechanisms"),
-            pl.col("action_type").drop_nulls().unique().str.join("; ").alias("action_types"),
-            pl.col("target_name").drop_nulls().unique().str.join("; ").alias("mechanism_targets"),
-        ])
+        .agg(
+            [
+                pl.col("mechanism_of_action")
+                .drop_nulls()
+                .unique()
+                .str.join("; ")
+                .alias("mechanisms"),
+                pl.col("action_type").drop_nulls().unique().str.join("; ").alias("action_types"),
+                pl.col("target_name")
+                .drop_nulls()
+                .unique()
+                .str.join("; ")
+                .alias("mechanism_targets"),
+            ]
+        )
     )
 
     ind_agg: pl.DataFrame = _collect(
         pl.scan_parquet(f"{parquet_dir}/drug_indication.parquet")
         .group_by("molregno")
-        .agg([
-            pl.col("mesh_heading").drop_nulls().unique().str.join("; ").alias("indications"),
-            pl.col("efo_term").drop_nulls().unique().str.join("; ").alias("indication_efo_terms"),
-            pl.col("max_phase_for_ind").max().alias("max_indication_phase"),
-        ])
+        .agg(
+            [
+                pl.col("mesh_heading").drop_nulls().unique().str.join("; ").alias("indications"),
+                pl.col("efo_term")
+                .drop_nulls()
+                .unique()
+                .str.join("; ")
+                .alias("indication_efo_terms"),
+                pl.col("max_phase_for_ind").max().alias("max_indication_phase"),
+            ]
+        )
     )
 
     warn_agg: pl.DataFrame = _collect(
         pl.scan_parquet(f"{parquet_dir}/drug_warning.parquet")
         .group_by("molregno")
-        .agg([
-            pl.col("warning_type").drop_nulls().unique().str.join("; ").alias("warning_types"),
-            pl.col("warning_class").drop_nulls().unique().str.join("; ").alias("warning_classes"),
-            pl.col("warning_description").drop_nulls().unique().str.join("; ").alias("warning_descriptions"),
-            pl.col("warning_country").drop_nulls().unique().str.join("; ").alias("warning_countries"),
-            pl.col("warning_year").min().alias("first_warning_year"),
-        ])
+        .agg(
+            [
+                pl.col("warning_type").drop_nulls().unique().str.join("; ").alias("warning_types"),
+                pl.col("warning_class")
+                .drop_nulls()
+                .unique()
+                .str.join("; ")
+                .alias("warning_classes"),
+                pl.col("warning_description")
+                .drop_nulls()
+                .unique()
+                .str.join("; ")
+                .alias("warning_descriptions"),
+                pl.col("warning_country")
+                .drop_nulls()
+                .unique()
+                .str.join("; ")
+                .alias("warning_countries"),
+                pl.col("warning_year").min().alias("first_warning_year"),
+            ]
+        )
     )
 
     syn_agg: pl.DataFrame = _collect(
         pl.scan_parquet(f"{parquet_dir}/molecule_synonyms.parquet")
         .group_by("molregno")
-        .agg([
-            pl.col("synonyms").drop_nulls().unique().str.join("; ").alias("synonyms"),
-        ])
+        .agg(
+            [
+                pl.col("synonyms").drop_nulls().unique().str.join("; ").alias("synonyms"),
+            ]
+        )
     )
 
     _atc_class: pl.LazyFrame = pl.scan_parquet(f"{parquet_dir}/atc_classification.parquet")
@@ -160,14 +205,32 @@ def _build_flat_df(parquet_dir: str) -> pl.DataFrame:
         pl.scan_parquet(f"{parquet_dir}/molecule_atc_classification.parquet")
         .join(_atc_class, on="level5", how="left")
         .group_by("molregno")
-        .agg([
-            pl.col("level5").drop_nulls().unique().str.join("; ").alias("atc_codes"),
-            pl.col("who_name").drop_nulls().unique().str.join("; ").alias("atc_who_names"),
-            pl.col("level1_description").drop_nulls().unique().str.join("; ").alias("atc_level1"),
-            pl.col("level2_description").drop_nulls().unique().str.join("; ").alias("atc_level2"),
-            pl.col("level3_description").drop_nulls().unique().str.join("; ").alias("atc_level3"),
-            pl.col("level4_description").drop_nulls().unique().str.join("; ").alias("atc_level4"),
-        ])
+        .agg(
+            [
+                pl.col("level5").drop_nulls().unique().str.join("; ").alias("atc_codes"),
+                pl.col("who_name").drop_nulls().unique().str.join("; ").alias("atc_who_names"),
+                pl.col("level1_description")
+                .drop_nulls()
+                .unique()
+                .str.join("; ")
+                .alias("atc_level1"),
+                pl.col("level2_description")
+                .drop_nulls()
+                .unique()
+                .str.join("; ")
+                .alias("atc_level2"),
+                pl.col("level3_description")
+                .drop_nulls()
+                .unique()
+                .str.join("; ")
+                .alias("atc_level3"),
+                pl.col("level4_description")
+                .drop_nulls()
+                .unique()
+                .str.join("; ")
+                .alias("atc_level4"),
+            ]
+        )
     )
 
     _cr: pl.LazyFrame = pl.scan_parquet(f"{parquet_dir}/compound_records.parquet").select(
@@ -178,10 +241,20 @@ def _build_flat_df(parquet_dir: str) -> pl.DataFrame:
         .filter(pl.col("organism") == "Homo sapiens")
         .join(_cr, left_on="substrate_record_id", right_on="record_id", how="left")
         .group_by("molregno")
-        .agg([
-            pl.col("enzyme_name").drop_nulls().unique().str.join("; ").alias("metabolic_enzymes"),
-            pl.col("met_conversion").drop_nulls().unique().str.join("; ").alias("metabolic_conversions"),
-        ])
+        .agg(
+            [
+                pl.col("enzyme_name")
+                .drop_nulls()
+                .unique()
+                .str.join("; ")
+                .alias("metabolic_enzymes"),
+                pl.col("met_conversion")
+                .drop_nulls()
+                .unique()
+                .str.join("; ")
+                .alias("metabolic_conversions"),
+            ]
+        )
     )
 
     _products: pl.LazyFrame = pl.scan_parquet(f"{parquet_dir}/products.parquet").select(
@@ -192,11 +265,13 @@ def _build_flat_df(parquet_dir: str) -> pl.DataFrame:
         .select(["product_id", "molregno"])
         .join(_products, on="product_id", how="left")
         .group_by("molregno")
-        .agg([
-            pl.col("trade_name").drop_nulls().unique().str.join("; ").alias("trade_names"),
-            pl.col("route").drop_nulls().unique().str.join("; ").alias("routes"),
-            pl.col("dosage_form").drop_nulls().unique().str.join("; ").alias("dosage_forms"),
-        ])
+        .agg(
+            [
+                pl.col("trade_name").drop_nulls().unique().str.join("; ").alias("trade_names"),
+                pl.col("route").drop_nulls().unique().str.join("; ").alias("routes"),
+                pl.col("dosage_form").drop_nulls().unique().str.join("; ").alias("dosage_forms"),
+            ]
+        )
     )
 
     _sa: pl.LazyFrame = pl.scan_parquet(f"{parquet_dir}/structural_alerts.parquet").select(
@@ -210,10 +285,20 @@ def _build_flat_df(parquet_dir: str) -> pl.DataFrame:
         .join(_sa, on="alert_id", how="left")
         .join(_sas, on="alert_set_id", how="left")
         .group_by("molregno")
-        .agg([
-            pl.col("alert_name").drop_nulls().unique().str.join("; ").alias("structural_alerts"),
-            pl.col("set_name").drop_nulls().unique().str.join("; ").alias("structural_alert_sets"),
-        ])
+        .agg(
+            [
+                pl.col("alert_name")
+                .drop_nulls()
+                .unique()
+                .str.join("; ")
+                .alias("structural_alerts"),
+                pl.col("set_name")
+                .drop_nulls()
+                .unique()
+                .str.join("; ")
+                .alias("structural_alert_sets"),
+            ]
+        )
     )
 
     _ddd: pl.LazyFrame = pl.scan_parquet(f"{parquet_dir}/defined_daily_dose.parquet")
@@ -228,13 +313,21 @@ def _build_flat_df(parquet_dir: str) -> pl.DataFrame:
             ).alias("ddd_full")
         )
         .group_by("molregno")
-        .agg([
-            pl.col("ddd_full").drop_nulls().unique().str.join("; ").alias("defined_daily_doses"),
-            pl.col("ddd_admr").drop_nulls().unique().str.join("; ").alias("ddd_routes"),
-        ])
+        .agg(
+            [
+                pl.col("ddd_full")
+                .drop_nulls()
+                .unique()
+                .str.join("; ")
+                .alias("defined_daily_doses"),
+                pl.col("ddd_admr").drop_nulls().unique().str.join("; ").alias("ddd_routes"),
+            ]
+        )
     )
 
-    _assays: pl.LazyFrame = pl.scan_parquet(f"{parquet_dir}/assays.parquet").select(["assay_id", "tid"])
+    _assays: pl.LazyFrame = pl.scan_parquet(f"{parquet_dir}/assays.parquet").select(
+        ["assay_id", "tid"]
+    )
     _act_targets: pl.LazyFrame = pl.scan_parquet(f"{parquet_dir}/target_dictionary.parquet").select(
         ["tid", pl.col("pref_name").alias("target_name")]
     )
@@ -244,18 +337,27 @@ def _build_flat_df(parquet_dir: str) -> pl.DataFrame:
         .join(_assays, on="assay_id", how="left")
         .join(_act_targets, on="tid", how="left")
         .group_by("molregno")
-        .agg([
-            pl.col("pchembl_value").max().alias("max_pchembl"),
-            pl.col("pchembl_value").mean().round(2).alias("mean_pchembl"),
-            pl.len().alias("activity_count"),
-            pl.col("standard_type").drop_nulls().unique().str.join("; ").alias("activity_types"),
-            pl.col("target_name").drop_nulls().unique().str.join("; ").alias("activity_targets"),
-        ])
+        .agg(
+            [
+                pl.col("pchembl_value").max().alias("max_pchembl"),
+                pl.col("pchembl_value").mean().round(2).alias("mean_pchembl"),
+                pl.len().alias("activity_count"),
+                pl.col("standard_type")
+                .drop_nulls()
+                .unique()
+                .str.join("; ")
+                .alias("activity_types"),
+                pl.col("target_name")
+                .drop_nulls()
+                .unique()
+                .str.join("; ")
+                .alias("activity_targets"),
+            ]
+        )
     )
 
     return (
-        base
-        .join(mech_agg, on="molregno", how="left")
+        base.join(mech_agg, on="molregno", how="left")
         .join(ind_agg, on="molregno", how="left")
         .join(warn_agg, on="molregno", how="left")
         .join(syn_agg, on="molregno", how="left")
@@ -352,6 +454,7 @@ def _write_to_lancedb(
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
+
 def ingest_compounds_to_lancedb(
     parquet_dir: str = DATA_DIR,
     lancedb_dir: str = LANCEDB_DIR,
@@ -381,7 +484,5 @@ def ingest_compounds_to_lancedb(
     print(f"[ingest] Done. {written:,} compounds written ({skipped} skipped — invalid SMILES).")
 
 
-
 if __name__ == "__main__":
     ingest_compounds_to_lancedb()
-

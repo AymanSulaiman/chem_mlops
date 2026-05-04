@@ -32,82 +32,190 @@ def parquet_dir(tmp_path: Path) -> str:
     """Write minimal ChEMBL-shaped parquet stubs into a temp directory."""
     d = str(tmp_path)
 
-    pl.DataFrame({"chembl_release_id": [34, 35, 36], "chembl_release": ["CHEMBL_34", "CHEMBL_35", "CHEMBL_36"]}).write_parquet(f"{d}/chembl_release.parquet")
+    pl.DataFrame(
+        {
+            "chembl_release_id": [34, 35, 36],
+            "chembl_release": ["CHEMBL_34", "CHEMBL_35", "CHEMBL_36"],
+        }
+    ).write_parquet(f"{d}/chembl_release.parquet")
 
-    pl.DataFrame({
-        "molregno": [1, 2, 3],
-        "pref_name": ["Aspirin", "Caffeine", "Dummy"],
-        "chembl_id": ["CHEMBL25", "CHEMBL113", "CHEMBL999"],
-        "structure_type": ["MOL", "MOL", "NONE"],  # row 3 should be filtered out
-        "molecule_type": ["Small molecule", "Small molecule", "Small molecule"],
-        "max_phase": [4, 4, None],
-        "therapeutic_flag": [1, 1, 0],
-        "dosed_ingredient": [True, True, False],
-        "first_approval": [1950, 1962, None],
-        "oral": [True, True, None],
-        "parenteral": [False, False, None],
-        "topical": [False, False, None],
-        "black_box_warning": [0, 0, 0],
-        "natural_product": [0, 0, 0],
-        "first_in_class": [0, 0, 0],
-        "chirality": [0, 0, 0],
-        "prodrug": [0, 0, 0],
-        "inorganic_flag": [0, 0, 0],
-        "usan_year": pl.Series([None, None, None], dtype=pl.Int64),
-        "availability_type": [2, 2, None],
-        "usan_stem": pl.Series([None, None, None], dtype=pl.Utf8),
-        "polymer_flag": [0, 0, 0],
-        "usan_substem": pl.Series([None, None, None], dtype=pl.Utf8),
-        "usan_stem_definition": pl.Series([None, None, None], dtype=pl.Utf8),
-        "withdrawn_flag": [0, 0, 0],
-        "chemical_probe": [0, 0, 0],
-        "orphan": [0, 0, 0],
-        "veterinary": [0, 0, 0],
-    }).write_parquet(f"{d}/molecule_dictionary.parquet")
+    pl.DataFrame(
+        {
+            "molregno": [1, 2, 3],
+            "pref_name": ["Aspirin", "Caffeine", "Dummy"],
+            "chembl_id": ["CHEMBL25", "CHEMBL113", "CHEMBL999"],
+            "structure_type": ["MOL", "MOL", "NONE"],  # row 3 should be filtered out
+            "molecule_type": ["Small molecule", "Small molecule", "Small molecule"],
+            "max_phase": [4, 4, None],
+            "therapeutic_flag": [1, 1, 0],
+            "dosed_ingredient": [True, True, False],
+            "first_approval": [1950, 1962, None],
+            "oral": [True, True, None],
+            "parenteral": [False, False, None],
+            "topical": [False, False, None],
+            "black_box_warning": [0, 0, 0],
+            "natural_product": [0, 0, 0],
+            "first_in_class": [0, 0, 0],
+            "chirality": [0, 0, 0],
+            "prodrug": [0, 0, 0],
+            "inorganic_flag": [0, 0, 0],
+            "usan_year": pl.Series([None, None, None], dtype=pl.Int64),
+            "availability_type": [2, 2, None],
+            "usan_stem": pl.Series([None, None, None], dtype=pl.Utf8),
+            "polymer_flag": [0, 0, 0],
+            "usan_substem": pl.Series([None, None, None], dtype=pl.Utf8),
+            "usan_stem_definition": pl.Series([None, None, None], dtype=pl.Utf8),
+            "withdrawn_flag": [0, 0, 0],
+            "chemical_probe": [0, 0, 0],
+            "orphan": [0, 0, 0],
+            "veterinary": [0, 0, 0],
+        }
+    ).write_parquet(f"{d}/molecule_dictionary.parquet")
 
-    pl.DataFrame({
-        "molregno": [1, 2, 3],
-        "canonical_smiles": [ASPIRIN_SMILES, CAFFEINE_SMILES, None],  # row 3 has no SMILES
-        "standard_inchi_key": ["BSYNRYMUTXBXSQ-UHFFFAOYSA-N", "RYYVLZVUVIJVGH-UHFFFAOYSA-N", None],
-    }).write_parquet(f"{d}/compound_structures.parquet")
+    pl.DataFrame(
+        {
+            "molregno": [1, 2, 3],
+            "canonical_smiles": [ASPIRIN_SMILES, CAFFEINE_SMILES, None],  # row 3 has no SMILES
+            "standard_inchi_key": [
+                "BSYNRYMUTXBXSQ-UHFFFAOYSA-N",
+                "RYYVLZVUVIJVGH-UHFFFAOYSA-N",
+                None,
+            ],
+        }
+    ).write_parquet(f"{d}/compound_structures.parquet")
 
-    pl.DataFrame({
-        "molregno": [1, 2],
-        "mw_freebase": [180.16, 194.19],
-        "alogp": [1.19, -0.07],
-        "hba": [3, 3],
-        "hbd": [1, 0],
-        "psa": [63.6, 58.4],
-        "qed_weighted": [0.55, 0.67],
-        "full_molformula": ["C9H8O4", "C8H10N4O2"],
-        "num_ro5_violations": [0, 0],
-        "heavy_atoms": [13, 14],
-    }).write_parquet(f"{d}/compound_properties.parquet")
+    pl.DataFrame(
+        {
+            "molregno": [1, 2],
+            "mw_freebase": [180.16, 194.19],
+            "alogp": [1.19, -0.07],
+            "hba": [3, 3],
+            "hbd": [1, 0],
+            "psa": [63.6, 58.4],
+            "qed_weighted": [0.55, 0.67],
+            "full_molformula": ["C9H8O4", "C8H10N4O2"],
+            "num_ro5_violations": [0, 0],
+            "heavy_atoms": [13, 14],
+        }
+    ).write_parquet(f"{d}/compound_properties.parquet")
 
-    pl.DataFrame({
-        "molregno": [1, 2],
-        "parent_molregno": [1, 2],
-        "active_molregno": [1, 2],
-    }).write_parquet(f"{d}/molecule_hierarchy.parquet")
+    pl.DataFrame(
+        {
+            "molregno": [1, 2],
+            "parent_molregno": [1, 2],
+            "active_molregno": [1, 2],
+        }
+    ).write_parquet(f"{d}/molecule_hierarchy.parquet")
 
-    pl.DataFrame({"stem": ["salicyl"], "annotation": ["salicylates"], "stem_class": ["INN"]}).write_parquet(f"{d}/usan_stems.parquet")
-    pl.DataFrame({"molregno": pl.Series([], dtype=pl.Int64), "mechanism_of_action": pl.Series([], dtype=pl.Utf8), "action_type": pl.Series([], dtype=pl.Utf8), "tid": pl.Series([], dtype=pl.Int64)}).write_parquet(f"{d}/drug_mechanism.parquet")
-    pl.DataFrame({"tid": pl.Series([], dtype=pl.Int64), "pref_name": pl.Series([], dtype=pl.Utf8)}).write_parquet(f"{d}/target_dictionary.parquet")
-    pl.DataFrame({"molregno": pl.Series([], dtype=pl.Int64), "max_phase_for_ind": pl.Series([], dtype=pl.Float64), "mesh_heading": pl.Series([], dtype=pl.Utf8), "efo_term": pl.Series([], dtype=pl.Utf8)}).write_parquet(f"{d}/drug_indication.parquet")
-    pl.DataFrame({"molregno": pl.Series([], dtype=pl.Int64), "warning_type": pl.Series([], dtype=pl.Utf8), "warning_class": pl.Series([], dtype=pl.Utf8), "warning_description": pl.Series([], dtype=pl.Utf8), "warning_country": pl.Series([], dtype=pl.Utf8), "warning_year": pl.Series([], dtype=pl.Int64)}).write_parquet(f"{d}/drug_warning.parquet")
-    pl.DataFrame({"molregno": pl.Series([], dtype=pl.Int64), "synonyms": pl.Series([], dtype=pl.Utf8)}).write_parquet(f"{d}/molecule_synonyms.parquet")
-    pl.DataFrame({"molregno": pl.Series([], dtype=pl.Int64), "level5": pl.Series([], dtype=pl.Utf8)}).write_parquet(f"{d}/molecule_atc_classification.parquet")
-    pl.DataFrame({"level5": pl.Series([], dtype=pl.Utf8), "who_name": pl.Series([], dtype=pl.Utf8), "level1_description": pl.Series([], dtype=pl.Utf8), "level2_description": pl.Series([], dtype=pl.Utf8), "level3_description": pl.Series([], dtype=pl.Utf8), "level4_description": pl.Series([], dtype=pl.Utf8)}).write_parquet(f"{d}/atc_classification.parquet")
-    pl.DataFrame({"record_id": pl.Series([], dtype=pl.Int64), "molregno": pl.Series([], dtype=pl.Int64)}).write_parquet(f"{d}/compound_records.parquet")
-    pl.DataFrame({"met_id": pl.Series([], dtype=pl.Int64), "substrate_record_id": pl.Series([], dtype=pl.Int64), "enzyme_name": pl.Series([], dtype=pl.Utf8), "met_conversion": pl.Series([], dtype=pl.Utf8), "organism": pl.Series([], dtype=pl.Utf8)}).write_parquet(f"{d}/metabolism.parquet")
-    pl.DataFrame({"product_id": pl.Series([], dtype=pl.Utf8), "molregno": pl.Series([], dtype=pl.Int64)}).write_parquet(f"{d}/formulations.parquet")
-    pl.DataFrame({"product_id": pl.Series([], dtype=pl.Utf8), "trade_name": pl.Series([], dtype=pl.Utf8), "route": pl.Series([], dtype=pl.Utf8), "dosage_form": pl.Series([], dtype=pl.Utf8)}).write_parquet(f"{d}/products.parquet")
-    pl.DataFrame({"cpd_str_alert_id": pl.Series([], dtype=pl.Int64), "molregno": pl.Series([], dtype=pl.Int64), "alert_id": pl.Series([], dtype=pl.Int64)}).write_parquet(f"{d}/compound_structural_alerts.parquet")
-    pl.DataFrame({"alert_id": pl.Series([], dtype=pl.Int64), "alert_set_id": pl.Series([], dtype=pl.Int64), "alert_name": pl.Series([], dtype=pl.Utf8)}).write_parquet(f"{d}/structural_alerts.parquet")
-    pl.DataFrame({"alert_set_id": pl.Series([], dtype=pl.Int64), "set_name": pl.Series([], dtype=pl.Utf8)}).write_parquet(f"{d}/structural_alert_sets.parquet")
-    pl.DataFrame({"atc_code": pl.Series([], dtype=pl.Utf8), "ddd_value": pl.Series([], dtype=pl.Float64), "ddd_units": pl.Series([], dtype=pl.Utf8), "ddd_admr": pl.Series([], dtype=pl.Utf8)}).write_parquet(f"{d}/defined_daily_dose.parquet")
-    pl.DataFrame({"activity_id": pl.Series([], dtype=pl.Int64), "assay_id": pl.Series([], dtype=pl.Int64), "molregno": pl.Series([], dtype=pl.Int64), "standard_flag": pl.Series([], dtype=pl.Int64), "pchembl_value": pl.Series([], dtype=pl.Float64), "standard_type": pl.Series([], dtype=pl.Utf8)}).write_parquet(f"{d}/activities.parquet")
-    pl.DataFrame({"assay_id": pl.Series([], dtype=pl.Int64), "tid": pl.Series([], dtype=pl.Int64)}).write_parquet(f"{d}/assays.parquet")
+    pl.DataFrame(
+        {"stem": ["salicyl"], "annotation": ["salicylates"], "stem_class": ["INN"]}
+    ).write_parquet(f"{d}/usan_stems.parquet")
+    pl.DataFrame(
+        {
+            "molregno": pl.Series([], dtype=pl.Int64),
+            "mechanism_of_action": pl.Series([], dtype=pl.Utf8),
+            "action_type": pl.Series([], dtype=pl.Utf8),
+            "tid": pl.Series([], dtype=pl.Int64),
+        }
+    ).write_parquet(f"{d}/drug_mechanism.parquet")
+    pl.DataFrame(
+        {"tid": pl.Series([], dtype=pl.Int64), "pref_name": pl.Series([], dtype=pl.Utf8)}
+    ).write_parquet(f"{d}/target_dictionary.parquet")
+    pl.DataFrame(
+        {
+            "molregno": pl.Series([], dtype=pl.Int64),
+            "max_phase_for_ind": pl.Series([], dtype=pl.Float64),
+            "mesh_heading": pl.Series([], dtype=pl.Utf8),
+            "efo_term": pl.Series([], dtype=pl.Utf8),
+        }
+    ).write_parquet(f"{d}/drug_indication.parquet")
+    pl.DataFrame(
+        {
+            "molregno": pl.Series([], dtype=pl.Int64),
+            "warning_type": pl.Series([], dtype=pl.Utf8),
+            "warning_class": pl.Series([], dtype=pl.Utf8),
+            "warning_description": pl.Series([], dtype=pl.Utf8),
+            "warning_country": pl.Series([], dtype=pl.Utf8),
+            "warning_year": pl.Series([], dtype=pl.Int64),
+        }
+    ).write_parquet(f"{d}/drug_warning.parquet")
+    pl.DataFrame(
+        {"molregno": pl.Series([], dtype=pl.Int64), "synonyms": pl.Series([], dtype=pl.Utf8)}
+    ).write_parquet(f"{d}/molecule_synonyms.parquet")
+    pl.DataFrame(
+        {"molregno": pl.Series([], dtype=pl.Int64), "level5": pl.Series([], dtype=pl.Utf8)}
+    ).write_parquet(f"{d}/molecule_atc_classification.parquet")
+    pl.DataFrame(
+        {
+            "level5": pl.Series([], dtype=pl.Utf8),
+            "who_name": pl.Series([], dtype=pl.Utf8),
+            "level1_description": pl.Series([], dtype=pl.Utf8),
+            "level2_description": pl.Series([], dtype=pl.Utf8),
+            "level3_description": pl.Series([], dtype=pl.Utf8),
+            "level4_description": pl.Series([], dtype=pl.Utf8),
+        }
+    ).write_parquet(f"{d}/atc_classification.parquet")
+    pl.DataFrame(
+        {"record_id": pl.Series([], dtype=pl.Int64), "molregno": pl.Series([], dtype=pl.Int64)}
+    ).write_parquet(f"{d}/compound_records.parquet")
+    pl.DataFrame(
+        {
+            "met_id": pl.Series([], dtype=pl.Int64),
+            "substrate_record_id": pl.Series([], dtype=pl.Int64),
+            "enzyme_name": pl.Series([], dtype=pl.Utf8),
+            "met_conversion": pl.Series([], dtype=pl.Utf8),
+            "organism": pl.Series([], dtype=pl.Utf8),
+        }
+    ).write_parquet(f"{d}/metabolism.parquet")
+    pl.DataFrame(
+        {"product_id": pl.Series([], dtype=pl.Utf8), "molregno": pl.Series([], dtype=pl.Int64)}
+    ).write_parquet(f"{d}/formulations.parquet")
+    pl.DataFrame(
+        {
+            "product_id": pl.Series([], dtype=pl.Utf8),
+            "trade_name": pl.Series([], dtype=pl.Utf8),
+            "route": pl.Series([], dtype=pl.Utf8),
+            "dosage_form": pl.Series([], dtype=pl.Utf8),
+        }
+    ).write_parquet(f"{d}/products.parquet")
+    pl.DataFrame(
+        {
+            "cpd_str_alert_id": pl.Series([], dtype=pl.Int64),
+            "molregno": pl.Series([], dtype=pl.Int64),
+            "alert_id": pl.Series([], dtype=pl.Int64),
+        }
+    ).write_parquet(f"{d}/compound_structural_alerts.parquet")
+    pl.DataFrame(
+        {
+            "alert_id": pl.Series([], dtype=pl.Int64),
+            "alert_set_id": pl.Series([], dtype=pl.Int64),
+            "alert_name": pl.Series([], dtype=pl.Utf8),
+        }
+    ).write_parquet(f"{d}/structural_alerts.parquet")
+    pl.DataFrame(
+        {"alert_set_id": pl.Series([], dtype=pl.Int64), "set_name": pl.Series([], dtype=pl.Utf8)}
+    ).write_parquet(f"{d}/structural_alert_sets.parquet")
+    pl.DataFrame(
+        {
+            "atc_code": pl.Series([], dtype=pl.Utf8),
+            "ddd_value": pl.Series([], dtype=pl.Float64),
+            "ddd_units": pl.Series([], dtype=pl.Utf8),
+            "ddd_admr": pl.Series([], dtype=pl.Utf8),
+        }
+    ).write_parquet(f"{d}/defined_daily_dose.parquet")
+    pl.DataFrame(
+        {
+            "activity_id": pl.Series([], dtype=pl.Int64),
+            "assay_id": pl.Series([], dtype=pl.Int64),
+            "molregno": pl.Series([], dtype=pl.Int64),
+            "standard_flag": pl.Series([], dtype=pl.Int64),
+            "pchembl_value": pl.Series([], dtype=pl.Float64),
+            "standard_type": pl.Series([], dtype=pl.Utf8),
+        }
+    ).write_parquet(f"{d}/activities.parquet")
+    pl.DataFrame(
+        {"assay_id": pl.Series([], dtype=pl.Int64), "tid": pl.Series([], dtype=pl.Int64)}
+    ).write_parquet(f"{d}/assays.parquet")
 
     return d
 
@@ -118,6 +226,7 @@ def lancedb_dir(tmp_path: Path) -> str:
 
 
 # ── _collect ──────────────────────────────────────────────────────────────────
+
 
 class TestCollect:
     def test_returns_dataframe(self) -> None:
@@ -134,6 +243,7 @@ class TestCollect:
 
 
 # ── _smiles_to_fp ─────────────────────────────────────────────────────────────
+
 
 class TestSmilesToFp:
     def test_valid_smiles_returns_ndarray(self) -> None:
@@ -174,6 +284,7 @@ class TestSmilesToFp:
 
 # ── _resolve_chembl_version ───────────────────────────────────────────────────
 
+
 class TestResolveChemblVersion:
     def test_returns_latest_version(self, parquet_dir: str) -> None:
         version = _resolve_chembl_version(parquet_dir)
@@ -185,6 +296,7 @@ class TestResolveChemblVersion:
 
 
 # ── _build_flat_df ────────────────────────────────────────────────────────────
+
 
 class TestBuildFlatDf:
     def test_filters_to_mol_structure_type(self, parquet_dir: str) -> None:
@@ -221,14 +333,17 @@ class TestBuildFlatDf:
 
 # ── _write_to_lancedb ─────────────────────────────────────────────────────────
 
+
 class TestWriteToLancedb:
     def _make_flat_df(self) -> pl.DataFrame:
-        return pl.DataFrame({
-            "molregno": [1, 2, 3],
-            "chembl_id": ["CHEMBL25", "CHEMBL113", "CHEMBL999"],
-            "canonical_smiles": [ASPIRIN_SMILES, CAFFEINE_SMILES, INVALID_SMILES],
-            "standard_inchi_key": ["KEY1", "KEY2", "KEY3"],
-        })
+        return pl.DataFrame(
+            {
+                "molregno": [1, 2, 3],
+                "chembl_id": ["CHEMBL25", "CHEMBL113", "CHEMBL999"],
+                "canonical_smiles": [ASPIRIN_SMILES, CAFFEINE_SMILES, INVALID_SMILES],
+                "standard_inchi_key": ["KEY1", "KEY2", "KEY3"],
+            }
+        )
 
     def test_writes_valid_rows(self, lancedb_dir: str) -> None:
         db = lancedb.connect(lancedb_dir)
@@ -257,12 +372,14 @@ class TestWriteToLancedb:
 
     def test_returns_zero_written_when_all_smiles_invalid(self, lancedb_dir: str) -> None:
         db = lancedb.connect(lancedb_dir)
-        df = pl.DataFrame({
-            "molregno": [1],
-            "chembl_id": ["CHEMBL1"],
-            "canonical_smiles": [INVALID_SMILES],
-            "standard_inchi_key": ["KEY1"],
-        })
+        df = pl.DataFrame(
+            {
+                "molregno": [1],
+                "chembl_id": ["CHEMBL1"],
+                "canonical_smiles": [INVALID_SMILES],
+                "standard_inchi_key": ["KEY1"],
+            }
+        )
         written, skipped = _write_to_lancedb(df, db, cpu_count=1)
         assert written == 0
         assert skipped == 1
@@ -278,6 +395,7 @@ class TestWriteToLancedb:
 
 
 # ── ingest_compounds_to_lancedb ───────────────────────────────────────────────
+
 
 class TestIngestCompoundsToLancedb:
     def test_creates_versioned_lancedb_dir(self, parquet_dir: str, lancedb_dir: str) -> None:

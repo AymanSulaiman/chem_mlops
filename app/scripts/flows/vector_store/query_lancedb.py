@@ -21,6 +21,7 @@ from app.scripts.flows.vector_store.ingest_to_lancedb import (
 
 # ── Private helpers ───────────────────────────────────────────────────────────
 
+
 def _resolve_lancedb_uri(lancedb_dir: str) -> str:
     """Return the path of the latest chembl_CHEMBL_* subdirectory.
 
@@ -36,7 +37,8 @@ def _resolve_lancedb_uri(lancedb_dir: str) -> str:
             "Run ingest_compounds_to_lancedb() first."
         )
     candidates: list[str] = sorted(
-        d for d in os.listdir(lancedb_dir)
+        d
+        for d in os.listdir(lancedb_dir)
         if d.startswith("chembl_CHEMBL") and os.path.isdir(os.path.join(lancedb_dir, d))
     )
     if not candidates:
@@ -71,6 +73,7 @@ def _smiles_to_query_vector(smiles: str) -> list[float]:
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
+
 def query_compounds(
     smiles: str,
     n: int = 5,
@@ -98,11 +101,7 @@ def query_compounds(
     """
     query_vector: list[float] = _smiles_to_query_vector(smiles)
     table: Table = _open_table(lancedb_dir)
-    results: list[dict[str, Any]] = (
-        table.search(query_vector)
-        .limit(n)
-        .to_list()
-    )
+    results: list[dict[str, Any]] = table.search(query_vector).limit(n).to_list()
     # Drop the raw vector column — callers need metadata, not the 2048-float blob
     for row in results:
         row.pop("vector", None)
@@ -130,10 +129,7 @@ def get_compound(
     """
     table: Table = _open_table(lancedb_dir)
     rows: list[dict[str, Any]] = (
-        table.search()
-        .where(f"chembl_id = '{chembl_id}'")
-        .limit(1)
-        .to_list()
+        table.search().where(f"chembl_id = '{chembl_id}'").limit(1).to_list()
     )
     if not rows:
         return None
@@ -143,6 +139,7 @@ def get_compound(
 
 
 # ── Internal self-check ───────────────────────────────────────────────────────
+
 
 def _run_sanity_check(lancedb_dir: str = LANCEDB_DIR) -> None:
     """Query the live vector store with known molecules and print a summary.
@@ -166,9 +163,7 @@ def _run_sanity_check(lancedb_dir: str = LANCEDB_DIR) -> None:
     top_id: str = str(top.get("chembl_id", ""))
     top_name: str = str(top.get("pref_name", ""))
     print(f"    Top hit: {top_id} ({top_name})  _distance={top.get('_distance', '?'):.6f}")
-    assert top_id == ASPIRIN_ID, (
-        f"Expected top hit to be {ASPIRIN_ID}, got {top_id}"
-    )
+    assert top_id == ASPIRIN_ID, f"Expected top hit to be {ASPIRIN_ID}, got {top_id}"
     print("    ✓ Correct top hit")
 
     # Check 2: exact lookup
