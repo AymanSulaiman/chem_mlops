@@ -8,11 +8,11 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import cast
 
 import gguf
 import mlx.core as mx
 import numpy as np
-from typing import cast
 
 
 def convert(hf_dir: Path, output_path: Path) -> None:
@@ -31,9 +31,7 @@ def convert(hf_dir: Path, output_path: Path) -> None:
     head_dim: int = config.get("head_dim", hidden_size // n_heads)
     # Gemma 3 specific
     sliding_window: int | None = config.get("sliding_window")
-    sliding_window_pattern: int | None = config.get("sliding_window_pattern")
     rope_local_base_freq: float = config.get("rope_local_base_freq", rope_theta)
-    query_pre_attn_scalar: int = config.get("query_pre_attn_scalar", head_dim)
 
     arch_name = gguf.MODEL_ARCH_NAMES[gguf.MODEL_ARCH.GEMMA3]
     output_path.parent.mkdir(parents=True, exist_ok=True)

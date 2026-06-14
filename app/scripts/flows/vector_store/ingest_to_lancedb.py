@@ -3,23 +3,21 @@
 # Each row = one compound with a Morgan fingerprint `vector` column for
 # similarity search, plus all metadata columns for scalar filtering.
 
+import math
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any
 
 import lancedb
-import math
 import numpy as np
 import polars as pl
+from lancedb._lancedb import AddResult
 from lancedb.db import DBConnection
 from lancedb.table import Table
-from lancedb._lancedb import AddResult
-from polars.dataframe.frame import DataFrame
 from rdkit import Chem
 from rdkit.Chem import rdFingerprintGenerator
 from rdkit.Chem.rdchem import Mol
 from rdkit.rdBase import BlockLogs
 from tqdm import tqdm
-
 
 DATA_DIR: str = "data/chembl_transform"
 LANCEDB_DIR: str = "data/lancedb"
