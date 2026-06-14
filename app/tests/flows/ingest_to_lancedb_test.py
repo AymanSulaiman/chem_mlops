@@ -1,6 +1,4 @@
-import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock, patch
 
 import lancedb
 import numpy as np
@@ -8,7 +6,6 @@ import polars as pl
 import pytest
 
 from app.scripts.flows.vector_store.ingest_to_lancedb import (
-    BATCH_SIZE,
     COMPOUNDS_TABLE,
     MORGAN_BITS,
     _build_flat_df,
@@ -18,7 +15,6 @@ from app.scripts.flows.vector_store.ingest_to_lancedb import (
     _write_to_lancedb,
     ingest_compounds_to_lancedb,
 )
-
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 

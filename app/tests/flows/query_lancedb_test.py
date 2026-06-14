@@ -9,18 +9,17 @@ import pytest
 from rdkit import Chem
 
 from app.scripts.flows.vector_store.ingest_to_lancedb import (
-    COMPOUNDS_TABLE,
     _FP_GEN,
+    COMPOUNDS_TABLE,
 )
 from app.scripts.flows.vector_store.query_lancedb import (
     _open_table,
     _resolve_lancedb_uri,
-    _smiles_to_query_vector,
     _run_sanity_check,
+    _smiles_to_query_vector,
     get_compound,
     query_compounds,
 )
-
 
 ASPIRIN_SMILES = "CC(=O)Oc1ccccc1C(=O)O"
 CAFFEINE_SMILES = "Cn1cnc2c1c(=O)n(C)c(=O)n2C"

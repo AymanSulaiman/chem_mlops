@@ -14,10 +14,8 @@ from lancedb.table import Table
 from app.scripts.flows.vector_store.ingest_to_lancedb import (
     COMPOUNDS_TABLE,
     LANCEDB_DIR,
-    _FP_GEN,
     _smiles_to_fp,
 )
-
 
 # ── Private helpers ───────────────────────────────────────────────────────────
 
