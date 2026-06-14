@@ -26,13 +26,6 @@ def run_dir(tmp_path: Path) -> Path:
     return rd
 
 
-def _patch_export(run_dir: Path, **kwargs):
-    """Context manager that patches both expensive calls in export_to_ollama."""
-    return patch.multiple(
-        "app.scripts.flows.finetuning.export_to_ollama",
-        _run=kwargs.get("_run", patch("app.scripts.flows.finetuning.export_to_ollama._run").start()),
-    )
-
 
 # ── latest_run_dir ────────────────────────────────────────────────────────────
 
