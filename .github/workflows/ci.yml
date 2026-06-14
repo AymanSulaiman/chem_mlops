@@ -14,9 +14,10 @@ jobs:
 
       - uses: astral-sh/setup-uv@v5
         with:
-          enable-caching: true
+          enable-cache: true
+          python-version-file: .python-version
 
-      - run: uv sync --frozen
+      - run: uv sync --frozen --group default --group dev
 
       - run: uv run ruff check .
 
