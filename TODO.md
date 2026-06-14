@@ -1,10 +1,26 @@
-# ChEMBL Drug Chat — Improvement Tasks
-
-Tracked on the [GitHub project board](https://github.com/users/AymanSulaiman/projects/4).
+# ChEMBL Drug Chat — Project TODO
 
 ---
 
-## 🔥 Immediate (run these now)
+## Pipeline stages
+
+| Stage | Status |
+|---|---|
+| Data collection (ChEMBL download) | Done |
+| Data transformation (SQLite → Parquet) | Done |
+| LLM dataset builder (17 QA categories) | Done |
+| Vector store (2.85M compounds, LanceDB RAG) | Done |
+| Fine-tuning (MLX LoRA, Gemma 3 1B) | Done |
+| Ollama export + GGUF conversion | Done |
+| Dagster orchestration | Done |
+| Bun web chat app | Done |
+| Model evaluation | Missing |
+| CI/CD | Missing |
+| Monitoring / observability | Missing |
+
+---
+
+## 🔥 Immediate
 
 | # | Task | Issue |
 |---|---|---|
@@ -40,32 +56,63 @@ uv run python -m app.scripts.flows.finetuning.finetuning
 
 ---
 
-## 🏗️ Architecture Improvements
+## 🧪 Testing
 
-| # | Task | Issue | Priority |
-|---|---|---|---|
-| 8 | Implement RAG for accurate inference-time lookups | [#6](https://github.com/AymanSulaiman/chem_mlops/issues/6) | High |
-| 9 | Evaluate larger base model (4B or 7B) | [#8](https://github.com/AymanSulaiman/chem_mlops/issues/8) | Low |
-
-### RAG vs fine-tuning
-Fine-tuning memorises patterns → hallucinates when it doesn't know an answer (e.g. drug name "340156").
-RAG retrieves real data at inference time → always grounded in ChEMBL facts.
-
-```
-User: "Does fluoxetine interact with tramadol?"
-  ↓
-Retriever: query metabolism.parquet + activities.parquet
-  ↓
-Context: "fluoxetine (CHEMBL49) — CYP2D6 inhibitor IC50=24nM
-          tramadol (CHEMBL636) — CYP2D6 substrate"
-  ↓
-Model generates grounded answer
-```
+| # | Task | Priority |
+|---|---|---|
+| 8 | Add tests for `build_finetune_dataset.py` | High |
+| 9 | Add tests for `export_to_ollama.py` (mock subprocess calls) | Medium |
+| 10 | Add Dagster op/graph wiring test for `data_transformation.py` | Medium |
 
 ---
 
-## ✅ Completed (this session)
+## 📏 Model Evaluation
 
+Without an eval step the pipeline produces a model with no automated check that it improved.
+
+| # | Task | Priority |
+|---|---|---|
+| 12 | Add perplexity eval on `valid.jsonl` after fine-tuning | High |
+| 13 | Build a small golden benchmark (20–50 known drug questions with expected answers) | High |
+| 14 | Wire eval as a Dagster op that runs after fine-tuning and gates the Ollama export | Medium |
+| 15 | Log eval metrics (perplexity, exact-match %) to a file under `artifacts/<run>/` | Medium |
+
+---
+
+## ⚙️ CI/CD
+
+Nothing enforces `uv run pytest` / `ruff check` / `ty check` on PRs today.
+
+| # | Task | Priority |
+|---|---|---|
+| 16 | Add GitHub Actions workflow: lint + typecheck + tests on every PR | High |
+| 17 | Cache `uv` environment in CI to keep runs under 2 min | Medium |
+| 18 | Add Bun test step (`bun test` in `web/`) to the same workflow | Medium |
+
+---
+
+## 🔭 Monitoring & Observability
+
+| # | Task | Priority |
+|---|---|---|
+| 19 | Log inference latency and token counts from the Bun web app | Medium |
+| 20 | Add a Dagster asset check that validates LanceDB row count after ingestion | Medium |
+| 21 | Persist Dagster run history (currently ephemeral) | Low |
+
+---
+
+## 🏗️ Architecture
+
+| # | Task | Issue | Priority |
+|---|---|---|---|
+| 22 | Evaluate larger base model (4B or 7B) | [#8](https://github.com/AymanSulaiman/chem_mlops/issues/8) | Low |
+
+---
+
+## ✅ Completed
+
+- [x] RAG vector store — 2.85M compounds ingested into LanceDB (PR #14)
+- [x] Bun web chat app wired to Ollama (PR #13)
 - [x] Fixed GGUF converter (RMSNorm +1 shift, space prefix, softcap)
 - [x] Multi-turn Ollama conversation template
 - [x] Anti-repetition tuning (`repeat_penalty 1.5`, `repeat_last_n 512`)
