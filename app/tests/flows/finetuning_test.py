@@ -136,13 +136,14 @@ class TestSplitLongSequences:
         path = tmp_path / "train.jsonl"
         records = [{"text": "hi"}]
         _write_jsonl(path, records)
-        mtime_before = path.stat().st_mtime
 
         tok = _make_tokenizer()
-        with patch("transformers.AutoTokenizer.from_pretrained", return_value=tok):
+        with patch("transformers.AutoTokenizer.from_pretrained", return_value=tok), patch(
+            "pathlib.Path.write_text"
+        ) as mock_write_text:
             split_long_sequences(tmp_path, HF_MODEL_ID, max_seq_len=100)
 
-        assert path.stat().st_mtime == mtime_before
+        mock_write_text.assert_not_called()
 
     def test_mixed_short_and_long_records(self, tmp_path: Path) -> None:
         records = [
