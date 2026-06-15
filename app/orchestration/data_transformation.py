@@ -20,7 +20,7 @@ from app.scripts.flows.vector_store.ingest_to_lancedb import (
 
 
 class ChemblConfig(Config):
-    chembl_version: str = "36"
+    chembl_version: str = "37"
 
 
 @op(out=Out(Nothing))
