@@ -15,7 +15,7 @@
 | Dagster orchestration | Done |
 | Bun web chat app | Done |
 | Model evaluation | Missing |
-| CI/CD | Missing |
+| CI/CD | Done |
 | Monitoring / observability | Missing |
 
 ---
@@ -61,8 +61,8 @@ uv run python -m app.scripts.flows.finetuning.finetuning
 | # | Task | Priority |
 |---|---|---|
 | 8 | Add tests for `build_finetune_dataset.py` | High |
-| 9 | Add tests for `export_to_ollama.py` (mock subprocess calls) | Medium |
-| 10 | Add Dagster op/graph wiring test for `data_transformation.py` | Medium |
+| ~~9~~ | ~~Add tests for `export_to_ollama.py` (mock subprocess calls)~~ | ~~Medium~~ |
+| ~~10~~ | ~~Add Dagster op/graph wiring test for `data_transformation.py`~~ | ~~Medium~~ |
 
 ---
 
@@ -81,13 +81,13 @@ Without an eval step the pipeline produces a model with no automated check that 
 
 ## ⚙️ CI/CD
 
-Nothing enforces `uv run pytest` / `ruff check` / `ty check` on PRs today.
+~~All CI/CD tasks completed.~~ See `.github/workflows/ci.yml`.
 
 | # | Task | Priority |
 |---|---|---|
-| 16 | Add GitHub Actions workflow: lint + typecheck + tests on every PR | High |
-| 17 | Cache `uv` environment in CI to keep runs under 2 min | Medium |
-| 18 | Add Bun test step (`bun test` in `web/`) to the same workflow | Medium |
+| ~~16~~ | ~~Add GitHub Actions workflow: lint + typecheck + tests on every PR~~ | ~~High~~ |
+| ~~17~~ | ~~Cache `uv` environment in CI to keep runs under 2 min~~ | ~~Medium~~ |
+| ~~18~~ | ~~Add Bun test step (`bun test` in `web/`) to the same workflow~~ | ~~Medium~~ |
 
 ---
 
@@ -124,3 +124,7 @@ Nothing enforces `uv run pytest` / `ruff check` / `ty check` on PRs today.
 - [x] Junk name filter (numeric `pref_name`, `AUTONOM` placeholders)
 - [x] Filler phrase removal from training templates
 - [x] Assay context questions capped at 5,000 (was 1.93M = 73% of data)
+- [x] GitHub Actions CI workflow (lint + typecheck + pytest + bun test) — `.github/workflows/ci.yml`
+- [x] `uv` environment caching in CI (`enable-cache: true`)
+- [x] Tests for `export_to_ollama.py` — `app/tests/flows/export_to_ollama_test.py`
+- [x] Tests for `data_transformation.py` (Dagster wiring) — `app/tests/flows/transform_data_test.py`
