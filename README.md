@@ -382,29 +382,38 @@ uv run python -m app.scripts.flows.finetuning.export_to_ollama --force
 This re-fuses from the latest artifact and replaces the existing Ollama model.
 
 
+## Project structure
+
 ```
 chem_mlops/
+├── .github/
+│   └── workflows/
+│       └── ci.yml                      # Lint + typecheck + pytest + bun test on every push/PR
 ├── app/
 │   ├── orchestration/
 │   │   ├── data_transformation.py      # Dagster pipeline (@op / @graph / Definitions)
 │   │   └── README.md                   # Pipeline architecture and stage docs
-│   └── scripts/
-│       ├── flows/
-│       │   ├── initial_data_transformation/
-│       │   │   ├── collect_data.py     # Download ChEMBL SQLite
-│       │   │   └── transform_data.py   # SQLite → Parquet (DuckDB)
-│       │   ├── llm_finetuning_data/
-│       │   │   ├── build_drug_interaction_dataset.py  # 17-category QA builder
-│       │   │   └── build_finetune_dataset.py          # Activity Parquet → JSONL
-│       │   ├── finetuning/
-│       │   │   ├── finetuning.py       # MLX LoRA fine-tuning
-│       │   │   └── export_to_ollama.py # Standalone: export any run to Ollama
-│       │   └── vector_store/
-│       │       ├── ingest_to_lancedb.py  # Join 13 tables → fingerprint → LanceDB
-│       │       ├── query_lancedb.py      # query_compounds / get_compound / sanity check
-│       │       └── README.md             # Vector store architecture and tradeoffs
-│       └── load_data/
-│           └── load_data.py            # ChemblDataLoader helper
+│   ├── scripts/
+│   │   ├── flows/
+│   │   │   ├── initial_data_transformation/
+│   │   │   │   ├── collect_data.py     # Download ChEMBL SQLite
+│   │   │   │   └── transform_data.py   # SQLite → Parquet (DuckDB)
+│   │   │   ├── llm_finetuning_data/
+│   │   │   │   ├── build_drug_interaction_dataset.py  # 17-category QA builder
+│   │   │   │   └── build_finetune_dataset.py          # Activity Parquet → JSONL
+│   │   │   ├── finetuning/
+│   │   │   │   ├── finetuning.py       # MLX LoRA fine-tuning
+│   │   │   │   └── export_to_ollama.py # Standalone: export any run to Ollama
+│   │   │   └── vector_store/
+│   │   │       ├── ingest_to_lancedb.py  # Join 13 tables → fingerprint → LanceDB
+│   │   │       ├── query_lancedb.py      # query_compounds / get_compound / sanity check
+│   │   │       └── README.md             # Vector store architecture and tradeoffs
+│   │   └── load_data/
+│   │       └── load_data.py            # ChemblDataLoader helper
+│   └── tests/
+│       ├── flows/                      # Tests for each pipeline stage
+│       └── load_data/                  # Tests for ChemblDataLoader
+├── web/                                # Bun chat app (talks to Ollama)
 ├── data/
 │   ├── chembl_transform/               # Parquet files (one per table)
 │   ├── llm_finetune/                   # train.jsonl / valid.jsonl
@@ -432,7 +441,7 @@ uv run ruff check .
 uv run ty check
 ```
 
-All three must pass with zero errors before merging.
+All three must pass with zero errors before merging. CI runs the same checks automatically on every push and pull request via `.github/workflows/ci.yml`.
 
 ---
 
