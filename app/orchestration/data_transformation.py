@@ -1,5 +1,6 @@
 from dagster import Config, Definitions, In, Nothing, Out, ScheduleDefinition, graph, op
 
+from app.scripts.flows.eval.eval_model import eval_flow
 from app.scripts.flows.finetuning.export_to_ollama import (
     ARTIFACTS_DIR,
     export_to_ollama,
@@ -54,6 +55,11 @@ def ingest_to_lancedb_op() -> None:
     ingest_compounds_to_lancedb()
 
 
+@op(ins={"start": In(Nothing)}, out=Out(Nothing))
+def eval_model_op() -> None:
+    eval_flow(run_dir=latest_run_dir(ARTIFACTS_DIR))
+
+
 @op(ins={"start": In(Nothing)})
 def export_to_ollama_op() -> None:
     export_to_ollama(run_dir=latest_run_dir(ARTIFACTS_DIR), force=True)
@@ -68,7 +74,8 @@ def chembl_pipeline_graph() -> None:
     drug_data = build_drug_interaction_dataset_op(start=transformed)
     ingest_to_lancedb_op(start=transformed)
     finetuned = finetune_llm_op(start_a=finetune_data, start_b=drug_data)
-    export_to_ollama_op(start=finetuned)
+    evaled = eval_model_op(start=finetuned)
+    export_to_ollama_op(start=evaled)
 
 
 chembl_pipeline = chembl_pipeline_graph.to_job(name="chembl_pipeline")
