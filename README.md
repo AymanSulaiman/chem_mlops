@@ -404,6 +404,9 @@ chem_mlops/
 │   │   │   ├── finetuning/
 │   │   │   │   ├── finetuning.py       # MLX LoRA fine-tuning
 │   │   │   │   └── export_to_ollama.py # Standalone: export any run to Ollama
+│   │   │   ├── eval/
+│   │   │   │   ├── eval_model.py       # Perplexity + golden benchmark eval
+│   │   │   │   └── golden.jsonl        # Golden Q&A benchmark
 │   │   │   └── vector_store/
 │   │   │       ├── ingest_to_lancedb.py  # Join 13 tables → fingerprint → LanceDB
 │   │   │       ├── query_lancedb.py      # query_compounds / get_compound / sanity check

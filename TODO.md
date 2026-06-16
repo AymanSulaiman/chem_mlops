@@ -14,7 +14,7 @@
 | Ollama export + GGUF conversion | Done |
 | Dagster orchestration | Done |
 | Bun web chat app | Done |
-| Model evaluation | Missing |
+| Model evaluation | Done |
 | CI/CD | Done |
 | Monitoring / observability | Missing |
 
