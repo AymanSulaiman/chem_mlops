@@ -1,0 +1,20 @@
+{"question": "What does Aspirin target?", "must_contain": ["cyclooxygenase"], "category": "mechanism_of_action"}
+{"question": "What does Sildenafil inhibit?", "must_contain": ["phosphodiesterase"], "category": "mechanism_of_action"}
+{"question": "What enzyme does Methotrexate inhibit?", "must_contain": ["dihydrofolate"], "category": "mechanism_of_action"}
+{"question": "How does Fluoxetine work?", "must_contain": ["serotonin"], "category": "mechanism_of_action"}
+{"question": "What does Imatinib target?", "must_contain": ["tyrosine kinase"], "category": "mechanism_of_action"}
+{"question": "What enzyme metabolises Warfarin?", "must_contain": ["cyp2c9"], "category": "metabolism"}
+{"question": "What CYP enzyme metabolises Omeprazole?", "must_contain": ["cyp2c19"], "category": "metabolism"}
+{"question": "What enzyme metabolises Codeine?", "must_contain": ["cyp2d6"], "category": "metabolism"}
+{"question": "What CYP enzyme metabolises Atorvastatin?", "must_contain": ["cyp3a4"], "category": "metabolism"}
+{"question": "What is the mechanism of Warfarin's anticoagulant effect?", "must_contain": ["vitamin k"], "category": "mechanism_of_action"}
+{"question": "Which drugs share the CYP2C9 metabolic pathway with Warfarin?", "must_contain": ["cyp2c9"], "category": "drug_drug_interaction"}
+{"question": "What is the DDI risk when combining two CYP3A4 substrates?", "must_contain": ["cyp3a4"], "category": "drug_drug_interaction"}
+{"question": "What interaction should be considered when prescribing a CYP2D6 inhibitor alongside a CYP2D6 substrate?", "must_contain": ["cyp2d6"], "category": "drug_drug_interaction"}
+{"question": "What condition is Metformin used to treat?", "must_contain": ["diabetes"], "category": "indication"}
+{"question": "What is Atorvastatin indicated for?", "must_contain": ["cholesterol"], "category": "indication"}
+{"question": "What is Adalimumab used for?", "must_contain": ["rheumatoid"], "category": "indication"}
+{"question": "What are the major safety warnings for Methotrexate?", "must_contain": ["toxicity"], "category": "drug_warning"}
+{"question": "What bleeding risk is associated with Warfarin?", "must_contain": ["bleeding"], "category": "drug_warning"}
+{"question": "What drug class does Fluoxetine belong to?", "must_contain": ["serotonin reuptake"], "category": "classification"}
+{"question": "What class of drug is Atorvastatin?", "must_contain": ["statin"], "category": "classification"}
