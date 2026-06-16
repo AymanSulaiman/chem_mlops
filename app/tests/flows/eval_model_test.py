@@ -344,7 +344,7 @@ class TestGoldenJsonl:
             try:
                 json.loads(line)
             except json.JSONDecodeError as exc:
-                pytest.fail(f"Invalid JSON on line {i}: {exc}")
+                pytest.fail(f"Invalid JSON on line {i}: {exc}") # type: ignore
 
     def test_golden_file_has_required_keys(self) -> None:
         for i, line in enumerate(GOLDEN_BENCHMARK_PATH.read_text().splitlines(), 1):
