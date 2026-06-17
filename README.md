@@ -11,7 +11,7 @@ flowchart LR
     EBI[(ChEMBL SQLite\n5.6 GB EBI FTP)] --> COL[collect_data\nDownload & extract\nchembl_XX.db]
     COL --> TRF[transform_data\nSQLite → Parquet\nvia DuckDB]
 
-    TRF --> DDI[build_drug_interaction_dataset\n23 tables · 17 QA categories\n~500K training pairs]
+    TRF --> DDI[build_drug_interaction_dataset\n23 tables · 20 QA categories\n~500K training pairs]
     TRF --> FDS[create_finetuning_dataset\nactivities Parquet → JSONL]
     TRF --> ING[ingest_to_lancedb\n2.85M compound vectors\nMorgan fingerprints · ~6 min]
 
@@ -201,14 +201,14 @@ Full details: [`app/scripts/flows/vector_store/README.md`](app/scripts/flows/vec
 
 ## QA Dataset
 
-`build_drug_interaction_dataset` reads 23 ChEMBL tables and emits 17 categories of training pairs in `### Question / ### Answer` format:
+`build_drug_interaction_dataset` reads 23 ChEMBL tables and emits 20 categories of training pairs in `### Question / ### Answer` format:
 
 | # | Category | Source tables |
 |---|----------|--------------|
 | 1 | Mechanism of action | `drug_mechanism`, `target_dictionary` |
 | 2 | Therapeutic indication | `drug_indication` |
 | 3 | Metabolic pathways | `metabolism`, `target_dictionary` |
-| 4 | Drug-drug interactions | `metabolism` (shared CYP substrates) |
+| 4 | Drug-drug interactions (with severity) | `metabolism` (shared CYP substrates, HIGH/MODERATE/LOW severity) |
 | 5 | Bioactivity potency | `activities` (pChEMBL values) |
 | 6 | Drug warnings | `drug_warning` |
 | 7 | Drug synonyms | `molecule_synonyms` |
@@ -222,6 +222,9 @@ Full details: [`app/scripts/flows/vector_store/README.md`](app/scripts/flows/vec
 | 15 | Protein family | `protein_classification`, `component_class`, `target_components` |
 | 16 | Biotherapeutics | `biotherapeutics` |
 | 17 | Target relations | `target_relations` |
+| 18 | CYP inhibition (quantitative) | `activities`, `assays`, `target_dictionary` (IC50/Ki values) |
+| 19 | Pharmacodynamic interactions | `drug_mechanism`, `target_dictionary` (shared receptor targets) |
+| 20 | P-glycoprotein transport | `activities`, `assays`, `target_dictionary` (ABCB1/MDR1) |
 
 Output files are written to `data/llm_finetune/`:
 
@@ -243,9 +246,12 @@ uv run python -m app.scripts.flows.llm_finetuning_data.build_drug_interaction_da
   [--data-dir PATH]       # default: data/chembl_transform
   [--output-dir PATH]     # default: data/llm_finetune
   [--row-limit N]         # cap every table at N rows (useful on low-RAM machines)
+  [--workers N]           # parallel generator processes (default: CPU count)
 ```
 
 The `--row-limit` flag is useful on memory-constrained machines. For example, `--row-limit 200000` limits each table to 200 K rows. Without it, all rows are loaded (the `activities` table alone has ~19 M rows).
+
+Generators run in parallel by default (one process per CPU core). Use `--workers 1` to disable multiprocessing, which is useful for debugging tracebacks.
 
 ### Using all available data
 
@@ -399,7 +405,7 @@ chem_mlops/
 │   │   │   │   ├── collect_data.py     # Download ChEMBL SQLite
 │   │   │   │   └── transform_data.py   # SQLite → Parquet (DuckDB)
 │   │   │   ├── llm_finetuning_data/
-│   │   │   │   ├── build_drug_interaction_dataset.py  # 17-category QA builder
+│   │   │   │   ├── build_drug_interaction_dataset.py  # 20-category QA builder (parallel)
 │   │   │   │   └── build_finetune_dataset.py          # Activity Parquet → JSONL
 │   │   │   ├── finetuning/
 │   │   │   │   ├── finetuning.py       # MLX LoRA fine-tuning

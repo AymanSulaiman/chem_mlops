@@ -25,9 +25,12 @@ Output: data/llm_finetune/train.jsonl  (90 %)
         data/llm_finetune/valid.jsonl  (10 %)
 """
 
+import functools
 import json
+import os
 import random
 from collections.abc import Iterator
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import polars as pl
@@ -39,6 +42,9 @@ TRAIN_RATIO = 0.9
 RANDOM_SEED = 42
 MAX_DDI_PAIRS = 50_000  # raised from 5 K — DDI pairs are the primary focus
 MAX_ASSAY_PAIRS = 5_000  # cap assay-context questions; they dominated the old dataset
+MAX_CYP_INHIBITION_PAIRS = 10_000
+MAX_PD_PAIRS = 20_000
+MAX_PGP_PAIRS = 5_000
 _REQUIRED_TABLES = {
     "molecule_dictionary",
     "drug_mechanism",
@@ -109,24 +115,33 @@ def load_tables(
     data_dir: Path = DATA_DIR,
     row_limit: int | None = None,
 ) -> dict[str, pl.DataFrame]:
-    """
-    Load all required ChEMBL tables from parquet.
+    """Load all required ChEMBL tables from parquet in parallel (I/O bound)."""
 
-    Args:
-        data_dir:  Directory containing the parquet files.
-        row_limit: Optional cap applied uniformly to every table. Useful on
-                   memory-constrained machines.  Pass e.g. ``200_000`` to load
-                   at most 200 K rows per table.  ``None`` (default) loads
-                   everything.
-    """
-    tables: dict[str, pl.DataFrame] = {}
-    for name in _REQUIRED_TABLES:
+    def _load_one(name: str) -> tuple[str, pl.DataFrame | None]:
         path = data_dir / f"{name}.parquet"
         if not path.exists():
-            print(f"  Warning: {name}.parquet not found, skipping")
-            continue
-        tables[name] = pl.read_parquet(path, n_rows=row_limit)
+            return name, None
+        return name, pl.read_parquet(path, n_rows=row_limit)
+
+    tables: dict[str, pl.DataFrame] = {}
+    missing: list[str] = []
+
+    with ThreadPoolExecutor() as pool:
+        for name, df in pool.map(_load_one, sorted(_REQUIRED_TABLES)):
+            if df is None:
+                missing.append(name)
+            else:
+                tables[name] = df
+
+    for name in missing:
+        print(f"  Warning: {name}.parquet not found, skipping")
+
     return tables
+
+
+def _run_generator(fn: functools.partial) -> list[dict]:
+    """Top-level worker for ProcessPoolExecutor — must be importable at module level."""
+    return list(fn())
 
 
 # ---------------------------------------------------------------------------
@@ -142,9 +157,10 @@ def generate_mechanism_qa(
     """Mechanism-of-action pairs from drug_mechanism + target_dictionary."""
     mols = _mol_lookup(molecule_dict)
 
-    target_by_chembl_id = {
-        row["chembl_id"]: row
-        for row in target_dict.select(["chembl_id", "pref_name", "target_type"]).to_dicts()
+    target_by_tid = {
+        int(r["tid"]): r
+        for r in target_dict.to_dicts()
+        if r.get("tid") is not None
     }
 
     for row in drug_mechanism.to_dicts():
@@ -157,8 +173,9 @@ def generate_mechanism_qa(
         chembl_id = mol.get("chembl_id", "")
         moa = (row.get("mechanism_of_action") or "").strip()
         action = (row.get("action_type") or "").strip().lower()
-        target = target_by_chembl_id.get(row.get("target_chembl_id") or "", {})
-        target_name = target.get("pref_name") or "an unspecified target"
+        tid = row.get("tid")
+        target = target_by_tid.get(int(tid)) if tid is not None else {}
+        target_name = (target.get("pref_name") or "an unspecified target") if target else "an unspecified target"
 
         if not moa and not action:
             continue
@@ -333,6 +350,7 @@ def generate_ddi_qa(
                 mol_b = mols[unique_drugs[j]]
                 name_a, id_a = _drug_name(mol_a), mol_a.get("chembl_id", "")
                 name_b, id_b = _drug_name(mol_b), mol_b.get("chembl_id", "")
+                severity = _cyp_severity(enzyme)
 
                 shared_pathway = (
                     f"Both {name_a} ({id_a}) and {name_b} ({id_b}) are metabolised "
@@ -347,7 +365,7 @@ def generate_ddi_qa(
                 yield {
                     "text": (
                         f"### Question\nCan {name_a} and {name_b} be safely co-administered?\n\n"
-                        f"### Answer\nUse caution. {shared_pathway} "
+                        f"### Answer\nSeverity: {severity}. Use caution. {shared_pathway} "
                         f"Monitor plasma levels if both drugs are prescribed together."
                     )
                 }
@@ -356,27 +374,27 @@ def generate_ddi_qa(
                         f"### Question\nWhat is the drug interaction between {name_a} and {name_b}?\n\n"
                         f"### Answer\n{name_a} and {name_b} share the {enzyme} metabolic pathway. "
                         f"Co-administration creates competition for {enzyme}, which may increase "
-                        f"or decrease plasma levels of one or both drugs."
+                        f"or decrease plasma levels of one or both drugs. Severity: {severity}."
                     )
                 }
                 yield {
                     "text": (
                         f"### Question\nTell me about the interaction between {name_a} and {name_b}.\n\n"
-                        f"### Answer\n{shared_pathway}"
+                        f"### Answer\n{shared_pathway} Severity: {severity}."
                     )
                 }
                 yield {
                     "text": (
                         f"### Question\nWhat happens if I take {name_a} and {name_b} together?\n\n"
                         f"### Answer\nTaking {name_a} and {name_b} together can affect how each drug "
-                        f"is processed by the body. {shared_pathway}"
+                        f"is processed by the body. {shared_pathway} Severity: {severity}."
                     )
                 }
                 yield {
                     "text": (
                         f"### Question\nIs it safe to combine {name_a} with {name_b}?\n\n"
-                        f"### Answer\nThis combination requires care. {shared_pathway} "
-                        f"Dose adjustment may be needed."
+                        f"### Answer\nSeverity: {severity}. This combination requires care. "
+                        f"{shared_pathway} Dose adjustment may be needed."
                     )
                 }
                 yield {
@@ -384,7 +402,7 @@ def generate_ddi_qa(
                         f"### Question\nDoes {name_a} interact with {name_b}?\n\n"
                         f"### Answer\nYes — {name_a} ({id_a}) and {name_b} ({id_b}) both rely on "
                         f"{enzyme} for metabolism. Taking them together may alter plasma levels "
-                        f"of either drug."
+                        f"of either drug. Severity: {severity}."
                     )
                 }
 
@@ -759,6 +777,53 @@ _ASSAY_TYPE_LABELS: dict[str, str] = {
     "T": "toxicity",
     "P": "physicochemical",
 }
+
+_CYP_SEVERITY: dict[str, str] = {
+    "CYP3A4": "HIGH",
+    "CYP2D6": "HIGH",
+    "CYP2C9": "HIGH",
+    "CYP2C19": "HIGH",
+    "CYP2C8": "MODERATE",
+    "CYP1A2": "MODERATE",
+    "CYP2B6": "MODERATE",
+    "CYP2E1": "LOW",
+    "CYP3A5": "LOW",
+}
+
+_PGP_NAMES = {"P-GLYCOPROTEIN", "ABCB1", "MDR1", "MULTIDRUG RESISTANCE PROTEIN"}
+
+_AGONIST_TYPES = {"AGONIST", "PARTIAL AGONIST", "FULL AGONIST", "SUPERAGONIST", "ACTIVATOR"}
+_ANTAGONIST_TYPES = {"ANTAGONIST", "INVERSE AGONIST", "BLOCKER", "INHIBITOR", "NEGATIVE MODULATOR"}
+
+
+def _cyp_severity(enzyme: str) -> str:
+    enzyme_upper = enzyme.upper()
+    for cyp, sev in _CYP_SEVERITY.items():
+        # Match "CYP3A4" (from metabolism table) or "Cytochrome P450 3A4" (from target_dictionary)
+        if cyp in enzyme_upper or cyp.replace("CYP", "") in enzyme_upper:
+            return sev
+    return "LOW"
+
+
+def _article(word: str) -> str:
+    return "an" if word[:1].lower() in "aeiou" else "a"
+
+
+def _pd_interaction_type(action_a: str, action_b: str) -> tuple[str, str]:
+    a_upper = action_a.upper()
+    b_upper = action_b.upper()
+    a_agonist = any(t in a_upper for t in _AGONIST_TYPES)
+    a_antagonist = any(t in a_upper for t in _ANTAGONIST_TYPES)
+    b_agonist = any(t in b_upper for t in _AGONIST_TYPES)
+    b_antagonist = any(t in b_upper for t in _ANTAGONIST_TYPES)
+
+    if a_agonist and b_agonist:
+        return "additive/synergistic", "Both activate the same receptor, potentially causing additive or synergistic effects."
+    if a_antagonist and b_antagonist:
+        return "additive antagonism", "Both block the same receptor, potentially causing additive receptor blockade."
+    if (a_agonist and b_antagonist) or (a_antagonist and b_agonist):
+        return "antagonistic", "One activates and the other blocks the same receptor, opposing each other's clinical effects."
+    return "pharmacodynamic", "Both drugs act at the same molecular target, which may alter their combined clinical effect."
 
 
 def generate_literature_qa(docs: pl.DataFrame) -> Iterator[dict]:
@@ -1155,9 +1220,438 @@ def generate_target_relations_qa(
             }
 
 
+def generate_cyp_inhibition_qa(
+    activities: pl.DataFrame,
+    assays: pl.DataFrame,
+    target_dict: pl.DataFrame,
+    molecule_dict: pl.DataFrame,
+    max_pairs: int = MAX_CYP_INHIBITION_PAIRS,
+) -> Iterator[dict]:
+    """CYP enzyme inhibition QA from IC50/Ki measurements.
+
+    Uses activities → assays → target_dictionary to find quantitative
+    inhibition data for CYP enzymes, which is more clinically meaningful
+    than substrate-sharing alone.
+    """
+    mols = {
+        row["molregno"]: row
+        for row in molecule_dict.select(["molregno", "pref_name", "chembl_id"]).to_dicts()
+        if row.get("pref_name")
+        and not row["pref_name"].strip().isdigit()
+        and not row["pref_name"].strip().upper().startswith("AUTONOM")
+    }
+
+    cyp_by_tid: dict[int, dict] = {
+        int(r["tid"]): r
+        for r in target_dict.to_dicts()
+        if r.get("pref_name")
+        and "CYTOCHROME P450" in r["pref_name"].upper()
+        and r.get("tid") is not None
+    }
+    if not cyp_by_tid:
+        return
+
+    cyp_assay_to_tid: dict[int, int] = {
+        int(r["assay_id"]): int(r["tid"])
+        for r in assays.to_dicts()
+        if r.get("tid") is not None and int(r["tid"]) in cyp_by_tid
+    }
+    if not cyp_assay_to_tid:
+        return
+
+    inhibition_types = {"IC50", "Ki", "Kd", "pIC50", "pKi"}
+    count = 0
+    seen: set[tuple[int, int]] = set()
+
+    for row in activities.to_dicts():
+        if count >= max_pairs:
+            break
+        if row.get("standard_type") not in inhibition_types:
+            continue
+        assay_id = row.get("assay_id")
+        if assay_id is None or int(assay_id) not in cyp_assay_to_tid:
+            continue
+        molregno = row.get("molregno")
+        if molregno is None:
+            continue
+        key = (int(molregno), int(assay_id))
+        if key in seen:
+            continue
+        seen.add(key)
+
+        mol = mols.get(int(molregno))
+        if not mol:
+            continue
+        std_value = row.get("standard_value")
+        if std_value is None:
+            continue
+
+        tid = cyp_assay_to_tid[int(assay_id)]
+        cyp_name = (cyp_by_tid[tid].get("pref_name") or "").strip()
+        drug = _drug_name(mol)
+        chembl_id = mol.get("chembl_id", "")
+        std_type = row.get("standard_type") or "activity"
+        std_units = row.get("standard_units") or ""
+        pchembl = row.get("pchembl_value")
+        severity = _cyp_severity(cyp_name)
+
+        potency_phrase = ""
+        if pchembl is not None:
+            strength = "strong" if pchembl >= 7 else "moderate" if pchembl >= 5 else "weak"
+            potency_phrase = f" This represents {strength} inhibition (pChEMBL = {pchembl:.2f})."
+
+        yield {
+            "text": (
+                f"### Question\nHow strongly does {drug} inhibit {cyp_name}?\n\n"
+                f"### Answer\n{drug} ({chembl_id}) inhibits {cyp_name} with a measured "
+                f"{std_type} of {std_value} {std_units}.{potency_phrase} "
+                f"This is a {severity.lower()}-significance CYP interaction — co-administration "
+                f"with {cyp_name} substrates may require dose adjustment."
+            )
+        }
+
+        yield {
+            "text": (
+                f"### Question\nIs {drug} a CYP inhibitor?\n\n"
+                f"### Answer\nYes, {drug} ({chembl_id}) inhibits {cyp_name} "
+                f"({std_type} = {std_value} {std_units}). "
+                f"Severity: {severity}. Drugs metabolized by {cyp_name} may accumulate "
+                f"when co-administered with {drug}."
+            )
+        }
+
+        count += 1
+
+
+def generate_pd_interaction_qa(
+    drug_mechanism: pl.DataFrame,
+    molecule_dict: pl.DataFrame,
+    target_dict: pl.DataFrame,
+    max_pairs: int = MAX_PD_PAIRS,
+) -> Iterator[dict]:
+    """Pharmacodynamic (PD) interaction QA from shared receptor targets.
+
+    Pairs drugs that act at the same molecular target and classifies the
+    interaction as additive, synergistic, or antagonistic based on action types.
+    """
+    mols = {
+        row["molregno"]: row
+        for row in molecule_dict.select(["molregno", "pref_name", "chembl_id"]).to_dicts()
+        if row.get("pref_name")
+        and not row["pref_name"].strip().isdigit()
+        and not row["pref_name"].strip().upper().startswith("AUTONOM")
+    }
+
+    target_by_tid: dict[int, dict] = {
+        int(r["tid"]): r
+        for r in target_dict.to_dicts()
+        if r.get("pref_name") and r.get("tid") is not None
+    }
+
+    target_drugs: dict[int, list[tuple[int, str]]] = {}
+    for row in drug_mechanism.to_dicts():
+        tid = row.get("tid")
+        molregno = row.get("molregno")
+        action = (row.get("action_type") or "").strip()
+        if tid is None or molregno is None or not action:
+            continue
+        if int(molregno) not in mols:
+            continue
+        target_drugs.setdefault(int(tid), []).append((int(molregno), action))
+
+    rng = random.Random(RANDOM_SEED)
+    pairs_seen: set[frozenset] = set()
+    pair_count = 0
+
+    for tid, drug_actions in target_drugs.items():
+        if len(drug_actions) < 2:
+            continue
+        target = target_by_tid.get(tid)
+        if not target:
+            continue
+
+        target_name = (target.get("pref_name") or "").strip()
+        target_chembl = target.get("chembl_id", "")
+
+        seen_mol: dict[int, str] = {}
+        for molregno, action in drug_actions:
+            if molregno not in seen_mol:
+                seen_mol[molregno] = action
+        unique_drugs = list(seen_mol.items())
+        rng.shuffle(unique_drugs)
+
+        for i in range(len(unique_drugs)):
+            for j in range(i + 1, len(unique_drugs)):
+                if pair_count >= max_pairs:
+                    return
+
+                molregno_a, action_a = unique_drugs[i]
+                molregno_b, action_b = unique_drugs[j]
+                pair_key: frozenset = frozenset([molregno_a, molregno_b])
+                if pair_key in pairs_seen:
+                    continue
+                pairs_seen.add(pair_key)
+
+                mol_a = mols[molregno_a]
+                mol_b = mols[molregno_b]
+                name_a, id_a = _drug_name(mol_a), mol_a.get("chembl_id", "")
+                name_b, id_b = _drug_name(mol_b), mol_b.get("chembl_id", "")
+                interaction_type, explanation = _pd_interaction_type(action_a, action_b)
+
+                art_a = _article(action_a)
+                art_b = _article(action_b)
+                yield {
+                    "text": (
+                        f"### Question\nWhat is the pharmacodynamic interaction between "
+                        f"{name_a} and {name_b}?\n\n"
+                        f"### Answer\n{name_a} ({id_a}) acts as {art_a} {action_a.lower()} and "
+                        f"{name_b} ({id_b}) acts as {art_b} {action_b.lower()} at {target_name} "
+                        f"({target_chembl}). This creates a {interaction_type} interaction. "
+                        f"{explanation}"
+                    )
+                }
+
+                yield {
+                    "text": (
+                        f"### Question\nDo {name_a} and {name_b} have pharmacodynamic interactions?\n\n"
+                        f"### Answer\nYes — both act at {target_name} ({target_chembl}). "
+                        f"{name_a} is {art_a} {action_a.lower()} and {name_b} is {art_b} "
+                        f"{action_b.lower()} at this receptor. {explanation}"
+                    )
+                }
+
+                pair_count += 1
+
+
+def generate_pgp_interaction_qa(
+    activities: pl.DataFrame,
+    assays: pl.DataFrame,
+    target_dict: pl.DataFrame,
+    molecule_dict: pl.DataFrame,
+    max_pairs: int = MAX_PGP_PAIRS,
+) -> Iterator[dict]:
+    """P-glycoprotein (ABCB1/MDR1) substrate and inhibitor QA.
+
+    P-gp is a major efflux transporter affecting oral absorption and CNS
+    penetration — a clinically important DDI mechanism separate from CYP metabolism.
+    """
+    mols = {
+        row["molregno"]: row
+        for row in molecule_dict.select(["molregno", "pref_name", "chembl_id"]).to_dicts()
+        if row.get("pref_name")
+        and not row["pref_name"].strip().isdigit()
+        and not row["pref_name"].strip().upper().startswith("AUTONOM")
+    }
+
+    pgp_tids: set[int] = {
+        int(r["tid"])
+        for r in target_dict.to_dicts()
+        if r.get("tid") is not None
+        and r.get("pref_name")
+        and any(p in r["pref_name"].upper() for p in _PGP_NAMES)
+    }
+    if not pgp_tids:
+        return
+
+    pgp_assay_ids: set[int] = {
+        int(r["assay_id"])
+        for r in assays.to_dicts()
+        if r.get("tid") is not None and int(r["tid"]) in pgp_tids
+    }
+    if not pgp_assay_ids:
+        return
+
+    inhibition_types = {"IC50", "Ki", "Kd", "pIC50", "pKi", "EC50"}
+    count = 0
+    seen_mol: set[int] = set()
+
+    for row in activities.to_dicts():
+        if count >= max_pairs:
+            break
+        assay_id = row.get("assay_id")
+        if assay_id is None or int(assay_id) not in pgp_assay_ids:
+            continue
+        molregno = row.get("molregno")
+        if molregno is None:
+            continue
+        mol_int = int(molregno)
+        if mol_int in seen_mol:
+            continue
+
+        mol = mols.get(mol_int)
+        if not mol:
+            continue
+        std_value = row.get("standard_value")
+        if std_value is None:
+            continue
+        seen_mol.add(mol_int)
+
+        drug = _drug_name(mol)
+        chembl_id = mol.get("chembl_id", "")
+        std_type = row.get("standard_type") or "activity"
+        std_units = row.get("standard_units") or ""
+        pchembl = row.get("pchembl_value")
+
+        is_inhibitor = std_type in inhibition_types and pchembl is not None and pchembl >= 5
+        role = "inhibitor of" if is_inhibitor else "substrate of"
+
+        yield {
+            "text": (
+                f"### Question\nIs {drug} a P-glycoprotein substrate or inhibitor?\n\n"
+                f"### Answer\n{drug} ({chembl_id}) is a {role} P-glycoprotein (P-gp/ABCB1/MDR1). "
+                f"Measured {std_type}: {std_value} {std_units}."
+                + (f" pChEMBL = {pchembl:.2f}." if pchembl is not None else "")
+                + (
+                    " As a P-gp inhibitor, it can increase absorption and CNS penetration of "
+                    "co-administered P-gp substrates, raising their plasma levels."
+                    if is_inhibitor
+                    else " P-gp limits its oral bioavailability and CNS penetration; "
+                    "co-administration with P-gp inhibitors may significantly raise its plasma levels."
+                )
+            )
+        }
+
+        yield {
+            "text": (
+                f"### Question\nHow does P-glycoprotein affect {drug}?\n\n"
+                f"### Answer\n{drug} ({chembl_id}) is a {role} P-glycoprotein (P-gp/ABCB1). "
+                + (
+                    "As a P-gp inhibitor, it blocks the efflux pump and can raise plasma "
+                    "concentrations of co-administered P-gp substrates, potentially causing toxicity."
+                    if is_inhibitor
+                    else "P-gp acts as an efflux pump, reducing absorption and CNS entry of this drug. "
+                    "Co-administration with P-gp inhibitors (e.g., cyclosporine, verapamil) may "
+                    "substantially increase its exposure."
+                )
+            )
+        }
+
+        count += 1
+
+
 # ---------------------------------------------------------------------------
 # JSONL writer
 # ---------------------------------------------------------------------------
+
+
+def generate_canonical_drug_facts_qa() -> Iterator[dict]:
+    """Curated high-precision QA for well-known drugs.
+
+    These examples anchor the model on facts where ChEMBL data alone is noisy
+    or incomplete: specific CYP assignments, common drug-class names, and
+    clinically prominent warnings. Each entry is sourced from authoritative
+    references (FDA labeling / standard pharmacology texts).
+    """
+    facts = [
+        # ── Mechanisms of action ────────────────────────────────────────
+        ("What does Aspirin target?",
+         "Aspirin (acetylsalicylic acid, CHEMBL25) irreversibly inhibits cyclooxygenase-1 (COX-1) "
+         "and cyclooxygenase-2 (COX-2), blocking thromboxane A2 synthesis and reducing platelet "
+         "aggregation. This cyclooxygenase inhibition is also responsible for its anti-inflammatory "
+         "and analgesic effects."),
+        ("What enzyme does Aspirin inhibit?",
+         "Aspirin inhibits cyclooxygenase (COX) enzymes — specifically COX-1 and COX-2. "
+         "Cyclooxygenase inhibition by aspirin is irreversible, distinguishing it from other NSAIDs."),
+        ("What does Sildenafil inhibit?",
+         "Sildenafil (CHEMBL192) is a selective inhibitor of phosphodiesterase type 5 (PDE5). "
+         "PDE5 inhibition prevents the breakdown of cyclic GMP (cGMP) in smooth muscle, promoting "
+         "vasodilation. It is used to treat erectile dysfunction and pulmonary arterial hypertension."),
+        ("How does Fluoxetine work?",
+         "Fluoxetine (CHEMBL41) is a selective serotonin reuptake inhibitor (SSRI). It blocks the "
+         "serotonin transporter (SERT), preventing reuptake of serotonin into presynaptic neurons "
+         "and increasing serotonergic neurotransmission. It is used to treat depression, OCD, and "
+         "anxiety disorders."),
+        ("What does Imatinib target?",
+         "Imatinib (CHEMBL941) is a tyrosine kinase inhibitor that targets BCR-ABL, the constitutively "
+         "active tyrosine kinase produced by the Philadelphia chromosome translocation in CML. It also "
+         "inhibits c-KIT and PDGFR tyrosine kinases. Tyrosine kinase inhibition blocks proliferation "
+         "of malignant cells."),
+        ("What enzyme does Methotrexate inhibit?",
+         "Methotrexate inhibits dihydrofolate reductase (DHFR), blocking the conversion of "
+         "dihydrofolate to tetrahydrofolate. This depletes folate cofactors required for purine and "
+         "thymidylate synthesis, inhibiting DNA replication in rapidly dividing cells."),
+        # ── CYP metabolism ──────────────────────────────────────────────
+        ("What enzyme metabolises Warfarin?",
+         "Warfarin is primarily metabolised by CYP2C9, which converts the more potent S-warfarin "
+         "enantiomer to inactive hydroxylated metabolites. CYP2C9 genetic polymorphisms "
+         "(e.g. *2, *3 alleles) significantly affect warfarin dose requirements. CYP3A4 also "
+         "contributes to R-warfarin metabolism."),
+        ("Which CYP enzyme is responsible for Warfarin metabolism?",
+         "The primary enzyme responsible for Warfarin metabolism is CYP2C9, particularly for the "
+         "pharmacologically active S-enantiomer. CYP2C9 inhibitors (e.g. fluconazole, amiodarone) "
+         "can substantially raise warfarin plasma levels and increase bleeding risk."),
+        ("What CYP enzyme metabolises Omeprazole?",
+         "Omeprazole is primarily metabolised by CYP2C19, which converts it to inactive "
+         "hydroxyomeprazole and omeprazole sulfone. CYP2C19 poor metabolisers have significantly "
+         "higher omeprazole exposure. CYP3A4 provides a minor secondary pathway."),
+        ("What enzyme metabolises Codeine?",
+         "Codeine is O-demethylated to morphine by CYP2D6, its primary activation pathway. "
+         "CYP2D6 ultra-rapid metabolisers convert codeine to morphine very quickly, risking toxicity, "
+         "while poor metabolisers obtain little analgesic effect. CYP3A4 converts codeine to "
+         "norcodeine as an alternative pathway."),
+        ("What CYP enzyme metabolises Atorvastatin?",
+         "Atorvastatin is primarily metabolised by CYP3A4 to active orthohydroxy and "
+         "parahydroxy metabolites. CYP3A4 inhibitors (e.g. clarithromycin, itraconazole) "
+         "can significantly increase atorvastatin exposure and raise the risk of myopathy."),
+        # ── Drug class / classification ──────────────────────────────────
+        ("What class of drug is Atorvastatin?",
+         "Atorvastatin is a statin — an HMG-CoA reductase inhibitor. Statins competitively inhibit "
+         "3-hydroxy-3-methylglutaryl coenzyme A (HMG-CoA) reductase, the rate-limiting enzyme in "
+         "hepatic cholesterol biosynthesis. By reducing cholesterol production, statins lower LDL "
+         "cholesterol and reduce cardiovascular risk."),
+        ("What is Atorvastatin indicated for?",
+         "Atorvastatin (CHEMBL1487) is a statin used to lower LDL cholesterol and triglycerides, "
+         "and to raise HDL cholesterol (hypercholesterolaemia). It is indicated for primary "
+         "hypercholesterolaemia, mixed dyslipidaemia, and prevention of cardiovascular events in "
+         "patients at high risk."),
+        ("What drug class does Fluoxetine belong to?",
+         "Fluoxetine belongs to the selective serotonin reuptake inhibitor (SSRI) class of "
+         "antidepressants. SSRIs block serotonin reuptake at the presynaptic terminal, increasing "
+         "serotonin availability in the synapse. Other SSRIs include sertraline, paroxetine, and "
+         "escitalopram."),
+        ("What class of drug is Metformin?",
+         "Metformin is a biguanide — an oral antidiabetic drug. It reduces hepatic glucose "
+         "production (gluconeogenesis) and improves insulin sensitivity. Metformin is the "
+         "first-line treatment for type 2 diabetes."),
+        # ── Indications ─────────────────────────────────────────────────
+        ("What condition is Metformin used to treat?",
+         "Metformin is the first-line drug for type 2 diabetes mellitus. It lowers blood glucose "
+         "by reducing hepatic gluconeogenesis and improving peripheral insulin sensitivity. "
+         "It does not cause hypoglycaemia when used alone and is associated with modest weight loss."),
+        ("What is Adalimumab used for?",
+         "Adalimumab (HUMIRA) is a TNF-alpha inhibitor biologic used to treat rheumatoid arthritis, "
+         "psoriatic arthritis, ankylosing spondylitis, Crohn's disease, ulcerative colitis, "
+         "plaque psoriasis, and juvenile idiopathic arthritis. It works by binding and neutralising "
+         "tumour necrosis factor alpha (TNF-α)."),
+        # ── Warnings ────────────────────────────────────────────────────
+        ("What bleeding risk is associated with Warfarin?",
+         "Warfarin carries a significant bleeding risk — its major adverse effect is haemorrhage. "
+         "Bleeding can range from minor bruising to life-threatening events such as intracranial "
+         "haemorrhage. Regular INR monitoring is essential. The risk increases with drug interactions "
+         "(e.g. CYP2C9 inhibitors) and in elderly patients."),
+        ("What is the main danger of Warfarin?",
+         "The primary danger of warfarin is bleeding. Warfarin has a narrow therapeutic index, and "
+         "supratherapeutic anticoagulation can cause serious or fatal haemorrhage. Patients require "
+         "regular INR monitoring and should avoid drugs that inhibit CYP2C9 or displace warfarin "
+         "from protein binding."),
+        ("What is the mechanism of Warfarin's anticoagulant effect?",
+         "Warfarin inhibits vitamin K epoxide reductase (VKORC1), preventing the recycling of "
+         "vitamin K. Vitamin K is required as a cofactor for the carboxylation of clotting factors "
+         "II, VII, IX, and X. By depleting active vitamin K, warfarin reduces the synthesis of "
+         "functional clotting factors, producing anticoagulation."),
+    ]
+
+    for question, answer in facts:
+        yield {"text": f"### Question\n{question}\n\n### Answer\n{answer}"}
+
+        # Generate a variation using "Tell me about" phrasing for key facts
+        if "metabolis" in answer.lower() or "inhibit" in answer.lower():
+            yield {
+                "text": (
+                    f"### Question\nTell me about {question.lower().replace('what ', '').replace('?', '').strip()}.\n\n"
+                    f"### Answer\n{answer}"
+                )
+            }
 
 
 def generate_greeting_qa() -> Iterator[dict]:
@@ -1272,6 +1766,7 @@ def build_drug_interaction_dataset(
     data_dir: Path = DATA_DIR,
     output_dir: Path = OUTPUT_DIR,
     row_limit: int | None = None,
+    workers: int = os.cpu_count() or 1,
 ) -> None:
     """
     Build QA-formatted JSONL training data for a drug-interaction chatbot.
@@ -1283,9 +1778,9 @@ def build_drug_interaction_dataset(
     Args:
         data_dir:   Directory containing the ChEMBL parquet files.
         output_dir: Directory to write train.jsonl / valid.jsonl.
-        row_limit:  Cap every table at this many rows on load.  Useful on
-                    memory-constrained machines (e.g. ``--row-limit 200000``).
-                    ``None`` (default) loads all rows.
+        row_limit:  Cap every table at this many rows on load.
+        workers:    Number of parallel generator processes (default: all CPUs).
+                    Pass 1 to disable multiprocessing (useful for debugging).
     """
     print("Loading ChEMBL tables...")
     tables = load_tables(data_dir, row_limit=row_limit)
@@ -1295,108 +1790,142 @@ def build_drug_interaction_dataset(
         raise RuntimeError("molecule_dictionary table is required but not found")
 
     compound_records = tables.get("compound_records")
-    # Narrow to a non-None local so lambdas below pass ty's type checks.
-    # The "enabled" flag in each tuple guarantees this is only called when not None.
     _cr: pl.DataFrame = compound_records if compound_records is not None else pl.DataFrame()
 
-    all_records: list[dict] = []
-
-    _generators = [
+    # functools.partial is picklable; lambdas are not — required for ProcessPoolExecutor.
+    _generators: list[tuple[str, functools.partial, bool]] = [
+        (
+            "canonical drug facts",
+            functools.partial(generate_canonical_drug_facts_qa),
+            True,
+        ),
         (
             "greetings & capabilities",
-            generate_greeting_qa,
-            True,  # no external data needed
+            functools.partial(generate_greeting_qa),
+            True,
         ),
         (
             "mechanism-of-action",
-            lambda: generate_mechanism_qa(
-                tables["drug_mechanism"], mol, tables["target_dictionary"]
-            ),
+            functools.partial(generate_mechanism_qa, tables["drug_mechanism"], mol, tables["target_dictionary"])
+            if "drug_mechanism" in tables and "target_dictionary" in tables
+            else functools.partial(generate_greeting_qa),  # placeholder, never called
             "drug_mechanism" in tables and "target_dictionary" in tables,
         ),
         (
             "drug-indication",
-            lambda: generate_indication_qa(tables["drug_indication"], mol),
+            functools.partial(generate_indication_qa, tables["drug_indication"], mol)
+            if "drug_indication" in tables
+            else functools.partial(generate_greeting_qa),
             "drug_indication" in tables,
         ),
         (
             "metabolism",
-            lambda: generate_metabolism_qa(tables["metabolism"], mol, _cr),
+            functools.partial(generate_metabolism_qa, tables["metabolism"], mol, _cr)
+            if "metabolism" in tables and compound_records is not None
+            else functools.partial(generate_greeting_qa),
             "metabolism" in tables and compound_records is not None,
         ),
         (
             "drug-drug interactions",
-            lambda: generate_ddi_qa(tables["metabolism"], mol, _cr),
+            functools.partial(generate_ddi_qa, tables["metabolism"], mol, _cr)
+            if "metabolism" in tables and compound_records is not None
+            else functools.partial(generate_greeting_qa),
             "metabolism" in tables and compound_records is not None,
         ),
         (
             "bioactivity",
-            lambda: generate_activity_qa(tables["activities"], mol),
+            functools.partial(generate_activity_qa, tables["activities"], mol)
+            if "activities" in tables
+            else functools.partial(generate_greeting_qa),
             "activities" in tables,
         ),
         (
             "drug warnings",
-            lambda: generate_drug_warning_qa(tables["drug_warning"], mol),
+            functools.partial(generate_drug_warning_qa, tables["drug_warning"], mol)
+            if "drug_warning" in tables
+            else functools.partial(generate_greeting_qa),
             "drug_warning" in tables,
         ),
         (
             "synonyms",
-            lambda: generate_synonym_qa(tables["molecule_synonyms"], mol),
+            functools.partial(generate_synonym_qa, tables["molecule_synonyms"], mol)
+            if "molecule_synonyms" in tables
+            else functools.partial(generate_greeting_qa),
             "molecule_synonyms" in tables,
         ),
         (
             "physicochemical properties",
-            lambda: generate_physicochemical_qa(tables["compound_properties"], mol),
+            functools.partial(generate_physicochemical_qa, tables["compound_properties"], mol)
+            if "compound_properties" in tables
+            else functools.partial(generate_greeting_qa),
             "compound_properties" in tables,
         ),
         (
             "ATC classification",
-            lambda: generate_atc_classification_qa(
+            functools.partial(
+                generate_atc_classification_qa,
                 tables["atc_classification"],
                 tables["molecule_atc_classification"],
                 mol,
-            ),
+            )
+            if "atc_classification" in tables and "molecule_atc_classification" in tables
+            else functools.partial(generate_greeting_qa),
             "atc_classification" in tables and "molecule_atc_classification" in tables,
         ),
         (
             "approved products",
-            lambda: generate_approved_product_qa(tables["formulations"], tables["products"], mol),
+            functools.partial(generate_approved_product_qa, tables["formulations"], tables["products"], mol)
+            if "formulations" in tables and "products" in tables
+            else functools.partial(generate_greeting_qa),
             "formulations" in tables and "products" in tables,
         ),
         (
             "scientific literature",
-            lambda: generate_literature_qa(tables["docs"]),
+            functools.partial(generate_literature_qa, tables["docs"])
+            if "docs" in tables
+            else functools.partial(generate_greeting_qa),
             "docs" in tables,
         ),
         (
             "assay context",
-            lambda: generate_assay_context_qa(tables["assays"], tables["activities"], mol),
+            functools.partial(generate_assay_context_qa, tables["assays"], tables["activities"], mol)
+            if "assays" in tables and "activities" in tables
+            else functools.partial(generate_greeting_qa),
             "assays" in tables and "activities" in tables,
         ),
         (
             "ligand efficiency",
-            lambda: generate_ligand_efficiency_qa(tables["ligand_eff"], tables["activities"], mol),
+            functools.partial(generate_ligand_efficiency_qa, tables["ligand_eff"], tables["activities"], mol)
+            if "ligand_eff" in tables and "activities" in tables
+            else functools.partial(generate_greeting_qa),
             "ligand_eff" in tables and "activities" in tables,
         ),
         (
             "protein target sequences",
-            lambda: generate_target_sequence_qa(
+            functools.partial(
+                generate_target_sequence_qa,
                 tables["component_sequences"],
                 tables["target_components"],
                 tables["target_dictionary"],
-            ),
+            )
+            if "component_sequences" in tables and "target_components" in tables and "target_dictionary" in tables
+            else functools.partial(generate_greeting_qa),
             "component_sequences" in tables
             and "target_components" in tables
             and "target_dictionary" in tables,
         ),
         (
             "protein family",
-            lambda: generate_protein_family_qa(
+            functools.partial(
+                generate_protein_family_qa,
                 tables["protein_classification"],
                 tables["component_class"],
                 tables["target_components"],
                 tables["target_dictionary"],
-            ),
+            )
+            if "protein_classification" in tables and "component_class" in tables
+            and "target_components" in tables and "target_dictionary" in tables
+            else functools.partial(generate_greeting_qa),
             "protein_classification" in tables
             and "component_class" in tables
             and "target_components" in tables
@@ -1404,25 +1933,65 @@ def build_drug_interaction_dataset(
         ),
         (
             "biotherapeutics",
-            lambda: generate_biotherapeutic_qa(tables["biotherapeutics"], mol),
+            functools.partial(generate_biotherapeutic_qa, tables["biotherapeutics"], mol)
+            if "biotherapeutics" in tables
+            else functools.partial(generate_greeting_qa),
             "biotherapeutics" in tables,
         ),
         (
             "target relations",
-            lambda: generate_target_relations_qa(
-                tables["target_relations"], tables["target_dictionary"]
-            ),
+            functools.partial(generate_target_relations_qa, tables["target_relations"], tables["target_dictionary"])
+            if "target_relations" in tables and "target_dictionary" in tables
+            else functools.partial(generate_greeting_qa),
             "target_relations" in tables and "target_dictionary" in tables,
+        ),
+        (
+            "CYP inhibition (quantitative)",
+            functools.partial(generate_cyp_inhibition_qa, tables["activities"], tables["assays"], tables["target_dictionary"], mol)
+            if "activities" in tables and "assays" in tables and "target_dictionary" in tables
+            else functools.partial(generate_greeting_qa),
+            "activities" in tables and "assays" in tables and "target_dictionary" in tables,
+        ),
+        (
+            "pharmacodynamic interactions",
+            functools.partial(generate_pd_interaction_qa, tables["drug_mechanism"], mol, tables["target_dictionary"])
+            if "drug_mechanism" in tables and "target_dictionary" in tables
+            else functools.partial(generate_greeting_qa),
+            "drug_mechanism" in tables and "target_dictionary" in tables,
+        ),
+        (
+            "P-glycoprotein transport",
+            functools.partial(generate_pgp_interaction_qa, tables["activities"], tables["assays"], tables["target_dictionary"], mol)
+            if "activities" in tables and "assays" in tables and "target_dictionary" in tables
+            else functools.partial(generate_greeting_qa),
+            "activities" in tables and "assays" in tables and "target_dictionary" in tables,
         ),
     ]
 
-    for label, generator_fn, enabled in _generators:
-        if not enabled:
-            continue
-        print(f"Generating {label} QA pairs...")
-        pairs = list(generator_fn())
-        print(f"  -> {len(pairs):,} pairs")
-        all_records.extend(pairs)
+    active = [(label, fn) for label, fn, enabled in _generators if enabled]
+    n_workers = min(workers, len(active))
+    all_records: list[dict] = []
+
+    if n_workers == 1:
+        for label, fn in active:
+            print(f"Generating {label} QA pairs...")
+            pairs = _run_generator(fn)
+            print(f"  -> {len(pairs):,} pairs")
+            all_records.extend(pairs)
+    else:
+        print(f"Running {len(active)} generators across {n_workers} workers...")
+        results: dict[str, list[dict]] = {}
+        with ProcessPoolExecutor(max_workers=n_workers) as executor:
+            futures = {executor.submit(_run_generator, fn): label for label, fn in active}
+            for future in as_completed(futures):
+                label = futures[future]
+                pairs = future.result()
+                print(f"  -> {label}: {len(pairs):,} pairs")
+                results[label] = pairs
+        # Preserve original ordering for reproducibility
+        order = [label for label, _, enabled in _generators if enabled]
+        for label in order:
+            all_records.extend(results[label])
 
     print(f"\nTotal QA pairs: {len(all_records):,}")
     n_train, n_valid = write_jsonl_splits(all_records, output_dir)
@@ -1457,9 +2026,17 @@ if __name__ == "__main__":
             "machines (e.g. --row-limit 200000). Omit to load all rows."
         ),
     )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=os.cpu_count() or 1,
+        metavar="N",
+        help="Number of parallel generator processes (default: %(default)s). Use 1 to disable.",
+    )
     args = parser.parse_args()
     build_drug_interaction_dataset(
         data_dir=args.data_dir,
         output_dir=args.output_dir,
         row_limit=args.row_limit,
+        workers=args.workers,
     )

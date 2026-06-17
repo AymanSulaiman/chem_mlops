@@ -40,6 +40,7 @@ def molecule_dict():
 def target_dict():
     return pl.DataFrame(
         {
+            "tid": [1, 2],
             "chembl_id": ["CHEMBL_TGT_1", "CHEMBL_TGT_2"],
             "pref_name": ["Cyclooxygenase-1", "Vitamin K epoxide reductase"],
             "target_type": ["SINGLE PROTEIN", "SINGLE PROTEIN"],
@@ -56,7 +57,7 @@ def drug_mechanism(target_dict):
                 "Cyclooxygenase inhibitor",
                 "Vitamin K antagonist",
             ],
-            "target_chembl_id": ["CHEMBL_TGT_1", "CHEMBL_TGT_2"],
+            "tid": [1, 2],
             "action_type": ["INHIBITOR", "INHIBITOR"],
         }
     )
@@ -172,7 +173,7 @@ def test_mechanism_qa_skips_unknown_molregno(molecule_dict, target_dict):
         {
             "molregno": [999],
             "mechanism_of_action": ["Unknown inhibitor"],
-            "target_chembl_id": ["CHEMBL_TGT_1"],
+            "tid": [1],
             "action_type": ["INHIBITOR"],
         }
     )
