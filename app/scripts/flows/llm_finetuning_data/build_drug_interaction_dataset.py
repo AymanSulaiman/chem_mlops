@@ -157,11 +157,7 @@ def generate_mechanism_qa(
     """Mechanism-of-action pairs from drug_mechanism + target_dictionary."""
     mols = _mol_lookup(molecule_dict)
 
-    target_by_tid = {
-        int(r["tid"]): r
-        for r in target_dict.to_dicts()
-        if r.get("tid") is not None
-    }
+    target_by_tid = {int(r["tid"]): r for r in target_dict.to_dicts() if r.get("tid") is not None}
 
     for row in drug_mechanism.to_dicts():
         molregno: int | None = row.get("molregno")
@@ -175,7 +171,11 @@ def generate_mechanism_qa(
         action = (row.get("action_type") or "").strip().lower()
         tid = row.get("tid")
         target = target_by_tid.get(int(tid)) if tid is not None else {}
-        target_name = (target.get("pref_name") or "an unspecified target") if target else "an unspecified target"
+        target_name = (
+            (target.get("pref_name") or "an unspecified target")
+            if target
+            else "an unspecified target"
+        )
 
         if not moa and not action:
             continue
@@ -818,12 +818,24 @@ def _pd_interaction_type(action_a: str, action_b: str) -> tuple[str, str]:
     b_antagonist = any(t in b_upper for t in _ANTAGONIST_TYPES)
 
     if a_agonist and b_agonist:
-        return "additive/synergistic", "Both activate the same receptor, potentially causing additive or synergistic effects."
+        return (
+            "additive/synergistic",
+            "Both activate the same receptor, potentially causing additive or synergistic effects.",
+        )
     if a_antagonist and b_antagonist:
-        return "additive antagonism", "Both block the same receptor, potentially causing additive receptor blockade."
+        return (
+            "additive antagonism",
+            "Both block the same receptor, potentially causing additive receptor blockade.",
+        )
     if (a_agonist and b_antagonist) or (a_antagonist and b_agonist):
-        return "antagonistic", "One activates and the other blocks the same receptor, opposing each other's clinical effects."
-    return "pharmacodynamic", "Both drugs act at the same molecular target, which may alter their combined clinical effect."
+        return (
+            "antagonistic",
+            "One activates and the other blocks the same receptor, opposing each other's clinical effects.",
+        )
+    return (
+        "pharmacodynamic",
+        "Both drugs act at the same molecular target, which may alter their combined clinical effect.",
+    )
 
 
 def generate_literature_qa(docs: pl.DataFrame) -> Iterator[dict]:
@@ -1735,11 +1747,13 @@ def generate_canonical_drug_facts_qa() -> Iterator[dict]:
         ("Which CYP enzyme primarily metabolises Warfarin?", _WARFARIN_CYP),
         ("How is the S-enantiomer of Warfarin metabolised?", _WARFARIN_CYP),
         ("What enzyme is most important for Warfarin drug interactions?", _WARFARIN_CYP),
-        ("Which drugs share the CYP2C9 metabolic pathway with Warfarin?",
-         "Warfarin is a substrate of CYP2C9. Other CYP2C9 substrates that share this "
-         "metabolic pathway include phenytoin, glipizide, losartan, and celecoxib. "
-         "When these drugs are co-administered with warfarin, competition for CYP2C9 can "
-         "increase warfarin plasma levels and bleeding risk."),
+        (
+            "Which drugs share the CYP2C9 metabolic pathway with Warfarin?",
+            "Warfarin is a substrate of CYP2C9. Other CYP2C9 substrates that share this "
+            "metabolic pathway include phenytoin, glipizide, losartan, and celecoxib. "
+            "When these drugs are co-administered with warfarin, competition for CYP2C9 can "
+            "increase warfarin plasma levels and bleeding risk.",
+        ),
         # ── Omeprazole CYP metabolism (keyword: cyp2c19) ─────────────────
         ("What CYP enzyme metabolises Omeprazole?", _OMEPRAZOLE_CYP),
         ("What enzyme metabolises Omeprazole?", _OMEPRAZOLE_CYP),
@@ -1814,20 +1828,24 @@ def generate_canonical_drug_facts_qa() -> Iterator[dict]:
         ("What toxicities is Methotrexate associated with?", _METHOTREXATE_WARN),
         ("What monitoring is required for Methotrexate?", _METHOTREXATE_WARN),
         # ── DDI golden questions ──────────────────────────────────────────
-        ("What is the DDI risk when combining two CYP3A4 substrates?",
-         "When two CYP3A4 substrates are co-administered, they compete for the same "
-         "cytochrome P450 enzyme. This competition can increase plasma levels of one or "
-         "both drugs, raising the risk of adverse effects. For example, combining a statin "
-         "like atorvastatin with a CYP3A4 inhibitor (clarithromycin, ketoconazole) can "
-         "markedly raise statin exposure and increase myopathy risk. CYP3A4 drug-drug "
-         "interactions are clinically important because CYP3A4 metabolises ~50% of drugs."),
-        ("What interaction should be considered when prescribing a CYP2D6 inhibitor alongside a CYP2D6 substrate?",
-         "Co-prescribing a CYP2D6 inhibitor with a CYP2D6 substrate can significantly "
-         "raise the substrate's plasma concentration. CYP2D6 inhibitors such as fluoxetine, "
-         "paroxetine, and bupropion can convert normal metabolisers into functional poor "
-         "metabolisers, reducing CYP2D6-mediated clearance. For example, fluoxetine inhibits "
-         "CYP2D6 and can increase codeine or tramadol exposure, raising opioid toxicity risk. "
-         "This drug-drug interaction requires dose adjustment of the CYP2D6 substrate."),
+        (
+            "What is the DDI risk when combining two CYP3A4 substrates?",
+            "When two CYP3A4 substrates are co-administered, they compete for the same "
+            "cytochrome P450 enzyme. This competition can increase plasma levels of one or "
+            "both drugs, raising the risk of adverse effects. For example, combining a statin "
+            "like atorvastatin with a CYP3A4 inhibitor (clarithromycin, ketoconazole) can "
+            "markedly raise statin exposure and increase myopathy risk. CYP3A4 drug-drug "
+            "interactions are clinically important because CYP3A4 metabolises ~50% of drugs.",
+        ),
+        (
+            "What interaction should be considered when prescribing a CYP2D6 inhibitor alongside a CYP2D6 substrate?",
+            "Co-prescribing a CYP2D6 inhibitor with a CYP2D6 substrate can significantly "
+            "raise the substrate's plasma concentration. CYP2D6 inhibitors such as fluoxetine, "
+            "paroxetine, and bupropion can convert normal metabolisers into functional poor "
+            "metabolisers, reducing CYP2D6-mediated clearance. For example, fluoxetine inhibits "
+            "CYP2D6 and can increase codeine or tramadol exposure, raising opioid toxicity risk. "
+            "This drug-drug interaction requires dose adjustment of the CYP2D6 substrate.",
+        ),
     ]
 
     # Repeat the full set to upweight canonical facts against the much larger noisy
@@ -1990,7 +2008,9 @@ def build_drug_interaction_dataset(
         ),
         (
             "mechanism-of-action",
-            functools.partial(generate_mechanism_qa, tables["drug_mechanism"], mol, tables["target_dictionary"])
+            functools.partial(
+                generate_mechanism_qa, tables["drug_mechanism"], mol, tables["target_dictionary"]
+            )
             if "drug_mechanism" in tables and "target_dictionary" in tables
             else functools.partial(generate_greeting_qa),  # placeholder, never called
             "drug_mechanism" in tables and "target_dictionary" in tables,
@@ -2058,7 +2078,9 @@ def build_drug_interaction_dataset(
         ),
         (
             "approved products",
-            functools.partial(generate_approved_product_qa, tables["formulations"], tables["products"], mol)
+            functools.partial(
+                generate_approved_product_qa, tables["formulations"], tables["products"], mol
+            )
             if "formulations" in tables and "products" in tables
             else functools.partial(generate_greeting_qa),
             "formulations" in tables and "products" in tables,
@@ -2072,14 +2094,18 @@ def build_drug_interaction_dataset(
         ),
         (
             "assay context",
-            functools.partial(generate_assay_context_qa, tables["assays"], tables["activities"], mol)
+            functools.partial(
+                generate_assay_context_qa, tables["assays"], tables["activities"], mol
+            )
             if "assays" in tables and "activities" in tables
             else functools.partial(generate_greeting_qa),
             "assays" in tables and "activities" in tables,
         ),
         (
             "ligand efficiency",
-            functools.partial(generate_ligand_efficiency_qa, tables["ligand_eff"], tables["activities"], mol)
+            functools.partial(
+                generate_ligand_efficiency_qa, tables["ligand_eff"], tables["activities"], mol
+            )
             if "ligand_eff" in tables and "activities" in tables
             else functools.partial(generate_greeting_qa),
             "ligand_eff" in tables and "activities" in tables,
@@ -2092,7 +2118,9 @@ def build_drug_interaction_dataset(
                 tables["target_components"],
                 tables["target_dictionary"],
             )
-            if "component_sequences" in tables and "target_components" in tables and "target_dictionary" in tables
+            if "component_sequences" in tables
+            and "target_components" in tables
+            and "target_dictionary" in tables
             else functools.partial(generate_greeting_qa),
             "component_sequences" in tables
             and "target_components" in tables
@@ -2107,8 +2135,10 @@ def build_drug_interaction_dataset(
                 tables["target_components"],
                 tables["target_dictionary"],
             )
-            if "protein_classification" in tables and "component_class" in tables
-            and "target_components" in tables and "target_dictionary" in tables
+            if "protein_classification" in tables
+            and "component_class" in tables
+            and "target_components" in tables
+            and "target_dictionary" in tables
             else functools.partial(generate_greeting_qa),
             "protein_classification" in tables
             and "component_class" in tables
@@ -2124,28 +2154,49 @@ def build_drug_interaction_dataset(
         ),
         (
             "target relations",
-            functools.partial(generate_target_relations_qa, tables["target_relations"], tables["target_dictionary"])
+            functools.partial(
+                generate_target_relations_qa,
+                tables["target_relations"],
+                tables["target_dictionary"],
+            )
             if "target_relations" in tables and "target_dictionary" in tables
             else functools.partial(generate_greeting_qa),
             "target_relations" in tables and "target_dictionary" in tables,
         ),
         (
             "CYP inhibition (quantitative)",
-            functools.partial(generate_cyp_inhibition_qa, tables["activities"], tables["assays"], tables["target_dictionary"], mol)
+            functools.partial(
+                generate_cyp_inhibition_qa,
+                tables["activities"],
+                tables["assays"],
+                tables["target_dictionary"],
+                mol,
+            )
             if "activities" in tables and "assays" in tables and "target_dictionary" in tables
             else functools.partial(generate_greeting_qa),
             "activities" in tables and "assays" in tables and "target_dictionary" in tables,
         ),
         (
             "pharmacodynamic interactions",
-            functools.partial(generate_pd_interaction_qa, tables["drug_mechanism"], mol, tables["target_dictionary"])
+            functools.partial(
+                generate_pd_interaction_qa,
+                tables["drug_mechanism"],
+                mol,
+                tables["target_dictionary"],
+            )
             if "drug_mechanism" in tables and "target_dictionary" in tables
             else functools.partial(generate_greeting_qa),
             "drug_mechanism" in tables and "target_dictionary" in tables,
         ),
         (
             "P-glycoprotein transport",
-            functools.partial(generate_pgp_interaction_qa, tables["activities"], tables["assays"], tables["target_dictionary"], mol)
+            functools.partial(
+                generate_pgp_interaction_qa,
+                tables["activities"],
+                tables["assays"],
+                tables["target_dictionary"],
+                mol,
+            )
             if "activities" in tables and "assays" in tables and "target_dictionary" in tables
             else functools.partial(generate_greeting_qa),
             "activities" in tables and "assays" in tables and "target_dictionary" in tables,

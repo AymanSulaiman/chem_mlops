@@ -6,7 +6,6 @@ from app.scripts.flows.llm_finetuning_data.build_finetune_dataset import (
     join_tables,
 )
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -107,9 +106,18 @@ def test_filter_drops_rows_with_both_null(activities_all_null):
 def test_filter_selects_expected_columns(activities):
     result = filter_activities(activities)
     expected = {
-        "activity_id", "assay_id", "doc_id", "record_id", "molregno",
-        "standard_relation", "standard_value", "standard_units", "standard_type",
-        "pchembl_value", "data_validity_comment", "activity_comment",
+        "activity_id",
+        "assay_id",
+        "doc_id",
+        "record_id",
+        "molregno",
+        "standard_relation",
+        "standard_value",
+        "standard_units",
+        "standard_type",
+        "pchembl_value",
+        "data_validity_comment",
+        "activity_comment",
     }
     assert set(result.columns) == expected
 
