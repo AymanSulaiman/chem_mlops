@@ -138,9 +138,10 @@ class TestSplitLongSequences:
         _write_jsonl(path, records)
 
         tok = _make_tokenizer()
-        with patch("transformers.AutoTokenizer.from_pretrained", return_value=tok), patch(
-            "pathlib.Path.write_text"
-        ) as mock_write_text:
+        with (
+            patch("transformers.AutoTokenizer.from_pretrained", return_value=tok),
+            patch("pathlib.Path.write_text") as mock_write_text,
+        ):
             split_long_sequences(tmp_path, HF_MODEL_ID, max_seq_len=100)
 
         mock_write_text.assert_not_called()

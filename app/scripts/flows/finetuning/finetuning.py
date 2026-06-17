@@ -16,9 +16,11 @@ HF_MODEL_ID = "google/gemma-3-1b-pt"
 DATA_DIR = Path("data/llm_finetune")
 
 # M1 Pro / 32 GB unified memory — tuned for ~22 GB peak with grad checkpointing
-BATCH_SIZE = 4  # was 2; safe after --grad-checkpoint frees ~30% peak memory
+# Dataset is now ~883K pairs (5× larger); batch 2 keeps peak memory safe.
+# Compensate for the halved batch size by doubling iters to maintain training tokens seen.
+BATCH_SIZE = 2
 NUM_LAYERS = 16  # was 8; Gemma 3 1B has 18 layers — more LoRA coverage
-ITERS = 1500
+ITERS = 3000  # doubled from 1500 to match training tokens seen at batch_size=4
 LEARNING_RATE = 1e-5
 MAX_SEQ_LEN = 2048
 STEPS_PER_REPORT = 25  # was 1; reduces per-iteration I/O overhead

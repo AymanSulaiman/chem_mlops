@@ -26,7 +26,6 @@ def run_dir(tmp_path: Path) -> Path:
     return rd
 
 
-
 # ── latest_run_dir ────────────────────────────────────────────────────────────
 
 
@@ -77,8 +76,9 @@ class TestExportToOllama:
         output_dir = run_dir / "mlx" / "ollama"
         output_dir.mkdir(parents=True)
 
-        with patch("app.scripts.flows.finetuning.export_to_ollama._run") as mock_run, patch(
-            "app.scripts.flows.finetuning.convert_gemma3_gguf.convert"
+        with (
+            patch("app.scripts.flows.finetuning.export_to_ollama._run") as mock_run,
+            patch("app.scripts.flows.finetuning.convert_gemma3_gguf.convert"),
         ):
             export_to_ollama(run_dir=run_dir, force=False)
             mock_run.assert_not_called()
@@ -89,16 +89,18 @@ class TestExportToOllama:
         sentinel = output_dir / "old_file.txt"
         sentinel.write_text("stale")
 
-        with patch("app.scripts.flows.finetuning.export_to_ollama._run"), patch(
-            "app.scripts.flows.finetuning.convert_gemma3_gguf.convert"
+        with (
+            patch("app.scripts.flows.finetuning.export_to_ollama._run"),
+            patch("app.scripts.flows.finetuning.convert_gemma3_gguf.convert"),
         ):
             export_to_ollama(run_dir=run_dir, force=True)
 
         assert not sentinel.exists()
 
     def test_modelfile_contains_system_prompt(self, run_dir: Path) -> None:
-        with patch("app.scripts.flows.finetuning.export_to_ollama._run"), patch(
-            "app.scripts.flows.finetuning.convert_gemma3_gguf.convert"
+        with (
+            patch("app.scripts.flows.finetuning.export_to_ollama._run"),
+            patch("app.scripts.flows.finetuning.convert_gemma3_gguf.convert"),
         ):
             export_to_ollama(run_dir=run_dir)
 
@@ -106,8 +108,9 @@ class TestExportToOllama:
         assert SYSTEM_PROMPT in modelfile
 
     def test_modelfile_contains_gguf_path(self, run_dir: Path) -> None:
-        with patch("app.scripts.flows.finetuning.export_to_ollama._run"), patch(
-            "app.scripts.flows.finetuning.convert_gemma3_gguf.convert"
+        with (
+            patch("app.scripts.flows.finetuning.export_to_ollama._run"),
+            patch("app.scripts.flows.finetuning.convert_gemma3_gguf.convert"),
         ):
             export_to_ollama(run_dir=run_dir)
 
@@ -115,8 +118,9 @@ class TestExportToOllama:
         assert "chembl-drug-chat.gguf" in modelfile
 
     def test_modelfile_contains_stop_tokens(self, run_dir: Path) -> None:
-        with patch("app.scripts.flows.finetuning.export_to_ollama._run"), patch(
-            "app.scripts.flows.finetuning.convert_gemma3_gguf.convert"
+        with (
+            patch("app.scripts.flows.finetuning.export_to_ollama._run"),
+            patch("app.scripts.flows.finetuning.convert_gemma3_gguf.convert"),
         ):
             export_to_ollama(run_dir=run_dir)
 
@@ -125,8 +129,9 @@ class TestExportToOllama:
         assert 'PARAMETER stop "### Answer"' in modelfile
 
     def test_modelfile_contains_sampling_params(self, run_dir: Path) -> None:
-        with patch("app.scripts.flows.finetuning.export_to_ollama._run"), patch(
-            "app.scripts.flows.finetuning.convert_gemma3_gguf.convert"
+        with (
+            patch("app.scripts.flows.finetuning.export_to_ollama._run"),
+            patch("app.scripts.flows.finetuning.convert_gemma3_gguf.convert"),
         ):
             export_to_ollama(run_dir=run_dir)
 
@@ -137,8 +142,9 @@ class TestExportToOllama:
 
     def test_ollama_create_called_with_model_name(self, run_dir: Path) -> None:
         custom_name = "my-model:test"
-        with patch("app.scripts.flows.finetuning.export_to_ollama._run") as mock_run, patch(
-            "app.scripts.flows.finetuning.convert_gemma3_gguf.convert"
+        with (
+            patch("app.scripts.flows.finetuning.export_to_ollama._run") as mock_run,
+            patch("app.scripts.flows.finetuning.convert_gemma3_gguf.convert"),
         ):
             export_to_ollama(run_dir=run_dir, model_name=custom_name)
 
@@ -149,9 +155,10 @@ class TestExportToOllama:
         assert custom_name in cmd
 
     def test_gguf_convert_is_called(self, run_dir: Path) -> None:
-        with patch("app.scripts.flows.finetuning.export_to_ollama._run"), patch(
-            "app.scripts.flows.finetuning.convert_gemma3_gguf.convert"
-        ) as mock_convert:
+        with (
+            patch("app.scripts.flows.finetuning.export_to_ollama._run"),
+            patch("app.scripts.flows.finetuning.convert_gemma3_gguf.convert") as mock_convert,
+        ):
             export_to_ollama(run_dir=run_dir)
 
         mock_convert.assert_called_once()
@@ -165,8 +172,12 @@ class TestExportToOllama:
         def record_convert(src, dst):
             call_order.append("convert")
 
-        with patch("app.scripts.flows.finetuning.export_to_ollama._run", side_effect=record_run), patch(
-            "app.scripts.flows.finetuning.convert_gemma3_gguf.convert", side_effect=record_convert
+        with (
+            patch("app.scripts.flows.finetuning.export_to_ollama._run", side_effect=record_run),
+            patch(
+                "app.scripts.flows.finetuning.convert_gemma3_gguf.convert",
+                side_effect=record_convert,
+            ),
         ):
             export_to_ollama(run_dir=run_dir)
 
@@ -174,8 +185,9 @@ class TestExportToOllama:
         assert call_order.index("convert") < call_order.index("ollama")
 
     def test_default_model_name_is_used(self, run_dir: Path) -> None:
-        with patch("app.scripts.flows.finetuning.export_to_ollama._run") as mock_run, patch(
-            "app.scripts.flows.finetuning.convert_gemma3_gguf.convert"
+        with (
+            patch("app.scripts.flows.finetuning.export_to_ollama._run") as mock_run,
+            patch("app.scripts.flows.finetuning.convert_gemma3_gguf.convert"),
         ):
             export_to_ollama(run_dir=run_dir)
 

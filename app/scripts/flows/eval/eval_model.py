@@ -47,7 +47,7 @@ except ImportError:  # non-Apple-Silicon environments (CI)
     CacheDataset = None  # type: ignore[assignment] # type: ignore
 
 GOLDEN_BENCHMARK_PATH = Path(__file__).parent / "golden.jsonl"
-EVAL_PASS_THRESHOLD = 0.50  # 70 % of golden questions must pass
+EVAL_PASS_THRESHOLD = 0.7  # 70 % of golden questions must pass
 
 
 # ── Perplexity ────────────────────────────────────────────────────────────────
@@ -75,7 +75,7 @@ def run_perplexity_eval(
     Returns:
         Perplexity as a float (exp of mean cross-entropy loss).
     """
-    model, tokenizer = mlx_lm_load( # type: ignore
+    model, tokenizer = mlx_lm_load(  # type: ignore
         str(mlx_model_dir),
         adapter_path=str(adapter_dir) if adapter_dir is not None else None,
     )
@@ -86,7 +86,7 @@ def run_perplexity_eval(
         test=False,
         hf_dataset=None,
     )
-    _, valid_set, _ = mlx_load_dataset(args, tokenizer) # type: ignore
+    _, valid_set, _ = mlx_load_dataset(args, tokenizer)  # type: ignore
 
     mean_loss = mlx_evaluate(
         model=model,
@@ -119,11 +119,7 @@ def run_golden_benchmark(
     Returns:
         Dict with keys: pass_count, total, pass_rate, results (per-question list).
     """
-    questions = [
-        json.loads(line)
-        for line in golden_path.read_text().splitlines()
-        if line.strip()
-    ]
+    questions = [json.loads(line) for line in golden_path.read_text().splitlines() if line.strip()]
 
     passed = 0
     results: list[dict[str, Any]] = []
@@ -229,10 +225,7 @@ def eval_flow(
     # ── 2. Golden benchmark ───────────────────────────────────────
     print(f"\nRunning golden benchmark ({golden_path}) ...")
     golden = run_golden_benchmark(mlx_model_dir, adapter_dir, golden_path)
-    print(
-        f"  Pass rate: {golden['pass_count']}/{golden['total']}"
-        f" ({golden['pass_rate']:.1%})"
-    )
+    print(f"  Pass rate: {golden['pass_count']}/{golden['total']} ({golden['pass_rate']:.1%})")
 
     # ── 3. Write artifacts ────────────────────────────────────────
     metrics: dict[str, Any] = {
@@ -248,31 +241,26 @@ def eval_flow(
 
     metrics_path = eval_dir / "metrics.json"
     detail_path = eval_dir / "golden_results.jsonl"
-    detail_path.write_text(
-        "\n".join(json.dumps(r) for r in golden["results"]) + "\n"
-    )
+    detail_path.write_text("\n".join(json.dumps(r) for r in golden["results"]) + "\n")
 
     # ── 4. Gate checks ────────────────────────────────────────────
     failures: list[str] = []
 
     if finetuned_ppl > baseline_ppl:
         failures.append(
-            f"Perplexity regression: fine-tuned {finetuned_ppl:.3f}"
-            f" > baseline {baseline_ppl:.3f}"
+            f"Perplexity regression: fine-tuned {finetuned_ppl:.3f} > baseline {baseline_ppl:.3f}"
         )
 
     if golden["pass_rate"] < pass_threshold:
         failures.append(
-            f"Golden benchmark {golden['pass_rate']:.1%}"
-            f" is below threshold {pass_threshold:.1%}"
+            f"Golden benchmark {golden['pass_rate']:.1%} is below threshold {pass_threshold:.1%}"
         )
 
     if failures:
         metrics["passed"] = False
         metrics_path.write_text(json.dumps(metrics, indent=2) + "\n")
         raise RuntimeError(
-            "Eval failed — blocking Ollama export:\n"
-            + "\n".join(f"  • {f}" for f in failures)
+            "Eval failed — blocking Ollama export:\n" + "\n".join(f"  • {f}" for f in failures)
         )
 
     metrics_path.write_text(json.dumps(metrics, indent=2) + "\n")

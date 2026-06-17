@@ -41,7 +41,10 @@ def create_finetune_dataset_op() -> None:
 
 @op(ins={"start": In(Nothing)}, out=Out(Nothing))
 def build_drug_interaction_dataset_op() -> None:
-    build_drug_interaction_dataset()
+    # workers=1: Dagster uses an in-process executor, so spawning a ProcessPoolExecutor
+    # inside it leaks semaphores and can interfere with subsequent ops. Sequential
+    # mode is safe here; run standalone for parallel speed.
+    build_drug_interaction_dataset(workers=1)
 
 
 # Both f3a/f3b must complete before finetuning begins (fan-in via Nothing inputs)

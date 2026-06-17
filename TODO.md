@@ -8,7 +8,7 @@
 |---|---|
 | Data collection (ChEMBL download) | Done |
 | Data transformation (SQLite → Parquet) | Done |
-| LLM dataset builder (17 QA categories) | Done |
+| LLM dataset builder (20 QA categories) | Done |
 | Vector store (2.85M compounds, LanceDB RAG) | Done |
 | Fine-tuning (MLX LoRA, Gemma 3 1B) | Done |
 | Ollama export + GGUF conversion | Done |
@@ -41,18 +41,18 @@ uv run python -m app.scripts.flows.finetuning.finetuning
 
 | # | Task | Priority |
 |---|---|---|
-| 3 | Add CYP inhibition quantitative QA data | High |
-| 4 | Add pharmacodynamic interaction training data | High |
-| 5 | Add interaction severity scoring | Medium |
-| 6 | Add P-glycoprotein transport interaction data | Medium |
+| ~~3~~ | ~~Add CYP inhibition quantitative QA data~~ | ~~High~~ |
+| ~~4~~ | ~~Add pharmacodynamic interaction training data~~ | ~~High~~ |
+| ~~5~~ | ~~Add interaction severity scoring~~ | ~~Medium~~ |
+| ~~6~~ | ~~Add P-glycoprotein transport interaction data~~ | ~~Medium~~ |
 | 7 | Integrate TWOSIDES polypharmacy dataset | Medium |
 
 ### Why these matter
-- **CYP inhibition :** Current DDI inference uses shared substrates (rough proxy). IC50/Ki data tells you *how strongly* a drug inhibits an enzyme — far more clinically meaningful.
-- **PD interactions :** We only model pharmacokinetic interactions (metabolism). Pharmacodynamic interactions (same receptor, additive/synergistic/antagonistic effects) are completely missing.
-- **Severity scoring :** "May alter plasma levels" is not useful. HIGH/MODERATE/LOW severity with clinical context is.
-- **P-gp :** P-glycoprotein transport affects absorption and CNS penetration — a major DDI mechanism not currently covered.
-- **TWOSIDES :** Real-world polypharmacy signals from FDA FAERS — captures effects beyond CYP metabolism.
+- **CYP inhibition :** ✅ IC50/Ki data from `activities` → `assays` → `target_dictionary` join. Generates quantitative inhibition QA with strength (strong/moderate/weak) per pChEMBL.
+- **PD interactions :** ✅ Pairs drugs sharing the same `drug_mechanism.tid` target; classifies as additive/synergistic/antagonistic based on action types.
+- **Severity scoring :** ✅ CYP3A4/2D6/2C9/2C19 → HIGH, CYP2C8/1A2/2B6 → MODERATE, others → LOW. Included in all DDI answer templates.
+- **P-gp :** ✅ Substrate/inhibitor QA from ABCB1/MDR1 assays. Covers absorption and CNS penetration effects.
+- **TWOSIDES :** Real-world polypharmacy signals from FDA FAERS — requires external download, not yet integrated.
 
 ---
 
@@ -60,7 +60,7 @@ uv run python -m app.scripts.flows.finetuning.finetuning
 
 | # | Task | Priority |
 |---|---|---|
-| 8 | Add tests for `build_finetune_dataset.py` | High |
+| ~~8~~ | ~~Add tests for `build_finetune_dataset.py`~~ | ~~High~~ |
 | ~~9~~ | ~~Add tests for `export_to_ollama.py` (mock subprocess calls)~~ | ~~Medium~~ |
 | ~~10~~ | ~~Add Dagster op/graph wiring test for `data_transformation.py`~~ | ~~Medium~~ |
 
@@ -99,6 +99,24 @@ uv run python -m app.scripts.flows.finetuning.finetuning
 
 ---
 
+## 🤖 Model Variants
+
+Two serving modes are planned, each with a distinct trade-off:
+
+| Variant | How it works | Strength | Weakness |
+|---|---|---|---|
+| **Fine-tuned** (current) | LoRA-tuned Gemma 3 1B → GGUF → Ollama | Fast, no retrieval step | Relies on memorised training facts |
+| **RAG** (planned) | Same model + LanceDB lookup injected into prompt at inference | Grounded in live ChEMBL records | Slower; quality depends on retrieval relevance |
+
+| # | Task | Priority |
+|---|---|---|
+| 23 | Build a RAG inference wrapper — query LanceDB with the user's drug name / SMILES, format the top-k records into a system-prompt prefix, then call the model | High |
+| 24 | Wire the RAG wrapper into the Bun web app as a toggle ("Standard" vs "RAG" mode) | Medium |
+| 25 | Benchmark RAG vs fine-tuned on the golden set and record results in `artifacts/` | Medium |
+| 26 | Register a second Ollama model (`chembl-drug-chat:1b-rag`) that uses a RAG-aware Modelfile system prompt | Low |
+
+---
+
 ## 🏗️ Architecture
 
 | # | Task | Issue | Priority |
@@ -109,6 +127,12 @@ uv run python -m app.scripts.flows.finetuning.finetuning
 
 ## ✅ Completed
 
+- [x] Tests for `build_finetune_dataset.py` — `app/tests/flows/build_finetune_dataset_test.py` (13 tests: `filter_activities`, `join_tables`, `create_finetuning_dataset`)
+- [x] CYP inhibition quantitative QA — IC50/Ki data via `activities → assays → target_dictionary` join (`generate_cyp_inhibition_qa`)
+- [x] Pharmacodynamic interaction QA — shared-receptor drug pairs with additive/synergistic/antagonistic classification (`generate_pd_interaction_qa`)
+- [x] Interaction severity scoring — HIGH/MODERATE/LOW labels on all DDI QA pairs based on CYP enzyme clinical importance
+- [x] P-glycoprotein transport QA — ABCB1/MDR1 substrate and inhibitor pairs (`generate_pgp_interaction_qa`)
+- [x] Parallel dataset generation — `ThreadPoolExecutor` for table loading, `ProcessPoolExecutor` for generators (uses all CPU cores by default)
 - [x] RAG vector store — 2.85M compounds ingested into LanceDB (PR #14)
 - [x] Bun web chat app wired to Ollama (PR #13)
 - [x] Fixed GGUF converter (RMSNorm +1 shift, space prefix, softcap)
