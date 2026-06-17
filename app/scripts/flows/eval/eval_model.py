@@ -47,7 +47,7 @@ except ImportError:  # non-Apple-Silicon environments (CI)
     CacheDataset = None  # type: ignore[assignment] # type: ignore
 
 GOLDEN_BENCHMARK_PATH = Path(__file__).parent / "golden.jsonl"
-EVAL_PASS_THRESHOLD = 0.50  # 70 % of golden questions must pass
+EVAL_PASS_THRESHOLD = 0.7  # 70 % of golden questions must pass
 
 
 # ── Perplexity ────────────────────────────────────────────────────────────────

@@ -99,6 +99,24 @@ uv run python -m app.scripts.flows.finetuning.finetuning
 
 ---
 
+## 🤖 Model Variants
+
+Two serving modes are planned, each with a distinct trade-off:
+
+| Variant | How it works | Strength | Weakness |
+|---|---|---|---|
+| **Fine-tuned** (current) | LoRA-tuned Gemma 3 1B → GGUF → Ollama | Fast, no retrieval step | Relies on memorised training facts |
+| **RAG** (planned) | Same model + LanceDB lookup injected into prompt at inference | Grounded in live ChEMBL records | Slower; quality depends on retrieval relevance |
+
+| # | Task | Priority |
+|---|---|---|
+| 23 | Build a RAG inference wrapper — query LanceDB with the user's drug name / SMILES, format the top-k records into a system-prompt prefix, then call the model | High |
+| 24 | Wire the RAG wrapper into the Bun web app as a toggle ("Standard" vs "RAG" mode) | Medium |
+| 25 | Benchmark RAG vs fine-tuned on the golden set and record results in `artifacts/` | Medium |
+| 26 | Register a second Ollama model (`chembl-drug-chat:1b-rag`) that uses a RAG-aware Modelfile system prompt | Low |
+
+---
+
 ## 🏗️ Architecture
 
 | # | Task | Issue | Priority |
