@@ -11,7 +11,6 @@ from app.scripts.flows.vector_store.ingest_twosides_to_lancedb import (
     ingest_twosides_to_lancedb,
 )
 
-
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
 

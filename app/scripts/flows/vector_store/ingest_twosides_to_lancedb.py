@@ -129,7 +129,7 @@ def ingest_twosides_to_lancedb(
         table.create_scalar_index("drug_1_name")
         table.create_scalar_index("drug_2_name")
         table.create_scalar_index("pair_key")
-        print(f"Indexed on drug_1_name, drug_2_name, pair_key")
+        print("Indexed on drug_1_name, drug_2_name, pair_key")
 
     print(f"Done. {total:,} drug pairs written to '{POLYPHARMACY_TABLE}' table.")
 

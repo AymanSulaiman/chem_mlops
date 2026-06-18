@@ -1568,7 +1568,6 @@ def generate_twosides_qa(
     Yields nothing if TWOSIDES has not been downloaded yet — run
     `python -m app.scripts.flows.llm_finetuning_data.download_twosides` first.
     """
-    import gzip
 
     if not twosides_path.exists():
         return
