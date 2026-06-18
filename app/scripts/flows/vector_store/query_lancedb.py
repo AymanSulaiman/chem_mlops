@@ -1,5 +1,6 @@
 # ChEMBL LanceDB Query Interface
-# Provides similarity search and exact lookup against the ingested compounds table.
+# Provides similarity search and exact lookup against the ingested compounds table,
+# and polypharmacy side-effect lookup against the TWOSIDES polypharmacy table.
 
 from __future__ import annotations
 
@@ -16,6 +17,7 @@ from app.scripts.flows.vector_store.ingest_to_lancedb import (
     LANCEDB_DIR,
     _smiles_to_fp,
 )
+from app.scripts.flows.vector_store.ingest_twosides_to_lancedb import POLYPHARMACY_TABLE
 
 # ── Private helpers ───────────────────────────────────────────────────────────
 
@@ -57,6 +59,18 @@ def _open_table(lancedb_dir: str) -> Table:
             "Run ingest_compounds_to_lancedb() first."
         )
     return db.open_table(COMPOUNDS_TABLE)
+
+
+def _open_polypharmacy_table(lancedb_dir: str) -> Table:
+    """Connect to the latest ChEMBL LanceDB and return the polypharmacy table."""
+    uri: str = _resolve_lancedb_uri(lancedb_dir)
+    db: DBConnection = lancedb.connect(uri)
+    if POLYPHARMACY_TABLE not in db.list_tables().tables:
+        raise FileNotFoundError(
+            f"Table '{POLYPHARMACY_TABLE}' not found in '{uri}'. "
+            "Run ingest_twosides_to_lancedb() first."
+        )
+    return db.open_table(POLYPHARMACY_TABLE)
 
 
 def _smiles_to_query_vector(smiles: str) -> list[float]:
@@ -136,6 +150,76 @@ def get_compound(
     return row
 
 
+def query_polypharmacy(
+    drug_1: str,
+    drug_2: str,
+    lancedb_dir: str = LANCEDB_DIR,
+) -> dict[str, Any] | None:
+    """Look up polypharmacy side-effect signals for a specific drug pair.
+
+    Drug name matching is case-insensitive and checks both orderings, since
+    TWOSIDES does not guarantee a canonical (drug_1, drug_2) order.
+
+    Args:
+        drug_1: Name of the first drug (e.g. ``"Warfarin"``).
+        drug_2: Name of the second drug (e.g. ``"Aspirin"``).
+        lancedb_dir: Root LanceDB directory (default ``data/lancedb``).
+
+    Returns:
+        A dict with ``side_effects``, ``max_prr``, ``total_cases``, etc.,
+        or ``None`` if the pair has no TWOSIDES signal above the ingestion thresholds.
+
+    Raises:
+        FileNotFoundError: If the polypharmacy table has not been ingested yet.
+    """
+    table: Table = _open_polypharmacy_table(lancedb_dir)
+    d1 = drug_1.strip().title()
+    d2 = drug_2.strip().title()
+    rows: list[dict[str, Any]] = (
+        table.search()
+        .where(
+            f"(drug_1_name = '{d1}' AND drug_2_name = '{d2}') OR "
+            f"(drug_1_name = '{d2}' AND drug_2_name = '{d1}')"
+        )
+        .limit(1)
+        .to_list()
+    )
+    return rows[0] if rows else None
+
+
+def query_drug_side_effects(
+    drug_name: str,
+    n: int = 20,
+    lancedb_dir: str = LANCEDB_DIR,
+) -> list[dict[str, Any]]:
+    """Find all known polypharmacy signals involving a given drug.
+
+    Returns all drug pairs in the TWOSIDES table where *drug_name* appears as
+    either drug_1 or drug_2, ordered by descending max PRR (strongest signals first).
+
+    Args:
+        drug_name: Drug name to search for (e.g. ``"Sildenafil"``).
+        n: Maximum number of pairs to return (default 20).
+        lancedb_dir: Root LanceDB directory (default ``data/lancedb``).
+
+    Returns:
+        List of polypharmacy dicts ordered by descending ``max_prr``.
+        Each dict includes the partner drug name, aggregated side effects, and signal stats.
+
+    Raises:
+        FileNotFoundError: If the polypharmacy table has not been ingested yet.
+    """
+    table: Table = _open_polypharmacy_table(lancedb_dir)
+    name = drug_name.strip().title()
+    rows: list[dict[str, Any]] = (
+        table.search()
+        .where(f"drug_1_name = '{name}' OR drug_2_name = '{name}'")
+        .limit(n)
+        .to_list()
+    )
+    return sorted(rows, key=lambda r: r.get("max_prr", 0), reverse=True)
+
+
 # ── Internal self-check ───────────────────────────────────────────────────────
 
 
@@ -185,6 +269,28 @@ def _run_sanity_check(lancedb_dir: str = LANCEDB_DIR) -> None:
     missing = get_compound("CHEMBL_DOES_NOT_EXIST", lancedb_dir=lancedb_dir)
     assert missing is None, f"Expected None, got {missing}"
     print("    ✓ None returned for unknown ID")
+
+    # Checks 5–6: polypharmacy table (skipped gracefully if not yet ingested)
+    try:
+        print("\n[5] Polypharmacy pair lookup (Temazepam + Sildenafil)...")
+        result = query_polypharmacy("Temazepam", "Sildenafil", lancedb_dir=lancedb_dir)
+        if result is None:
+            print("    — pair not found (may be filtered by PRR threshold)")
+        else:
+            print(f"    max_prr={result.get('max_prr')}  n_effects={result.get('n_side_effects')}")
+            print(f"    side_effects={result.get('side_effects', '')[:80]}...")
+            print("    ✓ Polypharmacy pair lookup returned a result")
+
+        print("\n[6] Drug side-effect query (Warfarin)...")
+        pairs = query_drug_side_effects("Warfarin", n=5, lancedb_dir=lancedb_dir)
+        print(f"    Found {len(pairs)} pair(s) involving Warfarin")
+        if pairs:
+            top = pairs[0]
+            partner = top.get("drug_2_name") if top.get("drug_1_name", "").title() == "Warfarin" else top.get("drug_1_name")
+            print(f"    Strongest signal: Warfarin + {partner}  max_prr={top.get('max_prr')}")
+            print("    ✓ Drug side-effect query succeeded")
+    except FileNotFoundError:
+        print("    — polypharmacy table not ingested yet, skipping checks 5-6")
 
     print("\n── All checks passed ✓ ──────────────────────────────────────")
 

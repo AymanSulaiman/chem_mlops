@@ -16,6 +16,7 @@ from app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset import
     generate_indication_qa,
     generate_mechanism_qa,
     generate_metabolism_qa,
+    generate_twosides_qa,
     write_jsonl_splits,
 )
 
@@ -1276,3 +1277,80 @@ class TestBuildDrugInteractionDatasetFull:
             1 for _ in (full_out / "valid.jsonl").read_text().splitlines()
         )
         assert full_count > 10
+
+
+# ---------------------------------------------------------------------------
+# generate_twosides_qa
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def twosides_parquet(tmp_path: Path) -> Path:
+    """Minimal TWOSIDES Parquet covering two drug pairs."""
+    df = pl.DataFrame(
+        {
+            "drug_1_concept_name": ["Temazepam", "Temazepam", "Bumetanide"],
+            "drug_2_concept_name": ["Sildenafil", "Sildenafil", "Oxytocin"],
+            "condition_concept_name": ["Arthralgia", "Nausea", "Arthralgia"],
+            "PRR": [4.0, 3.5, 5.0],
+            "A": [7, 5, 8],
+        }
+    )
+    path = tmp_path / "TWOSIDES.parquet"
+    df.write_parquet(path)
+    return path
+
+
+def test_twosides_qa_yields_nothing_without_file(tmp_path: Path) -> None:
+    missing = tmp_path / "TWOSIDES.parquet"
+    pairs = list(generate_twosides_qa(twosides_path=missing))
+    assert pairs == []
+
+
+def test_twosides_qa_produces_pairs(twosides_parquet: Path) -> None:
+    pairs = list(generate_twosides_qa(twosides_path=twosides_parquet, min_prr=2.0, min_cases=1))
+    assert len(pairs) > 0
+
+
+def test_twosides_qa_format(twosides_parquet: Path) -> None:
+    pairs = list(generate_twosides_qa(twosides_path=twosides_parquet, min_prr=2.0, min_cases=1))
+    for pair in pairs:
+        assert "text" in pair
+        assert "### Question" in pair["text"]
+        assert "### Answer" in pair["text"]
+
+
+def test_twosides_qa_filters_by_prr(twosides_parquet: Path) -> None:
+    # min_prr=5.0 should keep only the Bumetanide+Oxytocin pair (PRR=5.0)
+    pairs = list(generate_twosides_qa(twosides_path=twosides_parquet, min_prr=5.0, min_cases=1))
+    assert len(pairs) > 0
+    combined = " ".join(p["text"] for p in pairs)
+    assert "Bumetanide" in combined or "Oxytocin" in combined
+
+
+def test_twosides_qa_filters_by_min_cases(twosides_parquet: Path) -> None:
+    # min_cases=10 excludes all rows (max A is 8)
+    pairs = list(generate_twosides_qa(twosides_path=twosides_parquet, min_prr=1.0, min_cases=10))
+    assert pairs == []
+
+
+def test_twosides_qa_drug_names_title_cased(twosides_parquet: Path) -> None:
+    pairs = list(generate_twosides_qa(twosides_path=twosides_parquet, min_prr=2.0, min_cases=1))
+    combined = " ".join(p["text"] for p in pairs)
+    # Drug names should be title-cased, not all-caps or all-lower
+    assert "TEMAZEPAM" not in combined
+    assert "temazepam" not in combined
+
+
+def test_twosides_qa_aggregates_side_effects(twosides_parquet: Path) -> None:
+    # Temazepam+Sildenafil has two side effects; both should appear in the answer
+    pairs = list(generate_twosides_qa(twosides_path=twosides_parquet, min_prr=2.0, min_cases=1))
+    combined = " ".join(p["text"] for p in pairs)
+    assert "Arthralgia" in combined
+    assert "Nausea" in combined
+
+
+def test_twosides_qa_respects_max_pairs(twosides_parquet: Path) -> None:
+    pairs = list(generate_twosides_qa(twosides_path=twosides_parquet, min_prr=2.0, min_cases=1, max_pairs=1))
+    # max_pairs=1 → only 1 unique drug pair → 3 template variants (+ maybe 1 reversed)
+    assert len(pairs) <= 4

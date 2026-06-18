@@ -12,13 +12,17 @@ from app.scripts.flows.vector_store.ingest_to_lancedb import (
     _FP_GEN,
     COMPOUNDS_TABLE,
 )
+from app.scripts.flows.vector_store.ingest_twosides_to_lancedb import POLYPHARMACY_TABLE
 from app.scripts.flows.vector_store.query_lancedb import (
+    _open_polypharmacy_table,
     _open_table,
     _resolve_lancedb_uri,
     _run_sanity_check,
     _smiles_to_query_vector,
     get_compound,
     query_compounds,
+    query_drug_side_effects,
+    query_polypharmacy,
 )
 
 ASPIRIN_SMILES = "CC(=O)Oc1ccccc1C(=O)O"
@@ -188,3 +192,144 @@ class TestRunSanityCheck:
     def test_fails_on_empty_store(self, tmp_path: Path) -> None:
         with pytest.raises(FileNotFoundError):
             _run_sanity_check(lancedb_dir=str(tmp_path / "missing"))
+
+
+# ── Polypharmacy fixtures ─────────────────────────────────────────────────────
+
+
+@pytest.fixture()
+def polypharmacy_lancedb_dir(tmp_path: Path) -> str:
+    """LanceDB with both compounds and polypharmacy tables populated."""
+    uri = str(tmp_path / "chembl_CHEMBL_36")
+    db = lancedb.connect(uri)
+    db.create_table(
+        COMPOUNDS_TABLE,
+        data=[_make_record(ASPIRIN_SMILES, "CHEMBL25", "Aspirin", 180.16)],
+        mode="overwrite",
+    )
+    db.create_table(
+        POLYPHARMACY_TABLE,
+        data=[
+            {
+                "drug_1_rxnorm_id": 10355,
+                "drug_1_name": "Temazepam",
+                "drug_2_rxnorm_id": 136411,
+                "drug_2_name": "Sildenafil",
+                "side_effects": "Arthralgia; Nausea",
+                "max_prr": 4.0,
+                "mean_prr": 3.46,
+                "total_cases": 12,
+                "n_side_effects": 2,
+                "mean_reporting_freq": 0.048,
+                "pair_key": "Temazepam|Sildenafil",
+            },
+            {
+                "drug_1_rxnorm_id": 1808,
+                "drug_1_name": "Bumetanide",
+                "drug_2_rxnorm_id": 7824,
+                "drug_2_name": "Warfarin",
+                "side_effects": "Bleeding",
+                "max_prr": 6.0,
+                "mean_prr": 6.0,
+                "total_cases": 20,
+                "n_side_effects": 1,
+                "mean_reporting_freq": 0.1,
+                "pair_key": "Bumetanide|Warfarin",
+            },
+            {
+                "drug_1_rxnorm_id": 999,
+                "drug_1_name": "Temazepam",
+                "drug_2_rxnorm_id": 888,
+                "drug_2_name": "Warfarin",
+                "side_effects": "Drowsiness",
+                "max_prr": 3.5,
+                "mean_prr": 3.5,
+                "total_cases": 8,
+                "n_side_effects": 1,
+                "mean_reporting_freq": 0.06,
+                "pair_key": "Temazepam|Warfarin",
+            },
+        ],
+        mode="overwrite",
+    )
+    return str(tmp_path)
+
+
+# ── _open_polypharmacy_table ──────────────────────────────────────────────────
+
+
+class TestOpenPolypharmacyTable:
+    def test_opens_table_successfully(self, polypharmacy_lancedb_dir: str) -> None:
+        table = _open_polypharmacy_table(polypharmacy_lancedb_dir)
+        assert table is not None
+
+    def test_raises_if_table_missing(self, lancedb_dir: str) -> None:
+        # lancedb_dir fixture only has the compounds table
+        with pytest.raises(FileNotFoundError, match="not found"):
+            _open_polypharmacy_table(lancedb_dir)
+
+    def test_raises_if_dir_missing(self, tmp_path: Path) -> None:
+        with pytest.raises(FileNotFoundError):
+            _open_polypharmacy_table(str(tmp_path / "nonexistent"))
+
+
+# ── query_polypharmacy ────────────────────────────────────────────────────────
+
+
+class TestQueryPolypharmacy:
+    def test_finds_known_pair(self, polypharmacy_lancedb_dir: str) -> None:
+        result = query_polypharmacy("Temazepam", "Sildenafil", lancedb_dir=polypharmacy_lancedb_dir)
+        assert result is not None
+        assert "Arthralgia" in result["side_effects"]
+
+    def test_finds_pair_in_reversed_order(self, polypharmacy_lancedb_dir: str) -> None:
+        result = query_polypharmacy("Sildenafil", "Temazepam", lancedb_dir=polypharmacy_lancedb_dir)
+        assert result is not None
+
+    def test_case_insensitive_lookup(self, polypharmacy_lancedb_dir: str) -> None:
+        result = query_polypharmacy("temazepam", "sildenafil", lancedb_dir=polypharmacy_lancedb_dir)
+        assert result is not None
+
+    def test_returns_none_for_unknown_pair(self, polypharmacy_lancedb_dir: str) -> None:
+        result = query_polypharmacy("Aspirin", "Metformin", lancedb_dir=polypharmacy_lancedb_dir)
+        assert result is None
+
+    def test_result_contains_expected_fields(self, polypharmacy_lancedb_dir: str) -> None:
+        result = query_polypharmacy("Temazepam", "Sildenafil", lancedb_dir=polypharmacy_lancedb_dir)
+        assert result is not None
+        for field in ("side_effects", "max_prr", "total_cases", "n_side_effects"):
+            assert field in result, f"Missing field: {field}"
+
+    def test_raises_if_table_missing(self, lancedb_dir: str) -> None:
+        with pytest.raises(FileNotFoundError):
+            query_polypharmacy("Aspirin", "Warfarin", lancedb_dir=lancedb_dir)
+
+
+# ── query_drug_side_effects ───────────────────────────────────────────────────
+
+
+class TestQueryDrugSideEffects:
+    def test_finds_all_pairs_for_drug(self, polypharmacy_lancedb_dir: str) -> None:
+        results = query_drug_side_effects("Warfarin", lancedb_dir=polypharmacy_lancedb_dir)
+        assert len(results) == 2  # Bumetanide+Warfarin and Temazepam+Warfarin
+
+    def test_returns_empty_for_unknown_drug(self, polypharmacy_lancedb_dir: str) -> None:
+        results = query_drug_side_effects("Metformin", lancedb_dir=polypharmacy_lancedb_dir)
+        assert results == []
+
+    def test_results_sorted_by_prr_descending(self, polypharmacy_lancedb_dir: str) -> None:
+        results = query_drug_side_effects("Warfarin", lancedb_dir=polypharmacy_lancedb_dir)
+        prrs = [r["max_prr"] for r in results]
+        assert prrs == sorted(prrs, reverse=True)
+
+    def test_case_insensitive_lookup(self, polypharmacy_lancedb_dir: str) -> None:
+        results = query_drug_side_effects("warfarin", lancedb_dir=polypharmacy_lancedb_dir)
+        assert len(results) == 2
+
+    def test_n_parameter_limits_results(self, polypharmacy_lancedb_dir: str) -> None:
+        results = query_drug_side_effects("Temazepam", n=1, lancedb_dir=polypharmacy_lancedb_dir)
+        assert len(results) <= 1
+
+    def test_raises_if_table_missing(self, lancedb_dir: str) -> None:
+        with pytest.raises(FileNotFoundError):
+            query_drug_side_effects("Warfarin", lancedb_dir=lancedb_dir)
