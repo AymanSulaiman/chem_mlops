@@ -11,11 +11,16 @@ flowchart LR
     EBI[(ChEMBL SQLite\n5.6 GB EBI FTP)] --> COL[collect_data\nDownload & extract\nchembl_XX.db]
     COL --> TRF[transform_data\nSQLite → Parquet\nvia DuckDB]
 
-    TRF --> DDI[build_drug_interaction_dataset\n23 tables · 20 QA categories\n~500K training pairs]
+    S3[(TWOSIDES\nFDA FAERS · S3)] --> DLT[download_twosides\nstream-decompress\n→ Parquet]
+
+    TRF --> DDI[build_drug_interaction_dataset\n23 tables · 21 QA categories\n~500K+ training pairs]
+    DLT --> DDI
     TRF --> FDS[create_finetuning_dataset\nactivities Parquet → JSONL]
     TRF --> ING[ingest_to_lancedb\n2.85M compound vectors\nMorgan fingerprints · ~6 min]
 
-    ING --> LDB[(LanceDB\nchembl_CHEMBL_36\ncompounds table)]
+    ING --> LDB[(LanceDB\nchembl_CHEMBL_37\ncompounds table)]
+    DLT --> ING2[ingest_twosides_to_lancedb\nPRR-filtered pairs\n→ polypharmacy table]
+    ING2 --> LDB2[(LanceDB\nchembl_CHEMBL_37\npolypharmacy table)]
 
     DDI --> FT[finetune_lora\nMLX LoRA on Gemma 3 1B-PT\n~1500 iters · Apple Silicon]
     FDS --> FT
@@ -23,8 +28,10 @@ flowchart LR
     FT --> EXP[export_to_ollama\nfuse adapter → GGUF\nollama create]
     EXP --> OLL[(Ollama\nchembl-drug-chat:1b)]
 
-    USR([User query\nSMILES / ChEMBL ID]) -->|query_compounds\nget_compound| LDB
+    USR([User query\nSMILES / drug name]) -->|query_compounds\nget_compound| LDB
+    USR -->|query_polypharmacy\nquery_drug_side_effects| LDB2
     LDB -->|top-n similar\ncompounds + metadata| OLL
+    LDB2 -->|polypharmacy\nside-effect signals| OLL
 ```
 
 The pipeline is orchestrated with **Dagster** and runs entirely locally.
@@ -74,9 +81,11 @@ This executes the full pipeline via Dagster:
 1. Download ChEMBL SQLite archive
 2. Convert all tables to Parquet
 3. In parallel:
-   - Build the QA JSONL dataset
+   - Download TWOSIDES polypharmacy dataset (FDA FAERS, Tatonetti et al.)
+   - Build the QA JSONL dataset (ChEMBL + TWOSIDES)
    - Build the activity Parquet
    - **Ingest 2.85 M compounds into LanceDB** (vector store for RAG)
+   - **Ingest TWOSIDES polypharmacy pairs into LanceDB** (after both ChEMBL ingest and TWOSIDES download complete)
 4. Fine-tune Gemma 3 1B with LoRA
 5. Fuse the LoRA adapter and register the model with Ollama
 
@@ -101,6 +110,13 @@ uv run python -m app.scripts.flows.llm_finetuning_data.build_finetune_dataset
 # Step 3c — Ingest 2.85 M compounds into LanceDB (~6 min)
 uv run python -m app.scripts.flows.vector_store.ingest_to_lancedb
 
+# Step 3d — Download TWOSIDES polypharmacy dataset from Tatonetti Lab S3
+#            (streams ~120 MB gzip, decompresses in memory, saves as Parquet)
+uv run python -m app.scripts.flows.llm_finetuning_data.download_twosides
+
+# Step 3e — Ingest TWOSIDES into LanceDB polypharmacy table (run after 3c and 3d)
+uv run python -m app.scripts.flows.vector_store.ingest_twosides_to_lancedb
+
 # Step 4 — Fine-tune Gemma 3 1B on the full dataset (~2–4 hrs on M1 Pro)
 uv run app/scripts/flows/finetuning/finetuning.py
 
@@ -116,6 +132,8 @@ Expected disk and time requirements:
 | Convert to Parquet | 8–10 GB | ~15 min |
 | Build QA dataset | < 1 GB output | ~30–60 min |
 | **Ingest to LanceDB** | ~15 GB | **~6 min** |
+| Download TWOSIDES | ~50 MB Parquet | ~2–3 min |
+| Ingest TWOSIDES to LanceDB | < 100 MB | ~1 min |
 | Fine-tune (1 500 iters) | ~2 GB adapter | ~2–4 hrs |
 | Export to Ollama | ~4 GB GGUF | ~5–10 min |
 
@@ -142,6 +160,12 @@ uv run python -m app.scripts.flows.llm_finetuning_data.build_finetune_dataset
 
 # 3c. Ingest compounds into LanceDB (vector store)
 uv run python -m app.scripts.flows.vector_store.ingest_to_lancedb
+
+# 3d. Download TWOSIDES polypharmacy dataset
+uv run python -m app.scripts.flows.llm_finetuning_data.download_twosides
+
+# 3e. Ingest TWOSIDES polypharmacy pairs into LanceDB
+uv run python -m app.scripts.flows.vector_store.ingest_twosides_to_lancedb
 
 # 4. Fine-tune
 uv run app/scripts/flows/finetuning/finetuning.py
@@ -172,7 +196,7 @@ uv run python -m app.scripts.flows.vector_store.ingest_to_lancedb
 
 Re-runs are safe — the table is always overwritten. Output: `data/lancedb/chembl_CHEMBL_36/`.
 
-### Query
+### Query — compounds
 
 ```python
 from app.scripts.flows.vector_store.query_lancedb import query_compounds, get_compound
@@ -185,6 +209,24 @@ hits = query_compounds("CC(=O)Oc1ccccc1C(=O)O", n=5)
 record = get_compound("CHEMBL25")
 # Returns dict or None
 ```
+
+### Query — polypharmacy (TWOSIDES)
+
+The `polypharmacy` table stores drug-pair adverse-event signals from the TWOSIDES dataset (Tatonetti et al., *Science Translational Medicine* 2012), derived from FDA FAERS co-reporting. Only pairs with PRR ≥ 3.0 and ≥ 5 reported cases are retained. It is a scalar-indexed lookup table with no vector column.
+
+```python
+from app.scripts.flows.vector_store.query_lancedb import query_polypharmacy, query_drug_side_effects
+
+# Look up a specific drug pair (order-insensitive, case-insensitive)
+pair = query_polypharmacy("Warfarin", "Aspirin")
+# Returns dict with side_effects, max_prr, total_cases, n_side_effects — or None
+
+# Find all known polypharmacy partners for a single drug
+pairs = query_drug_side_effects("Warfarin", n=20)
+# Returns list of dicts sorted by max_prr descending
+```
+
+Run `download_twosides` and `ingest_twosides_to_lancedb` before querying this table.
 
 ### Internal sanity check
 
@@ -201,7 +243,7 @@ Full details: [`app/scripts/flows/vector_store/README.md`](app/scripts/flows/vec
 
 ## QA Dataset
 
-`build_drug_interaction_dataset` reads 23 ChEMBL tables and emits 20 categories of training pairs in `### Question / ### Answer` format:
+`build_drug_interaction_dataset` reads 23 ChEMBL tables plus the TWOSIDES polypharmacy dataset and emits 21 categories of training pairs in `### Question / ### Answer` format:
 
 | # | Category | Source tables |
 |---|----------|--------------|
@@ -225,6 +267,7 @@ Full details: [`app/scripts/flows/vector_store/README.md`](app/scripts/flows/vec
 | 18 | CYP inhibition (quantitative) | `activities`, `assays`, `target_dictionary` (IC50/Ki values) |
 | 19 | Pharmacodynamic interactions | `drug_mechanism`, `target_dictionary` (shared receptor targets) |
 | 20 | P-glycoprotein transport | `activities`, `assays`, `target_dictionary` (ABCB1/MDR1) |
+| 21 | Polypharmacy side effects | TWOSIDES (FDA FAERS · PRR-filtered drug-pair adverse events) |
 
 Output files are written to `data/llm_finetune/`:
 
@@ -405,8 +448,9 @@ chem_mlops/
 │   │   │   │   ├── collect_data.py     # Download ChEMBL SQLite
 │   │   │   │   └── transform_data.py   # SQLite → Parquet (DuckDB)
 │   │   │   ├── llm_finetuning_data/
-│   │   │   │   ├── build_drug_interaction_dataset.py  # 20-category QA builder (parallel)
-│   │   │   │   └── build_finetune_dataset.py          # Activity Parquet → JSONL
+│   │   │   │   ├── build_drug_interaction_dataset.py  # 21-category QA builder (parallel, incl. TWOSIDES)
+│   │   │   │   ├── build_finetune_dataset.py          # Activity Parquet → JSONL
+│   │   │   │   └── download_twosides.py               # Stream-download TWOSIDES → Parquet
 │   │   │   ├── finetuning/
 │   │   │   │   ├── finetuning.py       # MLX LoRA fine-tuning
 │   │   │   │   └── export_to_ollama.py # Standalone: export any run to Ollama
@@ -414,9 +458,10 @@ chem_mlops/
 │   │   │   │   ├── eval_model.py       # Perplexity + golden benchmark eval
 │   │   │   │   └── golden.jsonl        # Golden Q&A benchmark
 │   │   │   └── vector_store/
-│   │   │       ├── ingest_to_lancedb.py  # Join 13 tables → fingerprint → LanceDB
-│   │   │       ├── query_lancedb.py      # query_compounds / get_compound / sanity check
-│   │   │       └── README.md             # Vector store architecture and tradeoffs
+│   │   │       ├── ingest_to_lancedb.py           # Join 13 tables → fingerprint → LanceDB
+│   │   │       ├── ingest_twosides_to_lancedb.py  # TWOSIDES → polypharmacy LanceDB table
+│   │   │       ├── query_lancedb.py               # query_compounds / get_compound / polypharmacy API
+│   │   │       └── README.md                      # Vector store architecture and tradeoffs
 │   │   └── load_data/
 │   │       └── load_data.py            # ChemblDataLoader helper
 │   └── tests/
@@ -426,8 +471,11 @@ chem_mlops/
 ├── data/
 │   ├── chembl_transform/               # Parquet files (one per table)
 │   ├── llm_finetune/                   # train.jsonl / valid.jsonl
-│   └── lancedb/                        # LanceDB vector store
-│       └── chembl_CHEMBL_36/           # 2,854,996 compounds · 2048-bit vectors
+│   ├── lancedb/                        # LanceDB vector store
+│   │   └── chembl_CHEMBL_36/           # compounds table (2,854,996 · 2048-bit vectors)
+│   │                                   # polypharmacy table (PRR-filtered TWOSIDES pairs)
+│   └── twosides/                       # TWOSIDES download cache
+│       └── TWOSIDES.parquet            # ~50 MB zstd-compressed (gitignored)
 ├── deployments/
 │   └── workspace.yaml                  # Dagster code-location config
 ├── notebooks/                          # Exploratory data analysis
@@ -479,5 +527,6 @@ Full details live in `web/README.md`.
 ## Data sources
 
 - **ChEMBL**: [https://www.ebi.ac.uk/chembl/](https://www.ebi.ac.uk/chembl/)
-- Schema diagram: [chembl_36_schema.png](https://ftp.ebi.ac.uk/pub/databases/chembl/ChEMBLdb/latest/chembl_36_schema.png)
-- Schema documentation: [schema_documentation.html](https://ftp.ebi.ac.uk/pub/databases/chembl/ChEMBLdb/latest/schema_documentation.html)
+  - Schema diagram: [chembl_36_schema.png](https://ftp.ebi.ac.uk/pub/databases/chembl/ChEMBLdb/latest/chembl_36_schema.png)
+  - Schema documentation: [schema_documentation.html](https://ftp.ebi.ac.uk/pub/databases/chembl/ChEMBLdb/latest/schema_documentation.html)
+- **TWOSIDES**: Tatonetti et al., *Science Translational Medicine* 2012 — drug-pair adverse event signals derived from FDA FAERS co-reporting. Hosted by the Tatonetti Lab at Columbia University.

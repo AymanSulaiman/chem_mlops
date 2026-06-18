@@ -45,6 +45,12 @@ MAX_ASSAY_PAIRS = 5_000  # cap assay-context questions; they dominated the old d
 MAX_CYP_INHIBITION_PAIRS = 10_000
 MAX_PD_PAIRS = 20_000
 MAX_PGP_PAIRS = 5_000
+MAX_TWOSIDES_PAIRS = 50_000
+
+TWOSIDES_PATH = Path("data/twosides/TWOSIDES.parquet")
+# Minimum signal thresholds — PRR >= 3 and at least 5 co-reported cases
+TWOSIDES_MIN_PRR = 3.0
+TWOSIDES_MIN_CASES = 5
 _REQUIRED_TABLES = {
     "molecule_dictionary",
     "drug_mechanism",
@@ -1546,6 +1552,107 @@ def generate_pgp_interaction_qa(
 # ---------------------------------------------------------------------------
 
 
+def generate_twosides_qa(
+    twosides_path: Path = TWOSIDES_PATH,
+    min_prr: float = TWOSIDES_MIN_PRR,
+    min_cases: int = TWOSIDES_MIN_CASES,
+    max_pairs: int = MAX_TWOSIDES_PAIRS,
+) -> Iterator[dict]:
+    """QA pairs from the TWOSIDES polypharmacy side-effect database.
+
+    TWOSIDES contains drug-pair adverse event signals derived from FDA FAERS.
+    Each (drug_1, drug_2) pair is associated with one or more side effects that
+    show disproportionate reporting when both drugs are taken together, measured
+    by the Proportional Reporting Ratio (PRR).
+
+    Yields nothing if TWOSIDES has not been downloaded yet — run
+    `python -m app.scripts.flows.llm_finetuning_data.download_twosides` first.
+    """
+
+    if not twosides_path.exists():
+        return
+
+    # Read and filter in one pass using Polars lazy evaluation over Parquet.
+    # Explicit casts guard against Parquet files written with all-String schemas
+    # (which Polars infers when schema_overrides was not applied at download time).
+    df = (
+        pl.scan_parquet(twosides_path)
+        .with_columns([
+            pl.col("PRR").cast(pl.Float32, strict=False),
+            pl.col("A").cast(pl.Int32, strict=False),
+        ])
+        .filter(
+            (pl.col("PRR") >= min_prr)
+            & (pl.col("A") >= min_cases)
+        )
+        .select([
+            pl.col("drug_1_concept_name").str.to_titlecase().alias("drug_1"),
+            pl.col("drug_2_concept_name").str.to_titlecase().alias("drug_2"),
+            pl.col("condition_concept_name").alias("side_effect"),
+            pl.col("PRR"),
+            pl.col("A").alias("cases"),
+        ])
+        .collect()
+    )
+    assert isinstance(df, pl.DataFrame)
+
+    # Group by drug pair, aggregate side effects ordered by PRR (strongest first)
+    pairs = (
+        df.sort("PRR", descending=True)
+        .group_by(["drug_1", "drug_2"])
+        .agg([
+            pl.col("side_effect").str.join("; ").alias("side_effects"),
+            pl.col("PRR").max().alias("max_prr"),
+            pl.col("cases").sum().alias("total_cases"),
+            pl.len().alias("n_effects"),
+        ])
+        .sort("max_prr", descending=True)
+        .head(max_pairs)
+    )
+
+    templates = [
+        lambda d1, d2, se, prr, n: (
+            f"What side effects have been reported when {d1} and {d2} are taken together?",
+            f"According to FDA adverse event surveillance data (TWOSIDES), taking {d1} and {d2} "
+            f"together has been associated with a disproportionate reporting of {n} adverse effect(s): "
+            f"{se}. The strongest signal has a Proportional Reporting Ratio (PRR) of {prr:.1f}, "
+            f"indicating these effects occur more frequently with this drug combination than with "
+            f"either drug alone."
+        ),
+        lambda d1, d2, se, prr, n: (
+            f"What adverse effects are associated with combining {d1} and {d2}?",
+            f"Post-marketing pharmacovigilance data (TWOSIDES/FAERS) shows that the combination "
+            f"of {d1} and {d2} is associated with the following adverse effects: {se}. "
+            f"These signals are based on disproportionate co-reporting in the FDA adverse event "
+            f"database (max PRR: {prr:.1f})."
+        ),
+        lambda d1, d2, se, prr, n: (
+            f"What does FDA adverse event data show about taking {d1} with {d2}?",
+            f"FDA FAERS data analysed in the TWOSIDES database shows a disproportionate reporting "
+            f"of {n} adverse effect(s) when {d1} and {d2} are co-administered: {se}. "
+            f"A PRR of {prr:.1f} for the strongest signal suggests this combination warrants "
+            f"clinical attention."
+        ),
+    ]
+
+    rng = random.Random(42)
+    for row in pairs.iter_rows(named=True):
+        d1 = row["drug_1"]
+        d2 = row["drug_2"]
+        se = row["side_effects"]
+        prr = row["max_prr"]
+        n = row["n_effects"]
+
+        for tmpl in templates:
+            question, answer = tmpl(d1, d2, se, prr, n)
+            yield {"text": f"### Question\n{question}\n\n### Answer\n{answer}"}
+
+        # Reverse order variant (drug order shouldn't matter)
+        if rng.random() < 0.5:
+            question, answer = templates[0](d2, d1, se, prr, n)
+            yield {"text": f"### Question\n{question}\n\n### Answer\n{answer}"}
+
+
 def generate_canonical_drug_facts_qa() -> Iterator[dict]:
     """Curated high-precision QA for well-known drugs, repeated to counter noisy ChEMBL data.
 
@@ -2200,6 +2307,11 @@ def build_drug_interaction_dataset(
             if "activities" in tables and "assays" in tables and "target_dictionary" in tables
             else functools.partial(generate_greeting_qa),
             "activities" in tables and "assays" in tables and "target_dictionary" in tables,
+        ),
+        (
+            "polypharmacy side effects (TWOSIDES)",
+            functools.partial(generate_twosides_qa),
+            TWOSIDES_PATH.exists(),
         ),
     ]
 

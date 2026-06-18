@@ -45,14 +45,14 @@ uv run python -m app.scripts.flows.finetuning.finetuning
 | ~~4~~ | ~~Add pharmacodynamic interaction training data~~ | ~~High~~ |
 | ~~5~~ | ~~Add interaction severity scoring~~ | ~~Medium~~ |
 | ~~6~~ | ~~Add P-glycoprotein transport interaction data~~ | ~~Medium~~ |
-| 7 | Integrate TWOSIDES polypharmacy dataset | Medium |
+| ~~7~~ | ~~Integrate TWOSIDES polypharmacy dataset~~ | ~~Medium~~ |
 
 ### Why these matter
 - **CYP inhibition :** ✅ IC50/Ki data from `activities` → `assays` → `target_dictionary` join. Generates quantitative inhibition QA with strength (strong/moderate/weak) per pChEMBL.
 - **PD interactions :** ✅ Pairs drugs sharing the same `drug_mechanism.tid` target; classifies as additive/synergistic/antagonistic based on action types.
 - **Severity scoring :** ✅ CYP3A4/2D6/2C9/2C19 → HIGH, CYP2C8/1A2/2B6 → MODERATE, others → LOW. Included in all DDI answer templates.
 - **P-gp :** ✅ Substrate/inhibitor QA from ABCB1/MDR1 assays. Covers absorption and CNS penetration effects.
-- **TWOSIDES :** Real-world polypharmacy signals from FDA FAERS — requires external download, not yet integrated.
+- **TWOSIDES :** ✅ Real-world polypharmacy signals from FDA FAERS (Tatonetti et al. 2012). Downloaded as Parquet, filtered by PRR ≥ 3.0 and case count ≥ 5, aggregated into a `polypharmacy` LanceDB table, and added as QA category 21 in the training corpus.
 
 ---
 
@@ -150,3 +150,4 @@ Two serving modes are planned, each with a distinct trade-off:
 - [x] `uv` environment caching in CI (`enable-cache: true`)
 - [x] Tests for `export_to_ollama.py` — `app/tests/flows/export_to_ollama_test.py`
 - [x] Tests for `data_transformation.py` (Dagster wiring) — `app/tests/flows/transform_data_test.py`
+- [x] TWOSIDES polypharmacy dataset — download (stream-decompress-in-memory → Parquet), QA category 21 in training corpus, `polypharmacy` LanceDB table with scalar indexes, `query_polypharmacy` / `query_drug_side_effects` query API, Dagster ops wired as parallel download fanning into both dataset builder and LanceDB ingest
