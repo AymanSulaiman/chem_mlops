@@ -53,6 +53,7 @@ def _load_twosides(path: Path) -> pl.DataFrame:
         ])
         .collect()
     )
+    assert isinstance(df, pl.DataFrame)
     print(f"  Rows after filtering (PRR >= {MIN_PRR}, cases >= {MIN_CASES}): {len(df):,}")
 
     aggregated = (

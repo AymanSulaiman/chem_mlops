@@ -1594,6 +1594,7 @@ def generate_twosides_qa(
         ])
         .collect()
     )
+    assert isinstance(df, pl.DataFrame)
 
     # Group by drug pair, aggregate side effects ordered by PRR (strongest first)
     pairs = (
