@@ -18,9 +18,9 @@ flowchart LR
     TRF --> FDS[create_finetuning_dataset\nactivities Parquet → JSONL]
     TRF --> ING[ingest_to_lancedb\n2.85M compound vectors\nMorgan fingerprints · ~6 min]
 
-    ING --> LDB[(LanceDB\nchembl_CHEMBL_36\ncompounds table)]
+    ING --> LDB[(LanceDB\nchembl_CHEMBL_37\ncompounds table)]
     DLT --> ING2[ingest_twosides_to_lancedb\nPRR-filtered pairs\n→ polypharmacy table]
-    ING2 --> LDB2[(LanceDB\nchembl_CHEMBL_36\npolypharmacy table)]
+    ING2 --> LDB2[(LanceDB\nchembl_CHEMBL_37\npolypharmacy table)]
 
     DDI --> FT[finetune_lora\nMLX LoRA on Gemma 3 1B-PT\n~1500 iters · Apple Silicon]
     FDS --> FT

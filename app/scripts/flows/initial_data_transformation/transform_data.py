@@ -7,7 +7,7 @@ import duckdb
 from duckdb import DuckDBPyConnection
 
 
-def transform_data(chembl_version: str = "36") -> None:
+def transform_data(chembl_version: str = "37") -> None:
     if not re.match(r"^\d+$", chembl_version):
         raise ValueError(f"Invalid chembl_version '{chembl_version}': must contain only digits")
 

@@ -19,7 +19,7 @@ class TestTransformData:
         os.chdir(temp_dir)
 
         data_dir = Path("data")
-        chembl_dir = data_dir / "chembl_36" / "chembl_36_sqlite"
+        chembl_dir = data_dir / "chembl_37" / "chembl_37_sqlite"
         chembl_dir.mkdir(parents=True)
 
         yield temp_dir
@@ -75,11 +75,11 @@ class TestTransformData:
         mock_conn.execute.assert_any_call("LOAD sqlite;")
         mock_conn.execute.assert_any_call("SET arrow_large_buffer_size=true;")
         mock_conn.execute.assert_any_call(
-            "ATTACH 'data/chembl_36/chembl_36_sqlite/chembl_36.db' AS chembl36 (TYPE sqlite);"
+            "ATTACH 'data/chembl_37/chembl_37_sqlite/chembl_37.db' AS chembl37 (TYPE sqlite);"
         )
-        mock_conn.execute.assert_any_call("SHOW TABLES FROM chembl36;")
+        mock_conn.execute.assert_any_call("SHOW TABLES FROM chembl37;")
         mock_makedirs.assert_called_once_with("data/chembl_transform", exist_ok=True)
-        mock_rmtree.assert_called_once_with("data/chembl_36")
+        mock_rmtree.assert_called_once_with("data/chembl_37")
         mock_conn.close.assert_called_once()
 
     @patch("duckdb.connect")
@@ -215,8 +215,8 @@ class TestTransformData:
 
         transform_data()
 
-        mock_exists.assert_called_once_with("data/chembl_36")
-        mock_rmtree.assert_called_once_with("data/chembl_36")
+        mock_exists.assert_called_once_with("data/chembl_37")
+        mock_rmtree.assert_called_once_with("data/chembl_37")
 
     @patch("duckdb.connect")
     @patch("os.makedirs")

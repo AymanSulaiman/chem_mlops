@@ -29,17 +29,17 @@ class ChemblConfig(Config):
 
 
 @op(out=Out(Nothing))
-def collect_data_op(config: ChemblConfig) -> None:
+def collect_chembl_op(config: ChemblConfig) -> None:
     collect_data(config.chembl_version)
 
 
 @op(ins={"start": In(Nothing)}, out=Out(Nothing))
-def transform_data_op(config: ChemblConfig) -> None:
+def transform_chembl_op(config: ChemblConfig) -> None:
     transform_data(config.chembl_version)
 
 
 @op(ins={"start": In(Nothing)}, out=Out(Nothing))
-def create_finetune_dataset_op() -> None:
+def create_chembl_finetune_dataset_op() -> None:
     create_finetuning_dataset()
 
 
@@ -64,7 +64,7 @@ def finetune_llm_op() -> None:
 
 
 @op(ins={"start": In(Nothing)}, out=Out(Nothing))
-def ingest_to_lancedb_op() -> None:
+def ingest_chembl_to_lancedb_op() -> None:
     ingest_compounds_to_lancedb()
 
 
@@ -86,18 +86,18 @@ def export_to_ollama_op() -> None:
 
 @graph
 def chembl_pipeline_graph() -> None:
-    collected = collect_data_op()
+    chembl_collected = collect_chembl_op()
     # TWOSIDES download is independent — starts immediately in parallel with ChEMBL collection.
     twosides = download_twosides_op()
-    transformed = transform_data_op(start=collected)
-    # Three parallel workloads after transform:
-    finetune_data = create_finetune_dataset_op(start=transformed)
-    drug_data = build_drug_interaction_dataset_op(start_chembl=transformed, start_twosides=twosides)
-    lancedb_done = ingest_to_lancedb_op(start=transformed)
-    # TWOSIDES LanceDB table: needs compounds DB to exist + TWOSIDES file ready.
+    chembl_transformed = transform_chembl_op(start=chembl_collected)
+    # Three parallel workloads after ChEMBL transform:
+    chembl_finetune_data = create_chembl_finetune_dataset_op(start=chembl_transformed)
+    drug_data = build_drug_interaction_dataset_op(start_chembl=chembl_transformed, start_twosides=twosides)
+    chembl_lancedb_done = ingest_chembl_to_lancedb_op(start=chembl_transformed)
+    # TWOSIDES LanceDB table: needs ChEMBL compounds DB to exist + TWOSIDES file ready.
     # Runs in parallel with finetuning.
-    ingest_twosides_to_lancedb_op(start_lancedb=lancedb_done, start_twosides=twosides)
-    finetuned = finetune_llm_op(start_a=finetune_data, start_b=drug_data)
+    ingest_twosides_to_lancedb_op(start_lancedb=chembl_lancedb_done, start_twosides=twosides)
+    finetuned = finetune_llm_op(start_a=chembl_finetune_data, start_b=drug_data)
     evaled = eval_model_op(start=finetuned)
     export_to_ollama_op(start=evaled)
 
