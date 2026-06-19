@@ -21,8 +21,23 @@ const input = getRequiredElement(
 const btn = getRequiredElement("btn", (value): value is HTMLButtonElement => value instanceof HTMLButtonElement);
 const messagesEl = getRequiredElement("messages", (value): value is HTMLElement => value instanceof HTMLElement);
 const modelLabel = getRequiredElement("model-label", (value): value is HTMLElement => value instanceof HTMLElement);
+const modeStandardBtn = getRequiredElement("mode-standard", (value): value is HTMLButtonElement => value instanceof HTMLButtonElement);
+const modeRagBtn = getRequiredElement("mode-rag", (value): value is HTMLButtonElement => value instanceof HTMLButtonElement);
 
 const history: ChatMessage[] = [];
+let currentMode: "standard" | "rag" = "standard";
+
+modeStandardBtn.addEventListener("click", () => {
+  currentMode = "standard";
+  modeStandardBtn.classList.add("active");
+  modeRagBtn.classList.remove("active");
+});
+
+modeRagBtn.addEventListener("click", () => {
+  currentMode = "rag";
+  modeRagBtn.classList.add("active");
+  modeStandardBtn.classList.remove("active");
+});
 
 // Resize the prompt box so longer messages feel natural to type and review.
 function resizePromptBox() {
@@ -71,7 +86,7 @@ form.addEventListener("submit", async (event: SubmitEvent) => {
     const response = await fetch("/api/chat", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ messages: history }),
+      body: JSON.stringify({ messages: history, mode: currentMode }),
     });
 
     const data = (await response.json()) as ChatResult;
