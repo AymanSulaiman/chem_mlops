@@ -1,6 +1,11 @@
 from dagster import Config, Definitions, In, Nothing, Out, ScheduleDefinition, graph, op
 
-from app.scripts.flows.eval.eval_model import eval_flow
+from app.scripts.flows.eval.benchmark_rag_vs_finetuned import (
+    check_rag_quality,
+    run_benchmark,
+    write_benchmark_artifacts,
+)
+from app.scripts.flows.eval.eval_finetuned_model import eval_flow
 from app.scripts.flows.finetuning.export_to_ollama import (
     ARTIFACTS_DIR,
     export_to_ollama,
@@ -75,8 +80,17 @@ def ingest_twosides_to_lancedb_op() -> None:
 
 
 @op(ins={"start": In(Nothing)}, out=Out(Nothing))
-def eval_model_op() -> None:
+def eval_finetuned_model_op() -> None:
     eval_flow(run_dir=latest_run_dir(ARTIFACTS_DIR))
+
+
+# Fan-in from fine-tuned eval (quality gate) + TWOSIDES LanceDB ingest (RAG data ready).
+# Verifies RAG context quality before allowing Ollama export.
+@op(ins={"start_finetuned_eval": In(Nothing), "start_polypharmacy_store": In(Nothing)}, out=Out(Nothing))
+def benchmark_rag_vs_finetuned_op() -> None:
+    results = run_benchmark()
+    check_rag_quality(results)
+    write_benchmark_artifacts(results)
 
 
 @op(ins={"start": In(Nothing)})
@@ -86,20 +100,26 @@ def export_to_ollama_op() -> None:
 
 @graph
 def chembl_pipeline_graph() -> None:
-    chembl_collected = collect_chembl_op()
-    # TWOSIDES download is independent — starts immediately in parallel with ChEMBL collection.
-    twosides = download_twosides_op()
-    chembl_transformed = transform_chembl_op(start=chembl_collected)
-    # Three parallel workloads after ChEMBL transform:
-    chembl_finetune_data = create_chembl_finetune_dataset_op(start=chembl_transformed)
-    drug_data = build_drug_interaction_dataset_op(start_chembl=chembl_transformed, start_twosides=twosides)
-    chembl_lancedb_done = ingest_chembl_to_lancedb_op(start=chembl_transformed)
-    # TWOSIDES LanceDB table: needs ChEMBL compounds DB to exist + TWOSIDES file ready.
-    # Runs in parallel with finetuning.
-    ingest_twosides_to_lancedb_op(start_lancedb=chembl_lancedb_done, start_twosides=twosides)
-    finetuned = finetune_llm_op(start_a=chembl_finetune_data, start_b=drug_data)
-    evaled = eval_model_op(start=finetuned)
-    export_to_ollama_op(start=evaled)
+    raw_chembl = collect_chembl_op()
+    raw_twosides = download_twosides_op()
+    chembl_parquet = transform_chembl_op(start=raw_chembl)
+    chembl_finetune_dataset = create_chembl_finetune_dataset_op(start=chembl_parquet)
+    drug_interaction_dataset = build_drug_interaction_dataset_op(
+        start_chembl=chembl_parquet, start_twosides=raw_twosides
+    )
+    compounds_vector_store = ingest_chembl_to_lancedb_op(start=chembl_parquet)
+    polypharmacy_vector_store = ingest_twosides_to_lancedb_op(
+        start_lancedb=compounds_vector_store, start_twosides=raw_twosides
+    )
+    finetuned_model = finetune_llm_op(
+        start_a=chembl_finetune_dataset, start_b=drug_interaction_dataset
+    )
+    finetuned_model_eval = eval_finetuned_model_op(start=finetuned_model)
+    rag_benchmark = benchmark_rag_vs_finetuned_op(
+        start_finetuned_eval=finetuned_model_eval,
+        start_polypharmacy_store=polypharmacy_vector_store,
+    )
+    export_to_ollama_op(start=rag_benchmark)
 
 
 chembl_pipeline = chembl_pipeline_graph.to_job(name="chembl_pipeline")

@@ -150,6 +150,37 @@ def get_compound(
     return row
 
 
+def get_compound_by_name(
+    name: str,
+    lancedb_dir: str = LANCEDB_DIR,
+) -> dict[str, Any] | None:
+    """Exact lookup by preferred name (case-insensitive).
+
+    Uses a scalar filter on ``pref_name`` for a fast filtered search.
+
+    Args:
+        name: Drug preferred name, e.g. ``"Aspirin"``.
+        lancedb_dir: Root directory that contains the ``chembl_CHEMBL_*``
+            subdirectory (default ``data/lancedb``).
+
+    Returns:
+        A single compound dict, or ``None`` if no matching row is found.
+
+    Raises:
+        FileNotFoundError: If the LanceDB table does not exist.
+    """
+    table: Table = _open_table(lancedb_dir)
+    safe = name.strip().replace("'", "''")
+    rows: list[dict[str, Any]] = (
+        table.search().where(f"LOWER(pref_name) = '{safe.lower()}'").limit(1).to_list()
+    )
+    if not rows:
+        return None
+    row = rows[0]
+    row.pop("vector", None)
+    return row
+
+
 def query_polypharmacy(
     drug_1: str,
     drug_2: str,

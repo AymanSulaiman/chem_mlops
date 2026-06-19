@@ -73,7 +73,7 @@ Open [http://localhost:3000](http://localhost:3000) to browse ops, trigger runs,
 ### Run everything (headless)
 
 ```bash
-uv run python -m app.orchestration.data_transformation
+uv run python -m app.orchestration.chembl_drug_chat_pipeline
 ```
 
 This executes the full pipeline via Dagster:
@@ -440,7 +440,7 @@ chem_mlops/
 │       └── ci.yml                      # Lint + typecheck + pytest + bun test on every push/PR
 ├── app/
 │   ├── orchestration/
-│   │   ├── data_transformation.py      # Dagster pipeline (@op / @graph / Definitions)
+│   │   ├── chembl_drug_chat_pipeline.py # Dagster pipeline (@op / @graph / Definitions)
 │   │   └── README.md                   # Pipeline architecture and stage docs
 │   ├── scripts/
 │   │   ├── flows/
@@ -455,8 +455,9 @@ chem_mlops/
 │   │   │   │   ├── finetuning.py       # MLX LoRA fine-tuning
 │   │   │   │   └── export_to_ollama.py # Standalone: export any run to Ollama
 │   │   │   ├── eval/
-│   │   │   │   ├── eval_model.py       # Perplexity + golden benchmark eval
-│   │   │   │   └── golden.jsonl        # Golden Q&A benchmark
+│   │   │   │   ├── eval_finetuned_model.py          # Perplexity + golden benchmark eval (gates export)
+│   │   │   │   ├── benchmark_rag_vs_finetuned.py    # RAG vs fine-tuned Ollama benchmark
+│   │   │   │   └── golden.jsonl                     # Golden Q&A benchmark (20 questions)
 │   │   │   └── vector_store/
 │   │   │       ├── ingest_to_lancedb.py           # Join 13 tables → fingerprint → LanceDB
 │   │   │       ├── ingest_twosides_to_lancedb.py  # TWOSIDES → polypharmacy LanceDB table

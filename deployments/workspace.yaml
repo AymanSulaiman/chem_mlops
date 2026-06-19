@@ -2,5 +2,5 @@
 # Run `dagster dev` to start the local UI (http://localhost:3000)
 load_from:
   - python_module:
-      module_name: app.orchestration.data_transformation
+      module_name: app.orchestration.chembl_drug_chat_pipeline
       attribute: defs

@@ -180,21 +180,25 @@ def eval_flow(
     golden_path: Path = GOLDEN_BENCHMARK_PATH,
     pass_threshold: float = EVAL_PASS_THRESHOLD,
     num_batches: int = 50,
+    eval_output_dir: Path | None = None,
 ) -> dict[str, Any]:
     """
     Full evaluation: perplexity check + golden benchmark.
 
-    Writes artifacts/<run>/eval/metrics.json and golden_results.jsonl.
+    Writes metrics.json and golden_results.jsonl to eval_output_dir
+    (default: data/eval/<run_name>/).
     Raises RuntimeError if the fine-tuned model regresses on perplexity or
     if the golden benchmark pass rate falls below pass_threshold — blocking
     the downstream Ollama export.
 
     Args:
-        run_dir:        Fine-tuning artifact directory (e.g. artifacts/20260615_120000).
-        data_dir:       Directory containing train/valid JSONL splits.
-        golden_path:    Path to golden.jsonl benchmark file.
-        pass_threshold: Minimum acceptable golden benchmark pass rate [0, 1].
-        num_batches:    Batches to use for perplexity evaluation (-1 for all).
+        run_dir:          Fine-tuning artifact directory (e.g. artifacts/20260615_120000).
+        data_dir:         Directory containing train/valid JSONL splits.
+        golden_path:      Path to golden.jsonl benchmark file.
+        pass_threshold:   Minimum acceptable golden benchmark pass rate [0, 1].
+        num_batches:      Batches to use for perplexity evaluation (-1 for all).
+        eval_output_dir:  Where to write metrics/results. Defaults to
+                          data/eval/<run_dir.name>/.
 
     Returns:
         Metrics dict (same content as metrics.json).
@@ -204,7 +208,7 @@ def eval_flow(
     """
     mlx_model_dir = run_dir / DEFAULT_MLX_SUBDIR
     adapter_dir = run_dir / DEFAULT_ADAPTER_SUBDIR
-    eval_dir = run_dir / "eval"
+    eval_dir = eval_output_dir if eval_output_dir is not None else Path("data/eval") / run_dir.name
     eval_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"\n{'=' * 60}")

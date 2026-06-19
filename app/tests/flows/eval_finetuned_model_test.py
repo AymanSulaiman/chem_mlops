@@ -1,4 +1,4 @@
-"""Tests for app/scripts/flows/eval/eval_model.py."""
+"""Tests for app/scripts/flows/eval/eval_finetuned_model.py."""
 
 import json
 import math
@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from app.scripts.flows.eval.eval_model import (
+from app.scripts.flows.eval.eval_finetuned_model import (
     GOLDEN_BENCHMARK_PATH,
     eval_flow,
     run_golden_benchmark,
@@ -18,7 +18,7 @@ from app.scripts.flows.finetuning.export_to_ollama import (
     DEFAULT_MLX_SUBDIR,
 )
 
-_EVAL_MODULE = "app.scripts.flows.eval.eval_model"
+_EVAL_MODULE = "app.scripts.flows.eval.eval_finetuned_model"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -189,7 +189,7 @@ class TestRunGoldenBenchmark:
 # ── eval_flow ─────────────────────────────────────────────────────────────────
 
 
-_EVAL_PATCH = "app.scripts.flows.eval.eval_model"
+_EVAL_PATCH = "app.scripts.flows.eval.eval_finetuned_model"
 
 
 class TestEvalFlow:
@@ -207,6 +207,7 @@ class TestEvalFlow:
     def test_writes_metrics_json_on_success(self, tmp_path: Path) -> None:
         run_dir = self._make_run_dir(tmp_path)
         golden = self._make_golden(tmp_path)
+        eval_out = tmp_path / "eval"
 
         with (
             patch(f"{_EVAL_PATCH}.run_perplexity_eval", side_effect=[6.0, 4.0]),
@@ -215,9 +216,9 @@ class TestEvalFlow:
                 return_value={"pass_count": 1, "total": 1, "pass_rate": 1.0, "results": []},
             ),
         ):
-            eval_flow(run_dir, golden_path=golden)
+            eval_flow(run_dir, golden_path=golden, eval_output_dir=eval_out)
 
-        metrics_path = run_dir / "eval" / "metrics.json"
+        metrics_path = eval_out / "metrics.json"
         assert metrics_path.exists()
         metrics = json.loads(metrics_path.read_text())
         assert metrics["passed"] is True
@@ -234,7 +235,7 @@ class TestEvalFlow:
                 return_value={"pass_count": 1, "total": 1, "pass_rate": 1.0, "results": []},
             ),
         ):
-            metrics = eval_flow(run_dir, golden_path=golden)
+            metrics = eval_flow(run_dir, golden_path=golden, eval_output_dir=tmp_path / "eval")
 
         assert metrics["baseline_perplexity"] == pytest.approx(6.5, abs=0.01)
         assert metrics["finetuned_perplexity"] == pytest.approx(3.2, abs=0.01)
@@ -251,7 +252,7 @@ class TestEvalFlow:
             ),
         ):
             with pytest.raises(RuntimeError, match="Perplexity regression"):
-                eval_flow(run_dir, golden_path=golden)
+                eval_flow(run_dir, golden_path=golden, eval_output_dir=tmp_path / "eval")
 
     def test_raises_on_low_golden_pass_rate(self, tmp_path: Path) -> None:
         run_dir = self._make_run_dir(tmp_path)
@@ -270,11 +271,13 @@ class TestEvalFlow:
             ),
         ):
             with pytest.raises(RuntimeError, match="below threshold"):
-                eval_flow(run_dir, golden_path=golden, pass_threshold=0.70)
+                eval_flow(run_dir, golden_path=golden, pass_threshold=0.70,
+                          eval_output_dir=tmp_path / "eval")
 
     def test_metrics_json_written_even_on_failure(self, tmp_path: Path) -> None:
         run_dir = self._make_run_dir(tmp_path)
         golden = self._make_golden(tmp_path)
+        eval_out = tmp_path / "eval"
 
         with (
             patch(f"{_EVAL_PATCH}.run_perplexity_eval", side_effect=[4.0, 6.0]),
@@ -284,9 +287,9 @@ class TestEvalFlow:
             ),
         ):
             with pytest.raises(RuntimeError):
-                eval_flow(run_dir, golden_path=golden)
+                eval_flow(run_dir, golden_path=golden, eval_output_dir=eval_out)
 
-        metrics_path = run_dir / "eval" / "metrics.json"
+        metrics_path = eval_out / "metrics.json"
         assert metrics_path.exists()
         metrics = json.loads(metrics_path.read_text())
         assert metrics["passed"] is False
@@ -294,6 +297,7 @@ class TestEvalFlow:
     def test_golden_results_jsonl_written(self, tmp_path: Path) -> None:
         run_dir = self._make_run_dir(tmp_path)
         golden = self._make_golden(tmp_path)
+        eval_out = tmp_path / "eval"
         fake_results = [{"question": "Q?", "passed": True, "response": "x", "must_contain": ["x"]}]
 
         with (
@@ -308,9 +312,9 @@ class TestEvalFlow:
                 },
             ),
         ):
-            eval_flow(run_dir, golden_path=golden)
+            eval_flow(run_dir, golden_path=golden, eval_output_dir=eval_out)
 
-        detail_path = run_dir / "eval" / "golden_results.jsonl"
+        detail_path = eval_out / "golden_results.jsonl"
         assert detail_path.exists()
         rows = [json.loads(line) for line in detail_path.read_text().splitlines() if line.strip()]
         assert rows == fake_results
@@ -327,7 +331,8 @@ class TestEvalFlow:
                 return_value={"pass_count": 6, "total": 10, "pass_rate": 0.60, "results": []},
             ),
         ):
-            metrics = eval_flow(run_dir, golden_path=golden, pass_threshold=0.50)
+            metrics = eval_flow(run_dir, golden_path=golden, pass_threshold=0.50,
+                                eval_output_dir=tmp_path / "eval")
 
         assert metrics["passed"] is True
 
