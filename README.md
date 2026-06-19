@@ -194,7 +194,7 @@ Fine-tuning teaches the model to *sound like* a domain expert. It cannot guarant
 uv run python -m app.scripts.flows.vector_store.ingest_to_lancedb
 ```
 
-Re-runs are safe — the table is always overwritten. Output: `data/lancedb/chembl_CHEMBL_36/`.
+Re-runs are safe — the table is always overwritten. Output: `data/lancedb/chembl_CHEMBL_37/`.
 
 ### Query — compounds
 
@@ -467,12 +467,24 @@ chem_mlops/
 │   └── tests/
 │       ├── flows/                      # Tests for each pipeline stage
 │       └── load_data/                  # Tests for ChemblDataLoader
-├── web/                                # Bun chat app (talks to Ollama)
+├── web/                                # Bun chat app (Standard + RAG toggle)
+│   ├── src/
+│   │   ├── app.ts                      # Request handler, model detection, RAG routing
+│   │   ├── rag.ts                      # extractDrugCandidates, buildRagContext, augmentMessages
+│   │   ├── frontend.ts                 # Browser: mode toggle, chat history, submit handler
+│   │   └── frontend-helpers.ts         # Formatting helpers (testable, no DOM deps)
+│   ├── public/
+│   │   ├── index.html                  # Standard / RAG pill toggle + chat UI
+│   │   └── style.css
+│   ├── test/
+│   │   ├── app.test.ts
+│   │   └── rag.test.ts
+│   └── server.ts                       # Bun.serve entry point
 ├── data/
 │   ├── chembl_transform/               # Parquet files (one per table)
 │   ├── llm_finetune/                   # train.jsonl / valid.jsonl
 │   ├── lancedb/                        # LanceDB vector store
-│   │   └── chembl_CHEMBL_36/           # compounds table (2,854,996 · 2048-bit vectors)
+│   │   └── chembl_CHEMBL_37/           # compounds table (2,854,996 · 2048-bit vectors)
 │   │                                   # polypharmacy table (PRR-filtered TWOSIDES pairs)
 │   └── twosides/                       # TWOSIDES download cache
 │       └── TWOSIDES.parquet            # ~50 MB zstd-compressed (gitignored)
@@ -504,21 +516,37 @@ All three must pass with zero errors before merging. CI runs the same checks aut
 
 ## Bun web app
 
-The repository also includes a small Bun chat app in `web/` that talks to the latest Ollama model exported by this project.
+The repository includes a Bun chat app in `web/` with two inference modes selectable via a Standard / RAG pill toggle:
 
-Run it with:
+| Mode | Model | How it works |
+|------|-------|-------------|
+| **Standard** | `chembl-drug-chat:1b` | Fine-tuned model, no retrieval |
+| **RAG** | `gemma3:1b` | Base model + LanceDB context injected as system message |
+
+In RAG mode, `web/src/rag.ts` extracts drug-name candidates from the user's message, queries the `compounds` and `polypharmacy` LanceDB tables via the `@lancedb/lancedb` TypeScript client (the same Lance files written by Python — no Python server needed), and prepends a context block before forwarding to Ollama.
+
+**Dev server (hot reload):**
 
 ```bash
 cd web
-bun run server.ts
+bun run dev
 ```
 
-Run its Bun-native tests with:
+**Production:**
+
+```bash
+cd web
+bun run start
+```
+
+**Tests:**
 
 ```bash
 cd web
 bun test
 ```
+
+A `web/.env` file with working defaults is committed to the repo — Bun loads it automatically, so no setup is needed. Edit it to point at a different Ollama host, swap the RAG model, or override the LanceDB path.
 
 Full details live in `web/README.md`.
 

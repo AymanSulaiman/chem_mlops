@@ -1,3 +1,5 @@
+import { augmentMessages, buildRagContext } from "./rag";
+
 export type ChatMessage = {
   role: "user" | "assistant";
   content: string;
@@ -12,6 +14,8 @@ export type ChatAppOptions = {
   ollamaBaseUrl?: string;
   ollamaModelPrefix?: string;
   fallbackModelName?: string;
+  ragModelName?: string;
+  ragLancedbDir?: string;
   publicDir?: URL;
   fetchImpl?: typeof fetch;
   now?: () => number;
@@ -86,6 +90,8 @@ export function createChatRequestHandler(options: ChatAppOptions = {}) {
   const ollamaBaseUrl = options.ollamaBaseUrl ?? Bun.env.OLLAMA_BASE_URL ?? "http://127.0.0.1:11434";
   const ollamaModelPrefix = options.ollamaModelPrefix ?? Bun.env.OLLAMA_MODEL_PREFIX ?? "chembl-drug-chat";
   const fallbackModelName = options.fallbackModelName ?? Bun.env.OLLAMA_MODEL_NAME ?? "chembl-drug-chat:1b";
+  const ragModelName = options.ragModelName ?? Bun.env.RAG_MODEL_NAME ?? "gemma3:1b";
+  const ragLancedbDir = options.ragLancedbDir ?? Bun.env.LANCEDB_DIR ?? null;
   const publicDir = options.publicDir ?? new URL("../public/", import.meta.url);
   const fetchImpl = options.fetchImpl ?? fetch;
   const now = options.now ?? (() => Date.now());
@@ -115,8 +121,10 @@ export function createChatRequestHandler(options: ChatAppOptions = {}) {
     return cachedModel;
   }
 
-  async function chat(messages: ChatMessage[]) {
-    const modelInfo = await detectLatestModel();
+  async function chat(messages: ChatMessage[], modelOverride?: string) {
+    const modelInfo = modelOverride
+      ? { model: modelOverride, source: "rag-model" as const }
+      : await detectLatestModel();
     const response = await fetchImpl(`${ollamaBaseUrl}/api/chat`, {
       method: "POST",
       headers: {
@@ -176,7 +184,7 @@ export function createChatRequestHandler(options: ChatAppOptions = {}) {
     }
 
     if (request.method === "POST" && url.pathname === "/api/chat") {
-      const body = (await request.json()) as { messages?: unknown };
+      const body = (await request.json()) as { messages?: unknown; mode?: string };
       const messages = normalizeMessages(body.messages);
 
       if (messages.length === 0) {
@@ -184,7 +192,18 @@ export function createChatRequestHandler(options: ChatAppOptions = {}) {
       }
 
       try {
-        return json(await chat(messages));
+        const isRag = body.mode === "rag";
+        let outgoing = messages;
+        if (isRag && ragLancedbDir !== null) {
+          const lastUserMessage = [...messages].reverse().find(m => m.role === "user");
+          if (lastUserMessage) {
+            const context = await buildRagContext(lastUserMessage.content, ragLancedbDir);
+            if (context) {
+              outgoing = augmentMessages(messages, context);
+            }
+          }
+        }
+        return json(await chat(outgoing, isRag ? ragModelName : undefined));
       } catch (error) {
         return json(
           {

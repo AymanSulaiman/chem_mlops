@@ -126,7 +126,10 @@ class TestExportToOllama:
 
         modelfile = (run_dir / "mlx" / "ollama" / "Modelfile").read_text()
         assert 'PARAMETER stop "### Question"' in modelfile
-        assert 'PARAMETER stop "### Answer"' in modelfile
+        # "### Answer" must NOT be a stop token — it appears in the prompt template
+        # itself, and including it as a stop token caused the model to emit an
+        # immediate EOS and return empty content.
+        assert 'PARAMETER stop "### Answer"' not in modelfile
 
     def test_modelfile_contains_sampling_params(self, run_dir: Path) -> None:
         with (

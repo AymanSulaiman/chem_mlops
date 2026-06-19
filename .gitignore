@@ -212,3 +212,5 @@ llama.cpp
 fused_model
 web/node_modules/
 web/.bun/
+# web/.env contains only localhost defaults — no secrets — so it is committed
+!web/.env

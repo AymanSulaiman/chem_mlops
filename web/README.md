@@ -1,84 +1,99 @@
 # Bun Web App
 
-This folder contains the browser app that chats with the latest Ollama model created by this project.
+Browser chat interface for the ChEMBL Drug Chat models. Supports two inference modes selectable via a Standard / RAG pill toggle.
 
-## What the app does
+## Modes
 
-1. Serves a simple chat page
-2. Loads the latest `chembl-drug-chat` model from Ollama
-3. Sends the user’s chat history to the Bun backend
-4. Returns the model reply to the browser
+| Mode | Model | How it works |
+|------|-------|-------------|
+| **Standard** | `chembl-drug-chat:1b` | Fine-tuned Gemma 3 1B, no retrieval |
+| **RAG** | `gemma3:1b` | Base Gemma 3 1B + LanceDB context injected as system message |
+
+In RAG mode the Bun backend extracts drug-name candidates from the user's message, queries the `compounds` and `polypharmacy` LanceDB tables via the `@lancedb/lancedb` TypeScript client (reads the same Lance files written by the Python pipeline — no Python server needed), and prepends a pharmacological context block before forwarding to Ollama.
 
 ## Folder structure
 
 ```text
 web/
 ├── public/
-│   ├── index.html
+│   ├── index.html          # Standard / RAG pill toggle + chat UI
 │   └── style.css
 ├── src/
-│   ├── app.ts
-│   ├── frontend.ts
-│   └── frontend-helpers.ts
+│   ├── app.ts              # Request handler, model detection, Standard/RAG routing
+│   ├── rag.ts              # extractDrugCandidates, buildRagContext, augmentMessages
+│   ├── frontend.ts         # Browser: mode toggle state, chat history, submit handler
+│   └── frontend-helpers.ts # Formatting helpers (testable, no DOM deps)
 ├── test/
-│   ├── app.test.ts
+│   ├── app.test.ts         # Handler routing, model detection, RAG model selection
+│   ├── rag.test.ts         # extractDrugCandidates, augmentMessages, buildRagContext
 │   ├── chat.test.ts
 │   ├── frontend.test.ts
 │   └── model.test.ts
 ├── package.json
-└── server.ts
+└── server.ts               # Bun.serve entry point
 ```
 
 ## How it works
 
 ```mermaid
 flowchart LR
-    BR([Browser\nindex.html]) -->|POST /api/chat\nJSON message list| BUN[Bun backend\nsrc/app.ts]
-    BUN -->|resolve latest model\nchembl-drug-chat*| OLL[(Ollama\nlocalhost:11434)]
-    OLL -->|streamed token reply| BUN
-    BUN -->|JSON response| BR
-    BR -->|render in\nmessage feed| UI([Chat UI\nfrontend.ts])
+    BR([Browser]) -->|POST /api/chat\nmode: standard | raft| BUN[Bun backend\nsrc/app.ts]
+
+    BUN -->|Standard\ndetect latest chembl-drug-chat| OLL[(Ollama\nchembl-drug-chat:1b)]
+
+    BUN -->|RAG\nbuildRagContext| LDB[(LanceDB\ncompounds +\npolypharmacy)]
+    LDB -->|context string| BUN
+    BUN -->|augmented messages| OLL2[(Ollama\ngemma3:1b)]
+
+    OLL -->|reply| BR
+    OLL2 -->|reply| BR
 ```
 
 ### `server.ts`
 
-- builds `src/frontend.ts` into `public/frontend.js`
-- starts Bun on port `3000`
-- hands requests to the app handler from `src/app.ts`
+- Bundles `src/frontend.ts` into `public/frontend.js` at startup
+- Starts Bun.serve on port `3000`
+- Passes `ragModelName` and `ragLancedbDir` to the app handler
 
 ### `src/app.ts`
 
-- normalizes chat messages
-- finds the latest Ollama model
-- forwards chat requests to Ollama
-- serves `index.html`, `style.css`, and `frontend.js`
+- Normalises chat messages
+- Detects the latest `chembl-drug-chat:*` Ollama model (cached 15 s)
+- Routes `mode: "standard"` → fine-tuned model
+- Routes `mode: "rag"` → `buildRagContext` → `augmentMessages` → base `gemma3:1b`
+- Serves `index.html`, `style.css`, `frontend.js`
+- `/api/health` and `/api/model` debug endpoints
+
+### `src/rag.ts`
+
+- `extractDrugCandidates(text)` — regex extracts capitalised words, filters stopwords, title-cases to match DB format
+- `buildRagContext(message, lancedbDir)` — queries `compounds` table by name and `polypharmacy` table for pair signals and top per-drug partners; returns a bullet-list context string or `null` if nothing is found
+- `augmentMessages(messages, context)` — prepends `{ role: "system", content: context }` to the history
 
 ### `src/frontend.ts`
 
-- reads the page elements
-- loads the current model label
-- sends chat messages to `/api/chat`
-- renders replies in the message feed
-- supports Enter-to-send and Shift+Enter for newlines
+- Gets page elements including `#mode-standard` and `#mode-rag` toggle buttons
+- Tracks `currentMode: "standard" | "rag"` (default `"standard"`)
+- Includes `mode: currentMode` in every POST body
+- Renders replies in the message feed; supports Enter-to-send / Shift+Enter for newline
 
 ### `src/frontend-helpers.ts`
 
-- keeps small UI formatting logic separate and testable
+- Keeps small UI formatting logic (`formatModelLabel`, `formatReplyText`) separate and testable
 
 ## Run the app
 
-From the repo root:
-
 ```bash
+# Dev mode — hot reload on file changes
 cd web
-bun run server.ts
+bun run dev
+
+# Production
+cd web
+bun run start
 ```
 
-Then open:
-
-```text
-http://localhost:3000
-```
+Then open `http://localhost:3000`.
 
 ## Run the tests
 
@@ -87,40 +102,35 @@ cd web
 bun test
 ```
 
-Or:
-
-```bash
-cd web
-bun run test
-```
-
-These use Bun’s built-in test runner and `bun:test`.
-
 ## Required services
-
-The app talks to Ollama locally.
 
 ```bash
 ollama serve
 ```
 
-If you have already exported a model from this project, the app will use the newest `chembl-drug-chat*` model it finds.
+The Standard mode uses the newest `chembl-drug-chat:*` model. RAG mode uses `gemma3:1b`. Both must be present in Ollama:
+
+```bash
+ollama list | grep -E "chembl-drug-chat|gemma3"
+```
 
 ## Environment variables
+
+A `.env` file with working defaults is committed at `web/.env` — Bun loads it automatically, so no setup is needed. Edit it to point at a different Ollama host, swap the RAG model, or override the LanceDB path:
 
 ```bash
 PORT=3000
 OLLAMA_BASE_URL=http://127.0.0.1:11434
 OLLAMA_MODEL_PREFIX=chembl-drug-chat
-OLLAMA_MODEL_NAME=chembl-drug-chat:1b
+OLLAMA_MODEL_NAME=chembl-drug-chat:1b   # fallback if /api/tags fails
+RAG_MODEL_NAME=gemma3:1b                # model used in RAG mode
+# LANCEDB_DIR=                          # default: auto-resolved from web/src/rag.ts
 ```
 
-## UI behavior
+## UI behaviour
 
-The chat UI is designed to feel closer to ChatGPT:
-
-- dark theme by default
-- Enter sends the message
-- Shift+Enter adds a newline
-- the input grows as you type
-
+- Dark theme by default
+- **Standard / RAG pill toggle** in the header — persists for the session
+- Enter sends; Shift+Enter adds a newline
+- Input textarea grows as you type
+- Model label shows which Ollama tag is active and how it was selected

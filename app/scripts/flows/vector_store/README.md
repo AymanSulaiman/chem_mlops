@@ -43,7 +43,7 @@ flowchart LR
         FP["Main thread\n_smiles_to_fp()\nMorganGenerator\n~0.5 s / 10k rows"] -->|batch_records| TH["Background thread\nThreadPoolExecutor\ntable.add()\n~1.0 s / 10k rows"]
     end
 
-    LDB[(data/lancedb\nchembl_CHEMBL_36\ncompounds.lance\n2,854,996 rows\n2048-bit vectors)]
+    LDB[(data/lancedb\nchembl_CHEMBL_37\ncompounds.lance\n2,854,996 rows\n2048-bit vectors)]
 
     PQ --> build
     build -->|"75 cols × 2,855,011 rows"| write
@@ -215,7 +215,7 @@ import lancedb
 from rdkit import Chem
 from app.scripts.flows.vector_store.ingest_to_lancedb import _FP_GEN, LANCEDB_DIR
 
-db = lancedb.connect(f"{LANCEDB_DIR}/chembl_CHEMBL_36")
+db = lancedb.connect(f"{LANCEDB_DIR}/chembl_CHEMBL_37")
 table = db.open_table("compounds")
 
 # Similarity search by SMILES

@@ -101,17 +101,17 @@ uv run python -m app.scripts.flows.finetuning.finetuning
 
 ## 🤖 Model Variants
 
-Two serving modes are planned, each with a distinct trade-off:
+Two serving modes are live, each with a distinct trade-off:
 
 | Variant | How it works | Strength | Weakness |
 |---|---|---|---|
-| **Fine-tuned** (current) | LoRA-tuned Gemma 3 1B → GGUF → Ollama | Fast, no retrieval step | Relies on memorised training facts |
-| **RAG** (planned) | Same model + LanceDB lookup injected into prompt at inference | Grounded in live ChEMBL records | Slower; quality depends on retrieval relevance |
+| **Fine-tuned** | LoRA-tuned Gemma 3 1B → GGUF → Ollama (`chembl-drug-chat:1b`) | Fast, domain-aware | Relies on memorised training facts |
+| **RAG** | Base `gemma3:1b` + LanceDB context injected as system message | Grounded in live ChEMBL + TWOSIDES records | Slower; quality depends on drug-name extraction |
 
 | # | Task | Priority |
 |---|---|---|
-| 23 | Build a RAG inference wrapper — query LanceDB with the user's drug name / SMILES, format the top-k records into a system-prompt prefix, then call the model | High |
-| 24 | Wire the RAG wrapper into the Bun web app as a toggle ("Standard" vs "RAG" mode) | Medium |
+| ~~23~~ | ~~Build a RAG inference wrapper — query LanceDB with the user's drug name / SMILES, format the top-k records into a system-prompt prefix, then call the model~~ | ~~High~~ |
+| ~~24~~ | ~~Wire the RAG wrapper into the Bun web app as a toggle ("Standard" vs "RAG" mode)~~ | ~~Medium~~ |
 | 25 | Benchmark RAG vs fine-tuned on the golden set and record results in `artifacts/` | Medium |
 | 26 | Register a second Ollama model (`chembl-drug-chat:1b-rag`) that uses a RAG-aware Modelfile system prompt | Low |
 
@@ -151,3 +151,6 @@ Two serving modes are planned, each with a distinct trade-off:
 - [x] Tests for `export_to_ollama.py` — `app/tests/flows/export_to_ollama_test.py`
 - [x] Tests for `data_transformation.py` (Dagster wiring) — `app/tests/flows/transform_data_test.py`
 - [x] TWOSIDES polypharmacy dataset — download (stream-decompress-in-memory → Parquet), QA category 21 in training corpus, `polypharmacy` LanceDB table with scalar indexes, `query_polypharmacy` / `query_drug_side_effects` query API, Dagster ops wired as parallel download fanning into both dataset builder and LanceDB ingest
+- [x] RAG inference wrapper (`web/src/rag.ts`) — `extractDrugCandidates`, `buildRagContext` (queries `compounds` + `polypharmacy` tables via `@lancedb/lancedb` TypeScript client), `augmentMessages`; no Python server needed
+- [x] Standard / RAG mode toggle in Bun web app — Standard uses `chembl-drug-chat:1b` (fine-tuned), RAG uses `gemma3:1b` (base) with LanceDB context injected as system message
+- [x] Modelfile template bug fix — `{{ else` not `{{- else` after `### Answer`; removed `### Answer` stop token (caused immediate EOS); `repeat_penalty 1.1`, `num_ctx 2048`, `num_predict 512`; fix applied to both `export_to_ollama.py` (future runs) and the current artifact Modelfile
