@@ -304,18 +304,13 @@ def check_rag_quality(
         )
 
 
-def _model_slug(name: str) -> str:
-    """Convert a model name to a filesystem-safe slug, e.g. 'gemma3:1b' → 'gemma3_1b'."""
-    return name.replace(":", "_").replace("/", "_")
-
-
 def write_benchmark_artifacts(
     results: dict[str, Any],
     out_dir: Path,
 ) -> Path:
     """Write <finetuned_model>_vs_<rag_model>_benchmark.json to out_dir and return the path."""
-    ft_slug = _model_slug(results.get("finetuned_model", "finetuned"))
-    rag_slug = _model_slug(results.get("rag_model", "rag"))
+    ft_slug = results.get("finetuned_model", "finetuned").replace(":", "_").replace("/", "_")
+    rag_slug = results.get("rag_model", "rag").replace(":", "_").replace("/", "_")
     filename = f"{ft_slug}_vs_{rag_slug}_benchmark.json"
     out_dir.mkdir(parents=True, exist_ok=True)
     out = out_dir / filename

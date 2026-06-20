@@ -10,7 +10,6 @@ from typing import Any
 import lancedb
 import numpy as np
 import polars as pl
-from lancedb._lancedb import AddResult
 from lancedb.db import DBConnection
 from lancedb.table import Table
 from rdkit import Chem
@@ -35,13 +34,6 @@ _FP_GEN = rdFingerprintGenerator.GetMorganGenerator(radius=MORGAN_RADIUS, fpSize
 # ── Private helpers ───────────────────────────────────────────────────────────
 
 
-def _collect(lf: pl.LazyFrame) -> pl.DataFrame:
-    """Collect a LazyFrame, asserting the result is a DataFrame for type checkers."""
-    result = lf.collect()
-    assert isinstance(result, pl.DataFrame)
-    return result
-
-
 def _smiles_to_fp(smiles: str | None) -> np.ndarray | None:
     """Convert a SMILES string to a 2048-bit Morgan fingerprint, or None if invalid."""
     if smiles is None:
@@ -55,12 +47,14 @@ def _smiles_to_fp(smiles: str | None) -> np.ndarray | None:
 
 def _resolve_chembl_version(parquet_dir: str) -> str:
     """Read the latest ChEMBL release identifier from chembl_release.parquet."""
-    return _collect(
+    result: pl.DataFrame = (  # ty: ignore[invalid-assignment]
         pl.scan_parquet(f"{parquet_dir}/chembl_release.parquet")
         .sort("chembl_release_id", descending=True)
         .select("chembl_release")
         .limit(1)
-    ).item()
+        .collect()
+    )
+    return result.item()
 
 
 def _build_flat_df(parquet_dir: str) -> pl.DataFrame:
@@ -70,47 +64,40 @@ def _build_flat_df(parquet_dir: str) -> pl.DataFrame:
     Rows with no canonical SMILES are dropped (no fingerprint possible).
     """
     # ── Base + 1:1 joins ──────────────────────────────────────────────────
-    base: pl.DataFrame = _collect(
-        pl.scan_parquet(f"{parquet_dir}/molecule_dictionary.parquet").filter(
-            pl.col("structure_type") == "MOL"
-        )
-    )
+    base: pl.DataFrame = pl.scan_parquet(f"{parquet_dir}/molecule_dictionary.parquet").filter(  # ty: ignore[invalid-assignment]
+        pl.col("structure_type") == "MOL"
+    ).collect()
 
-    cs: pl.DataFrame = _collect(
-        pl.scan_parquet(f"{parquet_dir}/compound_structures.parquet").select(
-            ["molregno", "canonical_smiles", "standard_inchi_key"]
-        )
-    )
-    cp: pl.DataFrame = _collect(
-        pl.scan_parquet(f"{parquet_dir}/compound_properties.parquet").select(
-            [
-                "molregno",
-                "mw_freebase",
-                "alogp",
-                "hba",
-                "hbd",
-                "psa",
-                "qed_weighted",
-                "full_molformula",
-                "num_ro5_violations",
-                "heavy_atoms",
-            ]
-        )
-    )
-    mh: pl.DataFrame = _collect(
-        pl.scan_parquet(f"{parquet_dir}/molecule_hierarchy.parquet").select(
-            ["molregno", "parent_molregno", "active_molregno"]
-        )
-    )
-    usan: pl.DataFrame = _collect(
-        pl.scan_parquet(f"{parquet_dir}/usan_stems.parquet").select(
-            [
-                "stem",
-                pl.col("annotation").alias("usan_stem_annotation"),
-                pl.col("stem_class").alias("usan_stem_class"),
-            ]
-        )
-    )
+    cs: pl.DataFrame = pl.scan_parquet(f"{parquet_dir}/compound_structures.parquet").select(  # ty: ignore[invalid-assignment]
+        ["molregno", "canonical_smiles", "standard_inchi_key"]
+    ).collect()
+
+    cp: pl.DataFrame = pl.scan_parquet(f"{parquet_dir}/compound_properties.parquet").select(  # ty: ignore[invalid-assignment]
+        [
+            "molregno",
+            "mw_freebase",
+            "alogp",
+            "hba",
+            "hbd",
+            "psa",
+            "qed_weighted",
+            "full_molformula",
+            "num_ro5_violations",
+            "heavy_atoms",
+        ]
+    ).collect()
+
+    mh: pl.DataFrame = pl.scan_parquet(f"{parquet_dir}/molecule_hierarchy.parquet").select(  # ty: ignore[invalid-assignment]
+        ["molregno", "parent_molregno", "active_molregno"]
+    ).collect()
+
+    usan: pl.DataFrame = pl.scan_parquet(f"{parquet_dir}/usan_stems.parquet").select(  # ty: ignore[invalid-assignment]
+        [
+            "stem",
+            pl.col("annotation").alias("usan_stem_annotation"),
+            pl.col("stem_class").alias("usan_stem_class"),
+        ]
+    ).collect()
 
     base = (
         base.join(cs, on="molregno", how="left")
@@ -122,10 +109,10 @@ def _build_flat_df(parquet_dir: str) -> pl.DataFrame:
 
     # ── 1:many aggregation joins ──────────────────────────────────────────
 
-    _target_dict: pl.LazyFrame = pl.scan_parquet(f"{parquet_dir}/target_dictionary.parquet").select(
+    _target_dict = pl.scan_parquet(f"{parquet_dir}/target_dictionary.parquet").select(
         ["tid", pl.col("pref_name").alias("target_name")]
     )
-    mech_agg: pl.DataFrame = _collect(
+    mech_agg: pl.DataFrame = (  # ty: ignore[invalid-assignment]
         pl.scan_parquet(f"{parquet_dir}/drug_mechanism.parquet")
         .join(_target_dict, on="tid", how="left")
         .group_by("molregno")
@@ -144,9 +131,10 @@ def _build_flat_df(parquet_dir: str) -> pl.DataFrame:
                 .alias("mechanism_targets"),
             ]
         )
+        .collect()
     )
 
-    ind_agg: pl.DataFrame = _collect(
+    ind_agg: pl.DataFrame = (  # ty: ignore[invalid-assignment]
         pl.scan_parquet(f"{parquet_dir}/drug_indication.parquet")
         .group_by("molregno")
         .agg(
@@ -160,9 +148,10 @@ def _build_flat_df(parquet_dir: str) -> pl.DataFrame:
                 pl.col("max_phase_for_ind").max().alias("max_indication_phase"),
             ]
         )
+        .collect()
     )
 
-    warn_agg: pl.DataFrame = _collect(
+    warn_agg: pl.DataFrame = (  # ty: ignore[invalid-assignment]
         pl.scan_parquet(f"{parquet_dir}/drug_warning.parquet")
         .group_by("molregno")
         .agg(
@@ -186,9 +175,10 @@ def _build_flat_df(parquet_dir: str) -> pl.DataFrame:
                 pl.col("warning_year").min().alias("first_warning_year"),
             ]
         )
+        .collect()
     )
 
-    syn_agg: pl.DataFrame = _collect(
+    syn_agg: pl.DataFrame = (  # ty: ignore[invalid-assignment]
         pl.scan_parquet(f"{parquet_dir}/molecule_synonyms.parquet")
         .group_by("molregno")
         .agg(
@@ -196,10 +186,11 @@ def _build_flat_df(parquet_dir: str) -> pl.DataFrame:
                 pl.col("synonyms").drop_nulls().unique().str.join("; ").alias("synonyms"),
             ]
         )
+        .collect()
     )
 
-    _atc_class: pl.LazyFrame = pl.scan_parquet(f"{parquet_dir}/atc_classification.parquet")
-    atc_agg: pl.DataFrame = _collect(
+    _atc_class = pl.scan_parquet(f"{parquet_dir}/atc_classification.parquet")
+    atc_agg: pl.DataFrame = (  # ty: ignore[invalid-assignment]
         pl.scan_parquet(f"{parquet_dir}/molecule_atc_classification.parquet")
         .join(_atc_class, on="level5", how="left")
         .group_by("molregno")
@@ -229,12 +220,13 @@ def _build_flat_df(parquet_dir: str) -> pl.DataFrame:
                 .alias("atc_level4"),
             ]
         )
+        .collect()
     )
 
-    _cr: pl.LazyFrame = pl.scan_parquet(f"{parquet_dir}/compound_records.parquet").select(
+    _cr = pl.scan_parquet(f"{parquet_dir}/compound_records.parquet").select(
         ["record_id", "molregno"]
     )
-    met_agg: pl.DataFrame = _collect(
+    met_agg: pl.DataFrame = (  # ty: ignore[invalid-assignment]
         pl.scan_parquet(f"{parquet_dir}/metabolism.parquet")
         .filter(pl.col("organism") == "Homo sapiens")
         .join(_cr, left_on="substrate_record_id", right_on="record_id", how="left")
@@ -253,12 +245,13 @@ def _build_flat_df(parquet_dir: str) -> pl.DataFrame:
                 .alias("metabolic_conversions"),
             ]
         )
+        .collect()
     )
 
-    _products: pl.LazyFrame = pl.scan_parquet(f"{parquet_dir}/products.parquet").select(
+    _products = pl.scan_parquet(f"{parquet_dir}/products.parquet").select(
         ["product_id", "trade_name", "route", "dosage_form"]
     )
-    form_agg: pl.DataFrame = _collect(
+    form_agg: pl.DataFrame = (  # ty: ignore[invalid-assignment]
         pl.scan_parquet(f"{parquet_dir}/formulations.parquet")
         .select(["product_id", "molregno"])
         .join(_products, on="product_id", how="left")
@@ -270,15 +263,16 @@ def _build_flat_df(parquet_dir: str) -> pl.DataFrame:
                 pl.col("dosage_form").drop_nulls().unique().str.join("; ").alias("dosage_forms"),
             ]
         )
+        .collect()
     )
 
-    _sa: pl.LazyFrame = pl.scan_parquet(f"{parquet_dir}/structural_alerts.parquet").select(
+    _sa = pl.scan_parquet(f"{parquet_dir}/structural_alerts.parquet").select(
         ["alert_id", "alert_set_id", "alert_name"]
     )
-    _sas: pl.LazyFrame = pl.scan_parquet(f"{parquet_dir}/structural_alert_sets.parquet").select(
+    _sas = pl.scan_parquet(f"{parquet_dir}/structural_alert_sets.parquet").select(
         ["alert_set_id", "set_name"]
     )
-    alert_agg: pl.DataFrame = _collect(
+    alert_agg: pl.DataFrame = (  # ty: ignore[invalid-assignment]
         pl.scan_parquet(f"{parquet_dir}/compound_structural_alerts.parquet")
         .join(_sa, on="alert_id", how="left")
         .join(_sas, on="alert_set_id", how="left")
@@ -297,10 +291,11 @@ def _build_flat_df(parquet_dir: str) -> pl.DataFrame:
                 .alias("structural_alert_sets"),
             ]
         )
+        .collect()
     )
 
-    _ddd: pl.LazyFrame = pl.scan_parquet(f"{parquet_dir}/defined_daily_dose.parquet")
-    ddd_agg: pl.DataFrame = _collect(
+    _ddd = pl.scan_parquet(f"{parquet_dir}/defined_daily_dose.parquet")
+    ddd_agg: pl.DataFrame = (  # ty: ignore[invalid-assignment]
         pl.scan_parquet(f"{parquet_dir}/molecule_atc_classification.parquet")
         .join(_ddd, left_on="level5", right_on="atc_code", how="left")
         .with_columns(
@@ -321,15 +316,16 @@ def _build_flat_df(parquet_dir: str) -> pl.DataFrame:
                 pl.col("ddd_admr").drop_nulls().unique().str.join("; ").alias("ddd_routes"),
             ]
         )
+        .collect()
     )
 
-    _assays: pl.LazyFrame = pl.scan_parquet(f"{parquet_dir}/assays.parquet").select(
+    _assays = pl.scan_parquet(f"{parquet_dir}/assays.parquet").select(
         ["assay_id", "tid"]
     )
-    _act_targets: pl.LazyFrame = pl.scan_parquet(f"{parquet_dir}/target_dictionary.parquet").select(
+    _act_targets = pl.scan_parquet(f"{parquet_dir}/target_dictionary.parquet").select(
         ["tid", pl.col("pref_name").alias("target_name")]
     )
-    acts_agg: pl.DataFrame = _collect(
+    acts_agg: pl.DataFrame = (  # ty: ignore[invalid-assignment]
         pl.scan_parquet(f"{parquet_dir}/activities.parquet")
         .filter((pl.col("standard_flag") == 1) & pl.col("pchembl_value").is_not_null())
         .join(_assays, on="assay_id", how="left")
@@ -352,6 +348,7 @@ def _build_flat_df(parquet_dir: str) -> pl.DataFrame:
                 .alias("activity_targets"),
             ]
         )
+        .collect()
     )
 
     return (
@@ -398,7 +395,7 @@ def _write_to_lancedb(
     with ThreadPoolExecutor(max_workers=1) as write_exec:
         # pending_write holds the in-flight LanceDB write for the previous batch.
         # Fingerprinting of batch N+1 overlaps with the I/O of batch N.
-        pending_write: Future[AddResult] | None = None
+        pending_write: Future[Any] | None = None
         pending_count: int = 0
 
         batch_iter: tqdm[pl.DataFrame] = tqdm(

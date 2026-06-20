@@ -49,28 +49,16 @@ def _resolve_lancedb_uri(lancedb_dir: str) -> str:
     return os.path.join(lancedb_dir, candidates[-1])
 
 
-def _open_table(lancedb_dir: str) -> Table:
-    """Connect to the latest ChEMBL LanceDB and return the compounds table."""
+def _open_table(lancedb_dir: str, table_name: str) -> Table:
+    """Connect to the latest ChEMBL LanceDB and return the named table."""
     uri: str = _resolve_lancedb_uri(lancedb_dir)
     db: DBConnection = lancedb.connect(uri)
-    if COMPOUNDS_TABLE not in db.list_tables().tables:
+    if table_name not in db.list_tables().tables:
         raise FileNotFoundError(
-            f"Table '{COMPOUNDS_TABLE}' not found in '{uri}'. "
-            "Run ingest_compounds_to_lancedb() first."
+            f"Table '{table_name}' not found in '{uri}'. "
+            "Run the appropriate ingest step first."
         )
-    return db.open_table(COMPOUNDS_TABLE)
-
-
-def _open_polypharmacy_table(lancedb_dir: str) -> Table:
-    """Connect to the latest ChEMBL LanceDB and return the polypharmacy table."""
-    uri: str = _resolve_lancedb_uri(lancedb_dir)
-    db: DBConnection = lancedb.connect(uri)
-    if POLYPHARMACY_TABLE not in db.list_tables().tables:
-        raise FileNotFoundError(
-            f"Table '{POLYPHARMACY_TABLE}' not found in '{uri}'. "
-            "Run ingest_twosides_to_lancedb() first."
-        )
-    return db.open_table(POLYPHARMACY_TABLE)
+    return db.open_table(table_name)
 
 
 def _smiles_to_query_vector(smiles: str) -> list[float]:
@@ -112,7 +100,7 @@ def query_compounds(
         FileNotFoundError: If the LanceDB table does not exist.
     """
     query_vector: list[float] = _smiles_to_query_vector(smiles)
-    table: Table = _open_table(lancedb_dir)
+    table: Table = _open_table(lancedb_dir, COMPOUNDS_TABLE)
     results: list[dict[str, Any]] = table.search(query_vector).limit(n).to_list()
     # Drop the raw vector column — callers need metadata, not the 2048-float blob
     for row in results:
@@ -139,7 +127,7 @@ def get_compound(
     Raises:
         FileNotFoundError: If the LanceDB table does not exist.
     """
-    table: Table = _open_table(lancedb_dir)
+    table: Table = _open_table(lancedb_dir, COMPOUNDS_TABLE)
     rows: list[dict[str, Any]] = (
         table.search().where(f"chembl_id = '{chembl_id}'").limit(1).to_list()
     )
@@ -169,7 +157,7 @@ def get_compound_by_name(
     Raises:
         FileNotFoundError: If the LanceDB table does not exist.
     """
-    table: Table = _open_table(lancedb_dir)
+    table: Table = _open_table(lancedb_dir, COMPOUNDS_TABLE)
     safe = name.strip().replace("'", "''")
     rows: list[dict[str, Any]] = (
         table.search().where(f"LOWER(pref_name) = '{safe.lower()}'").limit(1).to_list()
@@ -203,7 +191,7 @@ def query_polypharmacy(
     Raises:
         FileNotFoundError: If the polypharmacy table has not been ingested yet.
     """
-    table: Table = _open_polypharmacy_table(lancedb_dir)
+    table: Table = _open_table(lancedb_dir, POLYPHARMACY_TABLE)
     d1 = drug_1.strip().title()
     d2 = drug_2.strip().title()
     rows: list[dict[str, Any]] = (
@@ -240,7 +228,7 @@ def query_drug_side_effects(
     Raises:
         FileNotFoundError: If the polypharmacy table has not been ingested yet.
     """
-    table: Table = _open_polypharmacy_table(lancedb_dir)
+    table: Table = _open_table(lancedb_dir, POLYPHARMACY_TABLE)
     name = drug_name.strip().title()
     rows: list[dict[str, Any]] = (
         table.search()

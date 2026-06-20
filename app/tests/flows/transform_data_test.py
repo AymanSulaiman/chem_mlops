@@ -61,10 +61,9 @@ class TestTransformData:
     # ------------------------------------------------------------------
 
     @patch("duckdb.connect")
-    @patch("os.makedirs")
     @patch("shutil.rmtree")
     def test_transform_data_success(
-        self, mock_rmtree, mock_makedirs, mock_duckdb_connect, temp_data_dir
+        self, mock_rmtree, mock_duckdb_connect, temp_data_dir
     ):
         mock_conn = self._make_conn(["activities", "assays"])
         mock_duckdb_connect.return_value = mock_conn
@@ -78,8 +77,7 @@ class TestTransformData:
             "ATTACH 'data/chembl_37/chembl_37_sqlite/chembl_37.db' AS chembl37 (TYPE sqlite);"
         )
         mock_conn.execute.assert_any_call("SHOW TABLES FROM chembl37;")
-        mock_makedirs.assert_called_once_with("data/chembl_transform", exist_ok=True)
-        mock_rmtree.assert_called_once_with("data/chembl_37")
+        mock_rmtree.assert_called_once_with(Path("data") / "chembl_37")
         mock_conn.close.assert_called_once()
 
     @patch("duckdb.connect")
@@ -203,20 +201,16 @@ class TestTransformData:
     # ------------------------------------------------------------------
 
     @patch("duckdb.connect")
-    @patch("os.makedirs")
-    @patch("os.path.exists")
     @patch("shutil.rmtree")
     def test_cleanup_success(
-        self, mock_rmtree, mock_exists, mock_makedirs, mock_duckdb_connect, temp_data_dir
+        self, mock_rmtree, mock_duckdb_connect, temp_data_dir
     ):
         mock_conn = self._make_conn([])
         mock_duckdb_connect.return_value = mock_conn
-        mock_exists.return_value = True
 
         transform_data()
 
-        mock_exists.assert_called_once_with("data/chembl_37")
-        mock_rmtree.assert_called_once_with("data/chembl_37")
+        mock_rmtree.assert_called_once_with(Path("data") / "chembl_37")
 
     @patch("duckdb.connect")
     @patch("os.makedirs")
@@ -234,14 +228,13 @@ class TestTransformData:
             transform_data()  # must not raise
 
     @patch("duckdb.connect")
-    @patch("os.makedirs")
-    @patch("os.path.exists")
     def test_cleanup_skipped_when_dir_absent(
-        self, mock_exists, mock_makedirs, mock_duckdb_connect, temp_data_dir
+        self, mock_duckdb_connect, temp_data_dir
     ):
         mock_conn = self._make_conn([])
         mock_duckdb_connect.return_value = mock_conn
-        mock_exists.return_value = False
+        import shutil as _shutil
+        _shutil.rmtree(Path("data") / "chembl_37")  # remove what fixture created
 
         with patch("builtins.print") as mock_print:
             transform_data()

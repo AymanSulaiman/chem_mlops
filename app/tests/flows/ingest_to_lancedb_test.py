@@ -9,7 +9,6 @@ from app.scripts.flows.vector_store.ingest_to_lancedb import (
     COMPOUNDS_TABLE,
     MORGAN_BITS,
     _build_flat_df,
-    _collect,
     _resolve_chembl_version,
     _smiles_to_fp,
     _write_to_lancedb,
@@ -219,23 +218,6 @@ def parquet_dir(tmp_path: Path) -> str:
 @pytest.fixture()
 def lancedb_dir(tmp_path: Path) -> str:
     return str(tmp_path / "lancedb")
-
-
-# ── _collect ──────────────────────────────────────────────────────────────────
-
-
-class TestCollect:
-    def test_returns_dataframe(self) -> None:
-        lf = pl.LazyFrame({"a": [1, 2, 3]})
-        result = _collect(lf)
-        assert isinstance(result, pl.DataFrame)
-        assert result.shape == (3, 1)
-
-    def test_preserves_values(self) -> None:
-        lf = pl.LazyFrame({"x": [10, 20], "y": ["a", "b"]})
-        result = _collect(lf)
-        assert result["x"].to_list() == [10, 20]
-        assert result["y"].to_list() == ["a", "b"]
 
 
 # ── _smiles_to_fp ─────────────────────────────────────────────────────────────

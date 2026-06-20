@@ -7,6 +7,7 @@ Uses ``mlx.core`` to load safetensors (no PyTorch required) and the
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import cast
 
@@ -66,8 +67,6 @@ def convert(hf_dir: Path, output_path: Path) -> None:
         writer.add_sliding_window(sliding_window)
 
     # --- Vocabulary ---
-    import os
-
     os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
     vocab = gguf.LlamaHfVocab(hf_dir)
     tokens: list[bytes] = []

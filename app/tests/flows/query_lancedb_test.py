@@ -14,7 +14,6 @@ from app.scripts.flows.vector_store.ingest_to_lancedb import (
 )
 from app.scripts.flows.vector_store.ingest_twosides_to_lancedb import POLYPHARMACY_TABLE
 from app.scripts.flows.vector_store.query_lancedb import (
-    _open_polypharmacy_table,
     _open_table,
     _resolve_lancedb_uri,
     _run_sanity_check,
@@ -106,14 +105,14 @@ class TestSmilesToQueryVector:
 
 class TestOpenTable:
     def test_opens_table_successfully(self, lancedb_dir: str) -> None:
-        table = _open_table(lancedb_dir)
+        table = _open_table(lancedb_dir, COMPOUNDS_TABLE)
         assert table is not None
 
     def test_raises_if_table_missing(self, tmp_path: Path) -> None:
         uri = str(tmp_path / "chembl_CHEMBL_36")
         lancedb.connect(uri)  # create empty db, no tables
         with pytest.raises(FileNotFoundError, match="not found"):
-            _open_table(str(tmp_path))
+            _open_table(str(tmp_path), COMPOUNDS_TABLE)
 
 
 # ── query_compounds ───────────────────────────────────────────────────────────
@@ -255,22 +254,22 @@ def polypharmacy_lancedb_dir(tmp_path: Path) -> str:
     return str(tmp_path)
 
 
-# ── _open_polypharmacy_table ──────────────────────────────────────────────────
+# ── _open_table (polypharmacy) ────────────────────────────────────────────────
 
 
-class TestOpenPolypharmacyTable:
+class TestOpenTablePolypharmacy:
     def test_opens_table_successfully(self, polypharmacy_lancedb_dir: str) -> None:
-        table = _open_polypharmacy_table(polypharmacy_lancedb_dir)
+        table = _open_table(polypharmacy_lancedb_dir, POLYPHARMACY_TABLE)
         assert table is not None
 
     def test_raises_if_table_missing(self, lancedb_dir: str) -> None:
         # lancedb_dir fixture only has the compounds table
         with pytest.raises(FileNotFoundError, match="not found"):
-            _open_polypharmacy_table(lancedb_dir)
+            _open_table(lancedb_dir, POLYPHARMACY_TABLE)
 
     def test_raises_if_dir_missing(self, tmp_path: Path) -> None:
         with pytest.raises(FileNotFoundError):
-            _open_polypharmacy_table(str(tmp_path / "nonexistent"))
+            _open_table(str(tmp_path / "nonexistent"), POLYPHARMACY_TABLE)
 
 
 # ── query_polypharmacy ────────────────────────────────────────────────────────

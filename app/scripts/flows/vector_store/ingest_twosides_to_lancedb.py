@@ -30,7 +30,7 @@ def _load_twosides(path: Path) -> pl.DataFrame:
     """Load, filter, and aggregate TWOSIDES into one row per drug pair."""
     print(f"Loading TWOSIDES from {path} ...")
 
-    df = (
+    df: pl.DataFrame = (  # ty: ignore[invalid-assignment]
         pl.scan_parquet(path)
         .with_columns([
             pl.col("PRR").cast(pl.Float32, strict=False),
@@ -53,7 +53,6 @@ def _load_twosides(path: Path) -> pl.DataFrame:
         ])
         .collect()
     )
-    assert isinstance(df, pl.DataFrame)
     print(f"  Rows after filtering (PRR >= {MIN_PRR}, cases >= {MIN_CASES}): {len(df):,}")
 
     aggregated = (
