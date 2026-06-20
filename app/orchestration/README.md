@@ -161,8 +161,8 @@ flowchart LR
 |---|---|
 | Module | `app.scripts.flows.eval.eval_finetuned_model` |
 | Depends on | `finetune_llm_op` |
-| What it does | Runs perplexity eval on `valid.jsonl` and scores against the golden pharmacology benchmark; raises `RuntimeError` to block export on regression |
-| Output | `data/eval/<run>/metrics.json`, `data/eval/<run>/golden_results.jsonl` |
+| What it does | Runs perplexity eval on `valid.jsonl` and scores against the golden pharmacology benchmark (keyword-match scoring); raises `RuntimeError` to block export on regression |
+| Output | `data/eval/<run>/finetuned_eval_metrics.json` — perplexity + pass rate summary; `data/eval/<run>/finetuned_golden_results.jsonl` — per-question responses with `keyword_match_passed` |
 
 ---
 
@@ -178,8 +178,8 @@ flowchart LR
 |---|---|
 | Module | `app.scripts.flows.eval.benchmark_rag_vs_finetuned` |
 | Depends on | `eval_finetuned_model_op` **and** `ingest_twosides_to_lancedb_op` (fan-in) |
-| What it does | Calls Ollama for both Standard (`chembl-drug-chat:1b`) and RAG (`gemma3:1b` + LanceDB) modes on the golden question set; raises `RuntimeError` if RAG pass rate < 50% |
-| Output | `data/benchmarks/<timestamp>/benchmark_results.json` |
+| What it does | Calls Ollama for both Standard (`chembl-drug-chat:1b`) and RAG (`gemma3:1b` + LanceDB) modes on the golden question set; raises `RuntimeError` if RAG pass rate < 40% (catches broken LanceDB/missing model, not fine-tuned vs base gap) |
+| Output | `data/eval/<run>/<finetuned_model>_vs_<rag_model>_benchmark.json` — keyword-match pass rates, per-question comparison, `winner`, and `delta_description` for both models |
 
 ---
 
@@ -274,5 +274,5 @@ All ops, jobs, and schedules are exported through the `defs` object.
 | `ingest_twosides_to_lancedb_op` fan-in from both ChEMBL LanceDB + TWOSIDES | After ChEMBL only | Needs the ChEMBL DB to exist (same LanceDB dir) and the TWOSIDES Parquet to be ready |
 | Fan-in before finetuning | Start finetuning on first dataset ready | MLX training needs both datasets for a balanced model |
 | `eval_finetuned_model_op` gates finetuned quality | Export unconditionally | Prevents a regressed model from overwriting a good one |
-| `benchmark_rag_vs_finetuned_op` gates RAG quality | No RAG gate | Ensures LanceDB context is useful before shipping the export |
+| `benchmark_rag_vs_finetuned_op` gates RAG quality at 40% | No RAG gate | Catches a broken LanceDB/missing model (not a base-vs-fine-tuned gap); threshold is intentionally below fine-tuned pass rate |
 | Daily schedule at midnight UTC | On-demand only | ChEMBL releases are periodic; overnight run avoids peak hours |

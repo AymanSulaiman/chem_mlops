@@ -67,7 +67,7 @@
 | ~~12~~ | ~~Add perplexity eval on `valid.jsonl` after fine-tuning~~ | ~~High~~ |
 | ~~13~~ | ~~Build a small golden benchmark (20–50 known drug questions with expected answers)~~ | ~~High~~ |
 | ~~14~~ | ~~Wire eval as a Dagster op that runs after fine-tuning and gates the Ollama export~~ | ~~Medium~~ |
-| ~~15~~ | ~~Log eval metrics (perplexity, exact-match %) to a file under `artifacts/<run>/`~~ | ~~Medium~~ |
+| ~~15~~ | ~~Log eval metrics (perplexity, exact-match %) to a file under `data/eval/<run>/`~~ | ~~Medium~~ |
 
 ---
 
@@ -106,7 +106,7 @@ Two serving modes are live, each with a distinct trade-off:
 |---|---|---|
 | ~~23~~ | ~~Build a RAG inference wrapper — query LanceDB with the user's drug name / SMILES, format the top-k records into a system-prompt prefix, then call the model~~ | ~~High~~ |
 | ~~24~~ | ~~Wire the RAG wrapper into the Bun web app as a toggle ("Standard" vs "RAG" mode)~~ | ~~Medium~~ |
-| 25 | Benchmark RAG vs fine-tuned on the golden set and record results in `artifacts/` | Medium |
+| ~~25~~ | ~~Benchmark RAG vs fine-tuned on the golden set — `data/eval/<run>/<ft>_vs_<rag>_benchmark.json`~~ | ~~Medium~~ |
 | 26 | Register a second Ollama model (`chembl-drug-chat:1b-rag`) that uses a RAG-aware Modelfile system prompt | Low |
 
 ---
@@ -140,7 +140,8 @@ Two serving modes are live, each with a distinct trade-off:
 - [x] Junk name filter (numeric `pref_name`, `AUTONOM` placeholders)
 - [x] Filler phrase removal from training templates
 - [x] Assay context questions capped at 5,000 (was 1.93M = 73% of data)
-- [x] Model evaluation — perplexity + golden benchmark, gates Ollama export (`app/scripts/flows/eval/eval_finetuned_model.py`, `app/scripts/flows/eval/golden.jsonl`)
+- [x] Model evaluation — perplexity + keyword-match golden benchmark, gates Ollama export (`app/scripts/flows/eval/eval_finetuned_model.py`, `app/scripts/flows/eval/golden.jsonl`) — outputs `data/eval/<run>/finetuned_eval_metrics.json` and `finetuned_golden_results.jsonl`
+- [x] RAG vs fine-tuned benchmark — keyword-match scoring on golden set, `winner` + `delta_description` fields, co-located with eval output as `<ft>_vs_<rag>_benchmark.json` (`app/scripts/flows/eval/benchmark_rag_vs_finetuned.py`)
 - [x] `uv` environment caching in CI (`enable-cache: true`)
 - [x] Tests for `export_to_ollama.py` — `app/tests/flows/export_to_ollama_test.py`
 - [x] Tests for `chembl_drug_chat_pipeline.py` (Dagster wiring) — `app/tests/flows/transform_data_test.py`

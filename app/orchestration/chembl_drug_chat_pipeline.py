@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from dagster import Config, Definitions, In, Nothing, Out, ScheduleDefinition, graph, op
 
 from app.scripts.flows.eval.benchmark_rag_vs_finetuned import (
@@ -88,9 +90,11 @@ def eval_finetuned_model_op() -> None:
 # Verifies RAG context quality before allowing Ollama export.
 @op(ins={"start_finetuned_eval": In(Nothing), "start_polypharmacy_store": In(Nothing)}, out=Out(Nothing))
 def benchmark_rag_vs_finetuned_op() -> None:
+    run_dir = latest_run_dir(ARTIFACTS_DIR)
+    eval_dir = Path("data/eval") / run_dir.name
     results = run_benchmark()
+    write_benchmark_artifacts(results, out_dir=eval_dir)  # always write before gate
     check_rag_quality(results)
-    write_benchmark_artifacts(results)
 
 
 @op(ins={"start": In(Nothing)})

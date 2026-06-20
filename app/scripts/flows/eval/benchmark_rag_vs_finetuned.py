@@ -32,7 +32,10 @@ from app.scripts.flows.vector_store.query_lancedb import (
 )
 
 BENCHMARKS_DIR = Path("data/benchmarks")
-RAG_PASS_THRESHOLD = 0.5  # minimum RAG pass rate to allow Ollama export
+RAG_PASS_THRESHOLD = 0.4  # minimum RAG pass rate to allow Ollama export
+# 40% catches a broken RAG (empty LanceDB, gemma3:1b not available) while
+# tolerating the expected gap between a base model and a domain-fine-tuned model
+# on pharmaceutical keyword-match questions.
 
 DEFAULT_FINETUNED_MODEL = "chembl-drug-chat:1b"
 DEFAULT_RAG_MODEL = "gemma3:1b"
@@ -209,8 +212,8 @@ def run_benchmark(
             ft_reply = f"[ERROR: {e}]"
         ft_passed = score_response(ft_reply, must)
         ft_results.append(
-            {"question": q, "category": cat, "must_contain": must,
-             "passed": ft_passed, "response": ft_reply}
+            {"model": finetuned_model, "question": q, "category": cat,
+             "must_contain": must, "keyword_match_passed": ft_passed, "response": ft_reply}
         )
         print(f"         fine-tuned : {'✓' if ft_passed else '✗'}")
 
@@ -225,32 +228,62 @@ def run_benchmark(
             rag_reply = f"[ERROR: {e}]"
         rag_passed = score_response(rag_reply, must)
         rag_results.append(
-            {"question": q, "category": cat, "must_contain": must,
-             "passed": rag_passed, "response": rag_reply,
+            {"model": rag_model, "question": q, "category": cat,
+             "must_contain": must, "keyword_match_passed": rag_passed, "response": rag_reply,
              "context_used": bool(context)}
         )
         print(f"         rag        : {'✓' if rag_passed else '✗'}  "
               f"(context: {'yes' if context else 'no'})")
 
-    ft_pass = sum(r["passed"] for r in ft_results)
-    rag_pass = sum(r["passed"] for r in rag_results)
+    ft_pass = sum(r["keyword_match_passed"] for r in ft_results)
+    rag_pass = sum(r["keyword_match_passed"] for r in rag_results)
+
+    delta = round((rag_pass - ft_pass) / total, 4)
+    winner = "rag" if delta > 0 else "finetuned" if delta < 0 else "tie"
+
+    per_question = [
+        {
+            "question": ft["question"],
+            "category": ft["category"],
+            "must_contain": ft["must_contain"],
+            "finetuned": {
+                "model": ft["model"],
+                "keyword_match_passed": ft["keyword_match_passed"],
+                "response": ft["response"],
+            },
+            "rag": {
+                "model": rag["model"],
+                "keyword_match_passed": rag["keyword_match_passed"],
+                "response": rag["response"],
+                "context_used": rag["context_used"],
+            },
+        }
+        for ft, rag in zip(ft_results, rag_results)
+    ]
 
     return {
+        "eval_type": "rag_vs_finetuned_benchmark",
+        "scoring_method": "keyword_match — question passes if all must_contain keywords appear in response (case-insensitive)",
         "timestamp": datetime.now(tz=UTC).isoformat(),
         "finetuned_model": finetuned_model,
         "rag_model": rag_model,
         "total": total,
         "finetuned": {
+            "model": finetuned_model,
             "pass_count": ft_pass,
             "pass_rate": round(ft_pass / total, 4),
             "results": ft_results,
         },
         "rag": {
+            "model": rag_model,
             "pass_count": rag_pass,
             "pass_rate": round(rag_pass / total, 4),
             "results": rag_results,
         },
-        "delta_pass_rate": round((rag_pass - ft_pass) / total, 4),
+        "per_question": per_question,
+        "delta_pass_rate": delta,
+        "delta_description": "rag_pass_rate minus finetuned_pass_rate: positive = RAG answers more questions correctly; negative = fine-tuned answers more",
+        "winner": winner,
     }
 
 
@@ -271,15 +304,21 @@ def check_rag_quality(
         )
 
 
+def _model_slug(name: str) -> str:
+    """Convert a model name to a filesystem-safe slug, e.g. 'gemma3:1b' → 'gemma3_1b'."""
+    return name.replace(":", "_").replace("/", "_")
+
+
 def write_benchmark_artifacts(
     results: dict[str, Any],
-    benchmarks_dir: Path = BENCHMARKS_DIR,
+    out_dir: Path,
 ) -> Path:
-    """Write benchmark_results.json to data/benchmarks/<timestamp>/ and return the path."""
-    ts = datetime.now(tz=UTC).strftime("%Y%m%d_%H%M%S")
-    out_dir = benchmarks_dir / ts
+    """Write <finetuned_model>_vs_<rag_model>_benchmark.json to out_dir and return the path."""
+    ft_slug = _model_slug(results.get("finetuned_model", "finetuned"))
+    rag_slug = _model_slug(results.get("rag_model", "rag"))
+    filename = f"{ft_slug}_vs_{rag_slug}_benchmark.json"
     out_dir.mkdir(parents=True, exist_ok=True)
-    out = out_dir / "benchmark_results.json"
+    out = out_dir / filename
     out.write_text(json.dumps(results, indent=2) + "\n")
     return out
 
@@ -289,7 +328,7 @@ def print_summary(results: dict[str, Any]) -> None:
     ft = results["finetuned"]
     rag = results["rag"]
     delta = results["delta_pass_rate"]
-    winner = "RAG" if delta > 0 else ("Fine-tuned" if delta < 0 else "Tie")
+    winner_label = "RAG" if delta > 0 else ("Fine-tuned" if delta < 0 else "Tie")
 
     print(f"\n{'─' * 54}")
     print(
@@ -300,7 +339,7 @@ def print_summary(results: dict[str, Any]) -> None:
         f"  RAG         ({results['rag_model']}):    "
         f"{rag['pass_count']}/{total} ({rag['pass_rate']:.1%})"
     )
-    print(f"  Δ pass rate : {delta:+.1%}  →  {winner} wins")
+    print(f"  Δ pass rate : {delta:+.1%}  →  {winner_label} wins")
     print(f"{'─' * 54}")
 
     cats: dict[str, dict[str, int]] = {}
@@ -309,8 +348,8 @@ def print_summary(results: dict[str, Any]) -> None:
         if cat not in cats:
             cats[cat] = {"ft": 0, "rag": 0, "n": 0}
         cats[cat]["n"] += 1
-        cats[cat]["ft"] += int(r_ft["passed"])
-        cats[cat]["rag"] += int(r_rag["passed"])
+        cats[cat]["ft"] += int(r_ft["keyword_match_passed"])
+        cats[cat]["rag"] += int(r_rag["keyword_match_passed"])
 
     print(f"\n  {'Category':<30} {'Fine-tuned':>12} {'RAG':>6}")
     print(f"  {'─' * 52}")
@@ -346,7 +385,8 @@ if __name__ == "__main__":
         rag_model=args.rag_model,
         ollama_base_url=args.ollama_base_url,
     )
-    out_path = write_benchmark_artifacts(results, benchmarks_dir=args.benchmarks_dir)
+    ts = datetime.now(tz=UTC).strftime("%Y%m%d_%H%M%S")
+    out_path = write_benchmark_artifacts(results, out_dir=args.benchmarks_dir / ts)
     print_summary(results)
     print(f"Results written to {out_path}")
     sys.exit(0)

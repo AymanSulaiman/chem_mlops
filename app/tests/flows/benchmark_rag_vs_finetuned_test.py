@@ -302,31 +302,54 @@ class TestRunBenchmark:
         assert results["finetuned"]["pass_count"] == 0
         assert "[ERROR:" in results["finetuned"]["results"][0]["response"]
 
+    def test_results_use_keyword_match_passed_field(self, tmp_path: Path) -> None:
+        golden = tmp_path / "golden.jsonl"
+        _write_golden(golden, [{"question": "Q?", "must_contain": ["x"], "category": "c"}])
+
+        with (
+            self._patch_ollama("x answer", "x answer"),
+            patch(f"{_MOD}.build_rag_context", return_value=None),
+        ):
+            results = run_benchmark(golden_path=golden, lancedb_dir="/fake")
+
+        assert "keyword_match_passed" in results["finetuned"]["results"][0]
+        assert "keyword_match_passed" in results["rag"]["results"][0]
+        assert "passed" not in results["finetuned"]["results"][0]
+
 
 # ── write_benchmark_artifacts ─────────────────────────────────────────────────
 
 
 class TestWriteBenchmarkArtifacts:
-    def test_creates_timestamped_directory(self, tmp_path: Path) -> None:
-        results = {"timestamp": "2026-06-18T00:00:00+00:00", "total": 1}
-        out_path = write_benchmark_artifacts(results, benchmarks_dir=tmp_path)
+    def _results(self, ft: str = "chembl-drug-chat:1b", rag: str = "gemma3:1b") -> dict:
+        return {"finetuned_model": ft, "rag_model": rag, "total": 1}
+
+    def test_filename_contains_model_slugs(self, tmp_path: Path) -> None:
+        out_path = write_benchmark_artifacts(self._results(), out_dir=tmp_path)
+        assert out_path.name == "chembl-drug-chat_1b_vs_gemma3_1b_benchmark.json"
+
+    def test_filename_sanitises_colon(self, tmp_path: Path) -> None:
+        out_path = write_benchmark_artifacts(
+            self._results(ft="my-model:v2", rag="base:3b"), out_dir=tmp_path
+        )
+        assert ":" not in out_path.name
+        assert "my-model_v2_vs_base_3b_benchmark.json" == out_path.name
+
+    def test_writes_to_given_directory(self, tmp_path: Path) -> None:
+        out_path = write_benchmark_artifacts(self._results(), out_dir=tmp_path)
         assert out_path.exists()
-        assert out_path.name == "benchmark_results.json"
-        assert out_path.parent.parent == tmp_path
+        assert out_path.parent == tmp_path
 
     def test_writes_valid_json(self, tmp_path: Path) -> None:
-        results = {"total": 5, "finetuned": {"pass_count": 4}, "rag": {"pass_count": 3}}
-        out_path = write_benchmark_artifacts(results, benchmarks_dir=tmp_path)
+        results = {**self._results(), "total": 5, "finetuned": {"pass_count": 4}, "rag": {"pass_count": 3}}
+        out_path = write_benchmark_artifacts(results, out_dir=tmp_path)
         loaded = json.loads(out_path.read_text())
         assert loaded["total"] == 5
 
-    def test_multiple_runs_get_separate_directories(self, tmp_path: Path) -> None:
-        r1 = write_benchmark_artifacts({"run": 1}, benchmarks_dir=tmp_path)
-        r2 = write_benchmark_artifacts({"run": 2}, benchmarks_dir=tmp_path)
-        # Each run is in its own timestamped subdirectory (may collide within same second,
-        # but the directory must exist and contain the file)
-        assert r1.exists()
-        assert r2.exists()
+    def test_creates_directory_if_missing(self, tmp_path: Path) -> None:
+        out_dir = tmp_path / "nested" / "eval_run"
+        out_path = write_benchmark_artifacts(self._results(), out_dir=out_dir)
+        assert out_path.exists()
 
 
 # ── check_rag_quality ─────────────────────────────────────────────────────────

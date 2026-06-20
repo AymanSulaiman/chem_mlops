@@ -218,10 +218,10 @@ class TestEvalFlow:
         ):
             eval_flow(run_dir, golden_path=golden, eval_output_dir=eval_out)
 
-        metrics_path = eval_out / "metrics.json"
+        metrics_path = eval_out / "finetuned_eval_metrics.json"
         assert metrics_path.exists()
         metrics = json.loads(metrics_path.read_text())
-        assert metrics["passed"] is True
+        assert metrics["eval_gate_passed"] is True
         assert metrics["run"] == "20260615_120000"
 
     def test_metrics_contain_perplexity_values(self, tmp_path: Path) -> None:
@@ -289,10 +289,10 @@ class TestEvalFlow:
             with pytest.raises(RuntimeError):
                 eval_flow(run_dir, golden_path=golden, eval_output_dir=eval_out)
 
-        metrics_path = eval_out / "metrics.json"
+        metrics_path = eval_out / "finetuned_eval_metrics.json"
         assert metrics_path.exists()
         metrics = json.loads(metrics_path.read_text())
-        assert metrics["passed"] is False
+        assert metrics["eval_gate_passed"] is False
 
     def test_golden_results_jsonl_written(self, tmp_path: Path) -> None:
         run_dir = self._make_run_dir(tmp_path)
@@ -314,7 +314,7 @@ class TestEvalFlow:
         ):
             eval_flow(run_dir, golden_path=golden, eval_output_dir=eval_out)
 
-        detail_path = eval_out / "golden_results.jsonl"
+        detail_path = eval_out / "finetuned_golden_results.jsonl"
         assert detail_path.exists()
         rows = [json.loads(line) for line in detail_path.read_text().splitlines() if line.strip()]
         assert rows == fake_results
@@ -334,7 +334,7 @@ class TestEvalFlow:
             metrics = eval_flow(run_dir, golden_path=golden, pass_threshold=0.50,
                                 eval_output_dir=tmp_path / "eval")
 
-        assert metrics["passed"] is True
+        assert metrics["eval_gate_passed"] is True
 
 
 # ── golden.jsonl integrity ────────────────────────────────────────────────────
