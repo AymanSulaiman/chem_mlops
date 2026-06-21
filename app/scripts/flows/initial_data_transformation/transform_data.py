@@ -1,7 +1,7 @@
-import os
 import re
 import shutil
 import sys
+from pathlib import Path
 
 import duckdb
 from duckdb import DuckDBPyConnection
@@ -14,9 +14,12 @@ def transform_data(chembl_version: str = "37") -> None:
     conn: DuckDBPyConnection = duckdb.connect()
     alias = f"chembl{chembl_version}"
     db_path = (
-        f"data/chembl_{chembl_version}/chembl_{chembl_version}_sqlite/chembl_{chembl_version}.db"
+        Path("data")
+        / f"chembl_{chembl_version}"
+        / f"chembl_{chembl_version}_sqlite"
+        / f"chembl_{chembl_version}.db"
     )
-    output_dir = os.path.join("data", "chembl_transform")
+    output_dir = Path("data") / "chembl_transform"
 
     try:
         conn.execute("INSTALL sqlite;")
@@ -27,7 +30,7 @@ def transform_data(chembl_version: str = "37") -> None:
         tables: list[str] = [
             row[0] for row in conn.execute(f"SHOW TABLES FROM {alias};").fetchall()
         ]
-        os.makedirs(output_dir, exist_ok=True)
+        output_dir.mkdir(parents=True, exist_ok=True)
 
         for table in tables:
             print(f"Processing table: {table}")
@@ -38,7 +41,7 @@ def transform_data(chembl_version: str = "37") -> None:
                 print(f"  Table {table} is empty, skipping.")
                 continue
 
-            parquet_path = os.path.join(output_dir, f"{table}.parquet")
+            parquet_path = output_dir / f"{table}.parquet"
             # Stream directly from SQLite to Parquet inside DuckDB —
             # avoids loading any table into Python/Polars memory.
             conn.execute(
@@ -48,8 +51,8 @@ def transform_data(chembl_version: str = "37") -> None:
     finally:
         conn.close()
 
-    chembl_dir = os.path.join("data", f"chembl_{chembl_version}")
-    if os.path.exists(chembl_dir):
+    chembl_dir = Path("data") / f"chembl_{chembl_version}"
+    if chembl_dir.exists():
         try:
             shutil.rmtree(chembl_dir)
             print(f"Removed directory: {chembl_dir}")

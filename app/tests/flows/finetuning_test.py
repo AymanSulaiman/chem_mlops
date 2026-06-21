@@ -266,7 +266,7 @@ class TestGemma3ChemblToonFinetuneFlow:
             split_long_sequences=DEFAULT,
             convert_to_mlx=DEFAULT,
             finetune_lora=DEFAULT,
-            save_to_ollama=DEFAULT,
+            export_to_ollama=DEFAULT,
         ) as mocks:
             mocks["convert_to_mlx"].side_effect = lambda hf, d: d
             mocks["finetune_lora"].side_effect = lambda m, d, *a, **kw: d
@@ -275,7 +275,7 @@ class TestGemma3ChemblToonFinetuneFlow:
         assert mocks["split_long_sequences"].called
         assert mocks["convert_to_mlx"].called
         assert mocks["finetune_lora"].called
-        assert mocks["save_to_ollama"].called
+        assert mocks["export_to_ollama"].called
 
     def test_respects_custom_run_name(self) -> None:
         with patch.multiple(
@@ -283,7 +283,7 @@ class TestGemma3ChemblToonFinetuneFlow:
             split_long_sequences=DEFAULT,
             convert_to_mlx=DEFAULT,
             finetune_lora=DEFAULT,
-            save_to_ollama=DEFAULT,
+            export_to_ollama=DEFAULT,
         ) as mocks:
             mocks["convert_to_mlx"].side_effect = lambda hf, d: d
             mocks["finetune_lora"].side_effect = lambda m, d, *a, **kw: d
@@ -299,7 +299,7 @@ class TestGemma3ChemblToonFinetuneFlow:
             split_long_sequences=DEFAULT,
             convert_to_mlx=DEFAULT,
             finetune_lora=DEFAULT,
-            save_to_ollama=DEFAULT,
+            export_to_ollama=DEFAULT,
         ) as mocks:
             mocks["convert_to_mlx"].side_effect = lambda hf, d: d
             mocks["finetune_lora"].side_effect = lambda m, d, *a, **kw: d
@@ -317,7 +317,7 @@ class TestGemma3ChemblToonFinetuneFlow:
             split_long_sequences=DEFAULT,
             convert_to_mlx=DEFAULT,
             finetune_lora=DEFAULT,
-            save_to_ollama=DEFAULT,
+            export_to_ollama=DEFAULT,
         ) as mocks:
             mocks["convert_to_mlx"].side_effect = lambda hf, d: d
             mocks["finetune_lora"].side_effect = lambda m, d, *a, **kw: d

@@ -2,21 +2,13 @@ from pathlib import Path
 
 import polars as pl
 
-from app.scripts.load_data.load_data import ChemblDataLoader
+_DATA_DIR = Path("data/chembl_transform")
 
 
 def load_tables() -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame]:
-    """
-    Loads the tables with the ChemblDataLoader library
-    """
-    data_dir: Path = Path("data/chembl_transform")
-
-    loader: ChemblDataLoader = ChemblDataLoader(data_dir=data_dir)
-
-    compound_structures = loader.load_table("compound_structures")
-    activities = loader.load_table("activities")
-    molecule_dict = loader.load_table("molecule_dictionary")
-
+    compound_structures = pl.read_parquet(_DATA_DIR / "compound_structures.parquet")
+    activities = pl.read_parquet(_DATA_DIR / "activities.parquet")
+    molecule_dict = pl.read_parquet(_DATA_DIR / "molecule_dictionary.parquet")
     return compound_structures, activities, molecule_dict
 
 

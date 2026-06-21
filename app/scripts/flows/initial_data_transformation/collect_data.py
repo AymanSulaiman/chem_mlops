@@ -1,5 +1,5 @@
-import os
 import tarfile
+from pathlib import Path
 
 import httpx
 from tqdm import tqdm
@@ -9,9 +9,9 @@ _DOWNLOAD_TIMEOUT = httpx.Timeout(10.0, read=300.0)
 
 
 def collect_data(chembl_version: str = "36") -> None:
-    os.makedirs("data", exist_ok=True)
-    url: str = f"https://ftp.ebi.ac.uk/pub/databases/chembl/ChEMBLdb/latest/chembl_{chembl_version}_sqlite.tar.gz"
-    archive_path: str = os.path.join("data", f"chembl_{chembl_version}_sqlite.tar.gz")
+    Path("data").mkdir(exist_ok=True)
+    url = f"https://ftp.ebi.ac.uk/pub/databases/chembl/ChEMBLdb/latest/chembl_{chembl_version}_sqlite.tar.gz"
+    archive_path = Path("data") / f"chembl_{chembl_version}_sqlite.tar.gz"
 
     try:
         print("Downloading ChEMBL SQLite archive...")
@@ -19,7 +19,7 @@ def collect_data(chembl_version: str = "36") -> None:
             r.raise_for_status()
             total_size = int(r.headers.get("content-length", 0) or 0)
             with (
-                open(archive_path, "wb") as f,
+                archive_path.open("wb") as f,
                 tqdm(total=total_size, unit="B", unit_scale=True, desc="Downloading") as pbar,
             ):
                 for chunk in r.iter_bytes(chunk_size=8192):
@@ -30,8 +30,8 @@ def collect_data(chembl_version: str = "36") -> None:
         with tarfile.open(archive_path, "r:gz") as tar:
             tar.extractall(path="data", filter="data")
     finally:
-        if os.path.exists(archive_path):
+        if archive_path.exists():
             print("Removing archive...")
-            os.remove(archive_path)
+            archive_path.unlink()
 
     print("Done.")

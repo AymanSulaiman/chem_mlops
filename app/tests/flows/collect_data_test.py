@@ -52,30 +52,22 @@ class TestCollectData:
 
     @patch("httpx.stream")
     @patch("tarfile.open")
-    @patch("os.path.exists", return_value=True)
-    @patch("os.remove")
     @patch("app.scripts.flows.initial_data_transformation.collect_data.tqdm")
     def test_collect_data_success(
         self,
         mock_tqdm,
-        mock_remove,
-        mock_exists,
         mock_tarfile,
         mock_httpx_stream,
         temp_data_dir,
         mock_response,
     ):
         """Test successful data collection."""
-        # Setup mocks
         mock_httpx_stream.return_value.__enter__.return_value = mock_response
         mock_tarfile.return_value.__enter__.return_value.extractall = MagicMock()
         mock_tqdm.return_value.__enter__.return_value.update = MagicMock()
 
-        # Mock file operations
-        with patch("builtins.open", mock_open()) as mock_file:
-            collect_data()
+        collect_data()
 
-        # Verify httpx.stream was called with correct URL and a timeout
         expected_url = (
             "https://ftp.ebi.ac.uk/pub/databases/chembl/ChEMBLdb/latest/chembl_36_sqlite.tar.gz"
         )
@@ -83,16 +75,8 @@ class TestCollectData:
             "GET", expected_url, follow_redirects=True, timeout=ANY
         )
 
-        # Verify file was opened for writing
-        mock_file.assert_called_once_with(os.path.join("data", "chembl_36_sqlite.tar.gz"), "wb")
-
-        # Verify tarfile operations
-        mock_tarfile.assert_called_once_with(
-            os.path.join("data", "chembl_36_sqlite.tar.gz"), "r:gz"
-        )
-
-        # Verify cleanup
-        mock_remove.assert_called_once_with(os.path.join("data", "chembl_36_sqlite.tar.gz"))
+        archive_path = Path("data") / "chembl_36_sqlite.tar.gz"
+        mock_tarfile.assert_called_once_with(archive_path, "r:gz")
 
     @patch("httpx.stream")
     def test_download_request_failure(self, mock_httpx_stream, temp_data_dir):
@@ -124,12 +108,10 @@ class TestCollectData:
 
     @patch("httpx.stream")
     @patch("tarfile.open")
-    @patch("os.path.exists", return_value=True)
-    @patch("os.remove")
+    @patch("pathlib.Path.unlink", side_effect=OSError("Permission denied"))
     def test_file_cleanup_failure(
         self,
-        mock_remove,
-        mock_exists,
+        mock_unlink,
         mock_tarfile,
         mock_httpx_stream,
         temp_data_dir,
@@ -138,11 +120,9 @@ class TestCollectData:
         """Test handling of file cleanup failures."""
         mock_httpx_stream.return_value.__enter__.return_value = mock_response
         mock_tarfile.return_value.__enter__.return_value.extractall = MagicMock()
-        mock_remove.side_effect = OSError("Permission denied")
 
-        with patch("builtins.open", mock_open()):
-            with pytest.raises(OSError, match="Permission denied"):
-                collect_data()
+        with pytest.raises(OSError, match="Permission denied"):
+            collect_data()
 
     @patch("httpx.stream")
     @patch("tarfile.open")
@@ -227,23 +207,19 @@ class TestCollectData:
         with pytest.raises(IOError, match="Disk full"):
             collect_data()
 
-    @patch("os.makedirs")
+    @patch("pathlib.Path.mkdir", side_effect=PermissionError("Permission denied"))
     @patch("httpx.stream")
-    def test_makedirs_permission_error(self, mock_httpx_stream, mock_makedirs, temp_data_dir):
+    def test_makedirs_permission_error(self, mock_httpx_stream, mock_mkdir, temp_data_dir):
         """Test handling of directory creation permission errors."""
-        mock_makedirs.side_effect = PermissionError("Permission denied")
-
         with pytest.raises(PermissionError, match="Permission denied"):
             collect_data()
 
     @patch("httpx.stream")
     @patch("tarfile.open")
-    @patch("os.remove")
     @patch("app.scripts.flows.initial_data_transformation.collect_data.tqdm")
     def test_integration_with_real_tar_operations(
         self,
         mock_tqdm,
-        mock_remove,
         mock_tarfile,
         mock_httpx_stream,
         temp_data_dir,
@@ -251,7 +227,7 @@ class TestCollectData:
         mock_tarfile_content,
     ):
         """Integration test with actual tar file operations."""
-        archive_path = os.path.join("data", "chembl_36_sqlite.tar.gz")
+        archive_path = Path("data") / "chembl_36_sqlite.tar.gz"
 
         os.makedirs("data", exist_ok=True)
         import shutil
@@ -259,16 +235,16 @@ class TestCollectData:
         shutil.copy2(mock_tarfile_content, archive_path)
 
         mock_resp = MagicMock()
-        mock_resp.headers = {"content-length": str(os.path.getsize(archive_path))}
-        mock_resp.iter_bytes.return_value = [Path(archive_path).read_bytes()]
+        mock_resp.headers = {"content-length": str(archive_path.stat().st_size)}
+        mock_resp.iter_bytes.return_value = [archive_path.read_bytes()]
         mock_resp.raise_for_status.return_value = None
         mock_httpx_stream.return_value.__enter__.return_value = mock_resp
+        mock_tqdm.return_value.__enter__.return_value = MagicMock()
 
         mock_tar = MagicMock()
         mock_tarfile.return_value.__enter__.return_value = mock_tar
 
-        with patch("builtins.open", mock_open(read_data=Path(archive_path).read_bytes())):
-            collect_data()
+        collect_data()
 
         mock_tarfile.assert_called_once_with(archive_path, "r:gz")
         mock_tar.extractall.assert_called_once_with(path="data", filter="data")

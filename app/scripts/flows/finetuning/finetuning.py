@@ -1,16 +1,10 @@
 import json
-import shutil
 import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
 
-from app.scripts.flows.finetuning.export_to_ollama import (
-    DEFAULT_MODEL_NAME as OLLAMA_MODEL_NAME,
-)
-from app.scripts.flows.finetuning.export_to_ollama import (
-    SYSTEM_PROMPT as OLLAMA_SYSTEM_PROMPT,
-)
+from app.scripts.flows.finetuning.export_to_ollama import export_to_ollama
 
 HF_MODEL_ID = "google/gemma-3-1b-pt"
 DATA_DIR = Path("data/llm_finetune")
@@ -189,76 +183,6 @@ def finetune_lora(
     return adapter_dir
 
 
-def save_to_ollama(
-    mlx_model_dir: Path,
-    adapter_dir: Path,
-    model_name: str = OLLAMA_MODEL_NAME,
-) -> None:
-    """Fuse adapter, convert to GGUF via llama.cpp, and register with Ollama.
-
-    Uses a two-step process because mlx_lm's --export-gguf does not support
-    gemma3_text:
-      1. mlx_lm fuse --save-path  →  HuggingFace safetensors format
-      2. convert_hf_to_gguf.py    →  GGUF (F16)
-    """
-    output_dir = mlx_model_dir.parent / "ollama"
-
-    if output_dir.exists():
-        shutil.rmtree(output_dir)
-
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    fused_hf_dir = output_dir / "fused_hf"
-    gguf_path = output_dir / "chembl-drug-chat.gguf"
-
-    # Step 1: fuse LoRA into base model, save as HF safetensors
-    _run(
-        [
-            "python",
-            "-m",
-            "mlx_lm",
-            "fuse",
-            "--model",
-            str(mlx_model_dir),
-            "--adapter-path",
-            str(adapter_dir),
-            "--save-path",
-            str(fused_hf_dir),
-            "--de-quantize",
-        ]
-    )
-
-    # Step 2: convert HF safetensors → GGUF (no PyTorch needed)
-    from app.scripts.flows.finetuning.convert_gemma3_gguf import convert as _gguf_convert
-
-    _gguf_convert(fused_hf_dir, gguf_path)
-
-    modelfile_path = output_dir / "Modelfile"
-    modelfile_path.write_text(
-        f"FROM {gguf_path.resolve()}\n\n"
-        f'SYSTEM """\n{OLLAMA_SYSTEM_PROMPT}\n"""\n\n'
-        'TEMPLATE """'
-        "{{- if .System }}{{ .System }}\n\n{{ end -}}"
-        "{{- range .Messages -}}"
-        '{{- if eq .Role "user" }}### Question\n{{ .Content }}\n\n### Answer\n'
-        '{{- else if eq .Role "assistant" }}{{ .Content }}\n\n{{ end -}}'
-        '{{- end -}}"""\n\n'
-        "PARAMETER temperature 0.7\n"
-        "PARAMETER top_p 0.9\n"
-        "PARAMETER repeat_penalty 1.5\n"  # raised from 1.3 — harder penalty for repetition
-        "PARAMETER repeat_last_n 512\n"  # raised from 256 — catches longer repeated phrases
-        "PARAMETER num_ctx 1024\n"  # reduced from 2048 — limits context carry-over
-        "PARAMETER num_predict 300\n"  # reduced from 400 — shorter, less rambling
-        'PARAMETER stop "### Question"\n'
-        'PARAMETER stop "### Answer"\n'
-    )
-
-    _run(["ollama", "create", model_name, "-f", str(modelfile_path)])
-
-    print(f"\nOllama model '{model_name}' created successfully!")
-    print(f"  Run with: ollama run {model_name}")
-
-
 def gemma3_chembl_toon_finetune_flow(
     hf_model_id: str = HF_MODEL_ID,
     data_dir: str = str(DATA_DIR),
@@ -304,10 +228,7 @@ def gemma3_chembl_toon_finetune_flow(
     print(f"Training log: {log_file}")
     print(f"{'=' * 60}\n")
 
-    save_to_ollama(
-        mlx_model_dir=mlx_model_dir,
-        adapter_dir=adapter_dir,
-    )
+    export_to_ollama(run_dir=run_dir, force=True)
 
 
 if __name__ == "__main__":

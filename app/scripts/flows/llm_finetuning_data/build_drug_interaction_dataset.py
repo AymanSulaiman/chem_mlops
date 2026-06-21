@@ -738,11 +738,11 @@ def generate_approved_product_qa(
         chembl_id = mol.get("chembl_id", "")
 
         seen: set[str] = set()
-        unique_prods = [
-            p
-            for p in prods
-            if not (seen.add(p["trade_name"]) or p["trade_name"] in seen - {p["trade_name"]})
-        ]  # type: ignore[func-returns-value]
+        unique_prods = []
+        for p in prods:
+            if p["trade_name"] not in seen:
+                seen.add(p["trade_name"])
+                unique_prods.append(p)
 
         routes = list(dict.fromkeys(p["route"] for p in unique_prods if p["route"]))
         forms = list(dict.fromkeys(p["dosage_form"] for p in unique_prods if p["dosage_form"]))
@@ -809,10 +809,6 @@ def _cyp_severity(enzyme: str) -> str:
         if cyp in enzyme_upper or cyp.replace("CYP", "") in enzyme_upper:
             return sev
     return "LOW"
-
-
-def _article(word: str) -> str:
-    return "an" if word[:1].lower() in "aeiou" else "a"
 
 
 def _pd_interaction_type(action_a: str, action_b: str) -> tuple[str, str]:
@@ -1416,8 +1412,8 @@ def generate_pd_interaction_qa(
                 name_b, id_b = _drug_name(mol_b), mol_b.get("chembl_id", "")
                 interaction_type, explanation = _pd_interaction_type(action_a, action_b)
 
-                art_a = _article(action_a)
-                art_b = _article(action_b)
+                art_a = "an" if action_a[:1].lower() in "aeiou" else "a"
+                art_b = "an" if action_b[:1].lower() in "aeiou" else "a"
                 yield {
                     "text": (
                         f"### Question\nWhat is the pharmacodynamic interaction between "

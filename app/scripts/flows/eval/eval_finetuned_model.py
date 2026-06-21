@@ -9,9 +9,9 @@ Two complementary signals:
      Each item has a "must_contain" list of keywords that a correct answer must
      include (case-insensitive).  Pass rate must meet EVAL_PASS_THRESHOLD.
 
-Artifacts written to artifacts/<run>/eval/:
-  metrics.json       — summary (perplexity, pass rate, threshold result)
-  golden_results.jsonl — per-question detail (question, response, passed)
+Artifacts written to data/eval/<run>/:
+  finetuned_eval_metrics.json       — summary (perplexity, pass rate, threshold result)
+  finetuned_golden_results.jsonl    — per-question detail (question, response, passed)
 """
 
 import json
@@ -105,16 +105,21 @@ def run_golden_benchmark(
     adapter_dir: Path,
     golden_path: Path = GOLDEN_BENCHMARK_PATH,
     max_tokens: int = 300,
+    model_label: str = "chembl-drug-chat (MLX LoRA)",
 ) -> dict[str, Any]:
     """
     Run the golden benchmark: generate a response per question and check that
     every keyword in must_contain appears in the (lowercased) response.
+
+    Scoring: keyword_match — a question passes if every word in must_contain
+    appears anywhere in the response (case-insensitive).
 
     Args:
         mlx_model_dir: Path to the MLX base model directory.
         adapter_dir:   LoRA adapter to evaluate.
         golden_path:   Path to golden.jsonl benchmark file.
         max_tokens:    Maximum tokens to generate per question.
+        model_label:   Human-readable model identifier written into each result.
 
     Returns:
         Dict with keys: pass_count, total, pass_rate, results (per-question list).
@@ -154,10 +159,11 @@ def run_golden_benchmark(
 
         results.append(
             {
+                "model": model_label,
                 "question": question,
                 "category": item.get("category", ""),
                 "must_contain": item["must_contain"],
-                "passed": hit,
+                "keyword_match_passed": hit,
                 "response": response.strip(),
             }
         )
@@ -180,21 +186,25 @@ def eval_flow(
     golden_path: Path = GOLDEN_BENCHMARK_PATH,
     pass_threshold: float = EVAL_PASS_THRESHOLD,
     num_batches: int = 50,
+    eval_output_dir: Path | None = None,
 ) -> dict[str, Any]:
     """
     Full evaluation: perplexity check + golden benchmark.
 
-    Writes artifacts/<run>/eval/metrics.json and golden_results.jsonl.
+    Writes metrics.json and golden_results.jsonl to eval_output_dir
+    (default: data/eval/<run_name>/).
     Raises RuntimeError if the fine-tuned model regresses on perplexity or
     if the golden benchmark pass rate falls below pass_threshold — blocking
     the downstream Ollama export.
 
     Args:
-        run_dir:        Fine-tuning artifact directory (e.g. artifacts/20260615_120000).
-        data_dir:       Directory containing train/valid JSONL splits.
-        golden_path:    Path to golden.jsonl benchmark file.
-        pass_threshold: Minimum acceptable golden benchmark pass rate [0, 1].
-        num_batches:    Batches to use for perplexity evaluation (-1 for all).
+        run_dir:          Fine-tuning artifact directory (e.g. artifacts/20260615_120000).
+        data_dir:         Directory containing train/valid JSONL splits.
+        golden_path:      Path to golden.jsonl benchmark file.
+        pass_threshold:   Minimum acceptable golden benchmark pass rate [0, 1].
+        num_batches:      Batches to use for perplexity evaluation (-1 for all).
+        eval_output_dir:  Where to write metrics/results. Defaults to
+                          data/eval/<run_dir.name>/.
 
     Returns:
         Metrics dict (same content as metrics.json).
@@ -204,7 +214,7 @@ def eval_flow(
     """
     mlx_model_dir = run_dir / DEFAULT_MLX_SUBDIR
     adapter_dir = run_dir / DEFAULT_ADAPTER_SUBDIR
-    eval_dir = run_dir / "eval"
+    eval_dir = eval_output_dir if eval_output_dir is not None else Path("data/eval") / run_dir.name
     eval_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"\n{'=' * 60}")
@@ -223,24 +233,30 @@ def eval_flow(
     print(f"  Fine-tuned perplexity: {finetuned_ppl:.3f}")
 
     # ── 2. Golden benchmark ───────────────────────────────────────
+    model_label = f"chembl-drug-chat (MLX LoRA, run={run_dir.name})"
     print(f"\nRunning golden benchmark ({golden_path}) ...")
-    golden = run_golden_benchmark(mlx_model_dir, adapter_dir, golden_path)
+    golden = run_golden_benchmark(mlx_model_dir, adapter_dir, golden_path, model_label=model_label)
     print(f"  Pass rate: {golden['pass_count']}/{golden['total']} ({golden['pass_rate']:.1%})")
 
     # ── 3. Write artifacts ────────────────────────────────────────
     metrics: dict[str, Any] = {
+        "eval_type": "finetuned_model_eval",
+        "scoring_method": "keyword_match — question passes if all must_contain keywords appear in response (case-insensitive)",
         "run": run_dir.name,
+        "model": model_label,
+        "mlx_model_dir": str(run_dir / DEFAULT_MLX_SUBDIR),
+        "adapter_dir": str(run_dir / DEFAULT_ADAPTER_SUBDIR),
         "baseline_perplexity": round(baseline_ppl, 3),
         "finetuned_perplexity": round(finetuned_ppl, 3),
-        "golden_pass": golden["pass_count"],
+        "golden_pass_count": golden["pass_count"],
         "golden_total": golden["total"],
         "golden_pass_rate": round(golden["pass_rate"], 4),
         "pass_threshold": pass_threshold,
-        "passed": True,
+        "eval_gate_passed": True,
     }
 
-    metrics_path = eval_dir / "metrics.json"
-    detail_path = eval_dir / "golden_results.jsonl"
+    metrics_path = eval_dir / "finetuned_eval_metrics.json"
+    detail_path = eval_dir / "finetuned_golden_results.jsonl"
     detail_path.write_text("\n".join(json.dumps(r) for r in golden["results"]) + "\n")
 
     # ── 4. Gate checks ────────────────────────────────────────────
@@ -257,7 +273,7 @@ def eval_flow(
         )
 
     if failures:
-        metrics["passed"] = False
+        metrics["eval_gate_passed"] = False
         metrics_path.write_text(json.dumps(metrics, indent=2) + "\n")
         raise RuntimeError(
             "Eval failed — blocking Ollama export:\n" + "\n".join(f"  • {f}" for f in failures)

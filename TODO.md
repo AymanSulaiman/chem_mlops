@@ -22,18 +22,12 @@
 
 ## 🔥 Immediate
 
+~~All immediate tasks complete.~~
+
 | # | Task |
 |---|---|
-| 1 | Regenerate training data with all current fixes |
-| 2 | Retrain model on improved dataset |
-
-```bash
-# Step 1 — regenerate
-uv run python -m app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset
-
-# Step 2 — retrain
-uv run python -m app.scripts.flows.finetuning.finetuning
-```
+| ~~1~~ | ~~Regenerate training data with all current fixes~~ |
+| ~~2~~ | ~~Retrain model on improved dataset~~ |
 
 ---
 
@@ -62,7 +56,7 @@ uv run python -m app.scripts.flows.finetuning.finetuning
 |---|---|---|
 | ~~8~~ | ~~Add tests for `build_finetune_dataset.py`~~ | ~~High~~ |
 | ~~9~~ | ~~Add tests for `export_to_ollama.py` (mock subprocess calls)~~ | ~~Medium~~ |
-| ~~10~~ | ~~Add Dagster op/graph wiring test for `data_transformation.py`~~ | ~~Medium~~ |
+| ~~10~~ | ~~Add Dagster op/graph wiring test for `chembl_drug_chat_pipeline.py`~~ | ~~Medium~~ |
 
 ---
 
@@ -73,7 +67,7 @@ uv run python -m app.scripts.flows.finetuning.finetuning
 | ~~12~~ | ~~Add perplexity eval on `valid.jsonl` after fine-tuning~~ | ~~High~~ |
 | ~~13~~ | ~~Build a small golden benchmark (20–50 known drug questions with expected answers)~~ | ~~High~~ |
 | ~~14~~ | ~~Wire eval as a Dagster op that runs after fine-tuning and gates the Ollama export~~ | ~~Medium~~ |
-| ~~15~~ | ~~Log eval metrics (perplexity, exact-match %) to a file under `artifacts/<run>/`~~ | ~~Medium~~ |
+| ~~15~~ | ~~Log eval metrics (perplexity, exact-match %) to a file under `data/eval/<run>/`~~ | ~~Medium~~ |
 
 ---
 
@@ -112,7 +106,7 @@ Two serving modes are live, each with a distinct trade-off:
 |---|---|---|
 | ~~23~~ | ~~Build a RAG inference wrapper — query LanceDB with the user's drug name / SMILES, format the top-k records into a system-prompt prefix, then call the model~~ | ~~High~~ |
 | ~~24~~ | ~~Wire the RAG wrapper into the Bun web app as a toggle ("Standard" vs "RAG" mode)~~ | ~~Medium~~ |
-| 25 | Benchmark RAG vs fine-tuned on the golden set and record results in `artifacts/` | Medium |
+| ~~25~~ | ~~Benchmark RAG vs fine-tuned on the golden set — `data/eval/<run>/<ft>_vs_<rag>_benchmark.json`~~ | ~~Medium~~ |
 | 26 | Register a second Ollama model (`chembl-drug-chat:1b-rag`) that uses a RAG-aware Modelfile system prompt | Low |
 
 ---
@@ -146,11 +140,13 @@ Two serving modes are live, each with a distinct trade-off:
 - [x] Junk name filter (numeric `pref_name`, `AUTONOM` placeholders)
 - [x] Filler phrase removal from training templates
 - [x] Assay context questions capped at 5,000 (was 1.93M = 73% of data)
-- [x] Model evaluation — perplexity + golden benchmark, gates Ollama export (`app/scripts/flows/eval/eval_model.py`, `data/eval/golden.jsonl`)
+- [x] Model evaluation — perplexity + keyword-match golden benchmark, gates Ollama export (`app/scripts/flows/eval/eval_finetuned_model.py`, `app/scripts/flows/eval/golden.jsonl`) — outputs `data/eval/<run>/finetuned_eval_metrics.json` and `finetuned_golden_results.jsonl`
+- [x] RAG vs fine-tuned benchmark — keyword-match scoring on golden set, `winner` + `delta_description` fields, co-located with eval output as `<ft>_vs_<rag>_benchmark.json` (`app/scripts/flows/eval/benchmark_rag_vs_finetuned.py`)
 - [x] `uv` environment caching in CI (`enable-cache: true`)
 - [x] Tests for `export_to_ollama.py` — `app/tests/flows/export_to_ollama_test.py`
-- [x] Tests for `data_transformation.py` (Dagster wiring) — `app/tests/flows/transform_data_test.py`
+- [x] Tests for `chembl_drug_chat_pipeline.py` (Dagster wiring) — `app/tests/flows/transform_data_test.py`
 - [x] TWOSIDES polypharmacy dataset — download (stream-decompress-in-memory → Parquet), QA category 21 in training corpus, `polypharmacy` LanceDB table with scalar indexes, `query_polypharmacy` / `query_drug_side_effects` query API, Dagster ops wired as parallel download fanning into both dataset builder and LanceDB ingest
 - [x] RAG inference wrapper (`web/src/rag.ts`) — `extractDrugCandidates`, `buildRagContext` (queries `compounds` + `polypharmacy` tables via `@lancedb/lancedb` TypeScript client), `augmentMessages`; no Python server needed
 - [x] Standard / RAG mode toggle in Bun web app — Standard uses `chembl-drug-chat:1b` (fine-tuned), RAG uses `gemma3:1b` (base) with LanceDB context injected as system message
 - [x] Modelfile template bug fix — `{{ else` not `{{- else` after `### Answer`; removed `### Answer` stop token (caused immediate EOS); `repeat_penalty 1.1`, `num_ctx 2048`, `num_predict 512`; fix applied to both `export_to_ollama.py` (future runs) and the current artifact Modelfile
+- [x] Regenerate training data with all improvements (TWOSIDES, CYP, PD interactions, severity scoring, P-gp) and retrain `chembl-drug-chat:1b`
