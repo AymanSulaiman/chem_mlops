@@ -57,8 +57,21 @@ The pipeline is orchestrated with **Dagster** and runs entirely locally.
 ```bash
 git clone https://github.com/AymanSulaiman/chem_mlops.git
 cd chem_mlops
-uv sync
+bash install.sh
 ```
+
+`install.sh` requires macOS on Apple Silicon (arm64). It installs Homebrew (if missing), then `uv`, `bun`, and `ollama` via Homebrew, syncs Python and Bun dependencies, pulls the `gemma3:1b` base model, and runs the full Dagster pipeline end-to-end. Expect 2–3 hours on first run (ChEMBL download + fine-tuning).
+
+**Manual setup** (if you prefer step-by-step):
+
+```bash
+brew install uv bun ollama
+uv sync
+cd web && bun install && cd ..
+ollama pull gemma3:1b
+```
+
+Then run the pipeline manually — see [Pipeline](#pipeline) below.
 
 ---
 
@@ -422,6 +435,7 @@ chem_mlops/
 │   └── twosides/TWOSIDES.parquet          # PRR-filtered FAERS pairs (~50 MB, gitignored)
 ├── deployments/workspace.yaml             # Dagster code-location config
 ├── artifacts/                             # Fine-tuning run outputs (gitignored)
+├── install.sh                             # One-command installer for Apple Silicon Macs
 └── pyproject.toml
 ```
 
