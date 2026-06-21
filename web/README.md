@@ -1,90 +1,116 @@
 # Bun Web App
 
-Browser chat interface for the ChEMBL Drug Chat models. Supports two inference modes selectable via a Standard / RAG pill toggle.
+A streaming chat interface that serves the fine-tuned and RAG models **side by side**, so you can compare their answers on the same question simultaneously.
+
+```
+┌─────────────────────────────────────────────────────┐
+│  Chem MLOps Chat                  chembl-drug-chat  │
+├──────────────────────────┬──────────────────────────┤
+│  Finetuned               │  RAG                     │
+│  chembl-drug-chat:1b     │  gemma3:1b               │
+│                          │                          │
+│  [streamed response...]  │  [streamed response...]  │
+│                          │                          │
+├──────────────────────────┴──────────────────────────┤
+│  Message both models...                      [Send] │
+└─────────────────────────────────────────────────────┘
+```
+
+Sending a message fires both requests in parallel. Responses stream token-by-token from Ollama and render as markdown. Each pane keeps its own independent conversation history.
+
+---
 
 ## Modes
 
-| Mode | Model | How it works |
+| Pane | Model | How it works |
 |------|-------|-------------|
-| **Standard** | `chembl-drug-chat:1b` | Fine-tuned Gemma 3 1B, no retrieval |
-| **RAG** | `gemma3:1b` | Base Gemma 3 1B + LanceDB context injected as system message |
+| **Finetuned** | `chembl-drug-chat:1b` | LoRA-tuned Gemma 3 1B; domain-aware and fast |
+| **RAG** | `gemma3:1b` (base) | LanceDB context injected as system message; grounded in live ChEMBL + TWOSIDES records |
 
-In RAG mode the Bun backend extracts drug-name candidates from the user's message, queries the `compounds` and `polypharmacy` LanceDB tables via the `@lancedb/lancedb` TypeScript client (reads the same Lance files written by the Python pipeline — no Python server needed), and prepends a pharmacological context block before forwarding to Ollama.
+---
 
 ## Folder structure
 
-```text
+```
 web/
 ├── public/
-│   ├── index.html          # Standard / RAG pill toggle + chat UI
-│   └── style.css
+│   ├── index.html          # Dual-pane layout (Finetuned | RAG)
+│   ├── style.css
+│   └── frontend.js         # Bundled from src/frontend.ts at server startup
 ├── src/
-│   ├── app.ts              # Request handler, model detection, Standard/RAG routing
+│   ├── app.ts              # Request handler, Ollama streaming proxy, model detection
 │   ├── rag.ts              # extractDrugCandidates, buildRagContext, augmentMessages
-│   ├── frontend.ts         # Browser: mode toggle state, chat history, submit handler
-│   └── frontend-helpers.ts # Formatting helpers (testable, no DOM deps)
+│   ├── frontend.ts         # Parallel streaming, per-pane history, markdown rendering
+│   └── frontend-helpers.ts # renderMarkdown, formatReplyText (no DOM deps, testable)
 ├── test/
-│   ├── app.test.ts         # Handler routing, model detection, RAG model selection
+│   ├── app.test.ts         # Handler routing, streaming, model detection, RAG model selection
 │   ├── rag.test.ts         # extractDrugCandidates, augmentMessages, buildRagContext
-│   ├── chat.test.ts
-│   ├── frontend.test.ts
-│   └── model.test.ts
+│   ├── chat.test.ts        # normalizeMessages
+│   ├── frontend.test.ts    # renderMarkdown, formatReplyText
+│   └── model.test.ts       # pickLatestModel
 ├── package.json
-└── server.ts               # Bun.serve entry point
+├── .env                    # Working defaults — loaded automatically by Bun
+└── server.ts               # Bun.serve entry point + frontend bundle step
 ```
+
+---
 
 ## How it works
 
 ```mermaid
 flowchart LR
-    BR([Browser]) -->|POST /api/chat\nmode: standard | raft| BUN[Bun backend\nsrc/app.ts]
+    BR([Browser]) -->|POST /api/chat\nmode: finetuned| BUN[Bun backend\nsrc/app.ts]
+    BR -->|POST /api/chat\nmode: rag| BUN
 
-    BUN -->|Standard\ndetect latest chembl-drug-chat| OLL[(Ollama\nchembl-drug-chat:1b)]
-
-    BUN -->|RAG\nbuildRagContext| LDB[(LanceDB\ncompounds +\npolypharmacy)]
+    BUN -->|Finetuned\ndetect latest chembl-drug-chat| OLL[(Ollama\nchembl-drug-chat:1b)]
+    BUN -->|RAG — buildRagContext| LDB[(LanceDB\ncompounds +\npolypharmacy)]
     LDB -->|context string| BUN
     BUN -->|augmented messages| OLL2[(Ollama\ngemma3:1b)]
 
-    OLL -->|reply| BR
-    OLL2 -->|reply| BR
+    OLL -->|NDJSON stream| BR
+    OLL2 -->|NDJSON stream| BR
 ```
 
 ### `server.ts`
 
-- Bundles `src/frontend.ts` into `public/frontend.js` at startup
-- Starts Bun.serve on port `3000`
-- Passes `ragModelName` and `ragLancedbDir` to the app handler
+- Bundles `src/frontend.ts` into `public/frontend.js` via `Bun.build` at startup
+- Starts `Bun.serve` on port `3000`
 
 ### `src/app.ts`
 
-- Normalises chat messages
+- Normalises and validates incoming chat messages
 - Detects the latest `chembl-drug-chat:*` Ollama model (cached 15 s)
-- Routes `mode: "standard"` → fine-tuned model
+- Routes `mode: "finetuned"` → fine-tuned model
 - Routes `mode: "rag"` → `buildRagContext` → `augmentMessages` → base `gemma3:1b`
-- Serves `index.html`, `style.css`, `frontend.js`
-- `/api/health` and `/api/model` debug endpoints
+- Proxies the Ollama NDJSON stream through a `TransformStream` that snoops the final `done: true` chunk to log token counts and latency
+- Returns `x-model` / `x-source` headers alongside the streamed body
+- Serves static files, `/api/health`, and `/api/model` (returns both finetuned and RAG model names)
 
 ### `src/rag.ts`
 
-- `extractDrugCandidates(text)` — regex extracts capitalised words, filters stopwords, title-cases to match DB format
-- `buildRagContext(message, lancedbDir)` — queries `compounds` table by name and `polypharmacy` table for pair signals and top per-drug partners; returns a bullet-list context string or `null` if nothing is found
+- `extractDrugCandidates(text)` — regex extracts capitalised words, filters a stopword list, title-cases to match DB format
+- `buildRagContext(message, lancedbDir)` — queries `compounds` by name and `polypharmacy` for pair signals and top per-drug partners; returns a bullet-list context string or `null` if nothing is found
 - `augmentMessages(messages, context)` — prepends `{ role: "system", content: context }` to the history
 
 ### `src/frontend.ts`
 
-- Gets page elements including `#mode-standard` and `#mode-rag` toggle buttons
-- Tracks `currentMode: "standard" | "rag"` (default `"standard"`)
-- Includes `mode: currentMode` in every POST body
-- Renders replies in the message feed; supports Enter-to-send / Shift+Enter for newline
+- Holds two independent `histories` (`finetuned` and `rag`)
+- On submit: adds user bubble to both panes, fires both fetches with `Promise.all`, streams each response independently with `Promise.allSettled`
+- During streaming: `textContent` is updated chunk-by-chunk for live output
+- On stream end: switches to `innerHTML = renderMarkdown(accumulated)` for formatted display
+- Pane headers show the live model name fetched from `/api/model`
 
 ### `src/frontend-helpers.ts`
 
-- Keeps small UI formatting logic (`formatModelLabel`, `formatReplyText`) separate and testable
+- `renderMarkdown(text)` — escapes HTML then applies regex transforms for code blocks, inline code, bold, italic, and newlines; no dependency added
+- `formatReplyText(reply)` — falls back to `"(empty response)"` when the model returns blank
+
+---
 
 ## Run the app
 
 ```bash
-# Dev mode — hot reload on file changes
+# Dev mode — hot reload
 cd web
 bun run dev
 
@@ -93,44 +119,53 @@ cd web
 bun run start
 ```
 
-Then open `http://localhost:3000`.
+Open [http://localhost:3000](http://localhost:3000).
 
-## Run the tests
+---
+
+## Tests
 
 ```bash
 cd web
 bun test
 ```
 
+---
+
 ## Required services
+
+Both Ollama models must be available before starting the server:
 
 ```bash
 ollama serve
-```
-
-The Standard mode uses the newest `chembl-drug-chat:*` model. RAG mode uses `gemma3:1b`. Both must be present in Ollama:
-
-```bash
 ollama list | grep -E "chembl-drug-chat|gemma3"
 ```
 
+The finetuned pane uses the newest `chembl-drug-chat:*` tag. The RAG pane uses `gemma3:1b` (or whatever `RAG_MODEL_NAME` is set to in `.env`).
+
+---
+
 ## Environment variables
 
-A `.env` file with working defaults is committed at `web/.env` — Bun loads it automatically, so no setup is needed. Edit it to point at a different Ollama host, swap the RAG model, or override the LanceDB path:
+`web/.env` is committed with working defaults — Bun loads it automatically:
 
 ```bash
 PORT=3000
 OLLAMA_BASE_URL=http://127.0.0.1:11434
 OLLAMA_MODEL_PREFIX=chembl-drug-chat
-OLLAMA_MODEL_NAME=chembl-drug-chat:1b   # fallback if /api/tags fails
-RAG_MODEL_NAME=gemma3:1b                # model used in RAG mode
+OLLAMA_MODEL_NAME=chembl-drug-chat:1b   # fallback if /api/tags is unreachable
+RAG_MODEL_NAME=gemma3:1b                # model used in the RAG pane
 # LANCEDB_DIR=                          # default: auto-resolved from web/src/rag.ts
 ```
 
-## UI behaviour
+---
 
-- Dark theme by default
-- **Standard / RAG pill toggle** in the header — persists for the session
-- Enter sends; Shift+Enter adds a newline
-- Input textarea grows as you type
-- Model label shows which Ollama tag is active and how it was selected
+## Observability
+
+Each inference request logs a JSON line to stdout:
+
+```json
+{"ts":"...","model":"chembl-drug-chat:1b","source":"ollama-tags","latencyMs":342,"promptTokens":61,"completionTokens":87,"evalDurationMs":2445,"totalDurationMs":5589}
+```
+
+Fields come from the Ollama `done: true` chunk and wall-clock time around the request. Pipe to `jq` or any log aggregator.

@@ -1,28 +1,26 @@
 # ChEMBL → LanceDB Vector Store
 
 This module ingests all ChEMBL compound data into a LanceDB vector store for
-Retrieval-Augmented Generation (RAG) at inference time — replacing the
-hallucination-prone fine-tuning approach with grounded, lookup-based answers.
+Retrieval-Augmented Generation (RAG) at inference time.
 
 ---
 
-## Why RAG instead of fine-tuning?
+## Why RAG alongside fine-tuning?
 
 Fine-tuning teaches a model to *sound like* a domain expert. It does not give
-the model access to ground truth records. When asked "what are the known
+the model reliable access to ground truth records. When asked "what are the known
 metabolic enzymes for ibuprofen?", a fine-tuned model will generate a
 plausible-sounding answer that may be subtly wrong.
 
-RAG solves this by:
+RAG complements fine-tuning by grounding answers in real ChEMBL records:
 
-1. Converting the query molecule into a fingerprint vector
-2. Finding the most similar compound in the vector store (nearest-neighbour search)
-3. Injecting the retrieved record — indications, mechanisms, warnings, etc. —
+1. Extract drug-name candidates from the user message
+2. Query the vector store for matching compounds and polypharmacy pairs
+3. Inject the retrieved records — indications, mechanisms, warnings, etc. —
    directly into the prompt as context
-4. Letting the model *format* the answer, not *remember* it
+4. The model formats the answer from retrieved facts rather than generating them from memory
 
-The model can no longer hallucinate facts it was never trained on; it can only
-rephrase what the vector store retrieved.
+Both modes are served simultaneously in the web UI so their answers can be compared directly.
 
 ---
 

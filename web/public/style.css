@@ -1,11 +1,9 @@
-/* Reset the browser defaults so the layout starts from a clean slate. */
 * {
   box-sizing: border-box;
   margin: 0;
   padding: 0;
 }
 
-/* Theme tokens keep the dark palette consistent across the app. */
 :root {
   color-scheme: dark;
   --page-bg: #0f1117;
@@ -20,141 +18,165 @@
   --assistant-text: #f8fafc;
   --button-bg: #10a37f;
   --button-bg-hover: #0d8b6a;
-  --shadow: 0 20px 60px rgba(0, 0, 0, 0.35);
 }
 
-/* Base page styling for the chat app. */
 body {
   font-family: system-ui, sans-serif;
-  min-height: 100vh;
+  height: 100vh;
   background:
     radial-gradient(circle at top, rgba(16, 163, 127, 0.14), transparent 30%),
     var(--page-bg);
   color: var(--text);
-  padding: 20px;
+  padding: 12px;
 }
 
-/* Main card that holds the whole chat experience. */
-.chat {
+/* Full-height flex column: top-bar → chat-grid → input */
+.layout {
   display: flex;
   flex-direction: column;
-  width: min(920px, 100%);
-  height: calc(100vh - 40px);
+  height: 100%;
+  max-width: 1600px;
   margin: 0 auto;
-  background: var(--surface);
-  border-radius: 20px;
-  border: 1px solid var(--border);
-  box-shadow: var(--shadow);
-  overflow: hidden;
+  gap: 8px;
 }
 
-/* Header area for the app title and current model label. */
-.chat__header {
-  padding: 18px 22px;
-  border-bottom: 1px solid var(--border);
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.02), transparent);
+.top-bar {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding: 6px 4px;
+  flex-shrink: 0;
 }
 
-.chat__header h1 {
-  font-size: 22px;
-  margin-bottom: 6px;
+.top-bar h1 {
+  font-size: 18px;
   letter-spacing: -0.02em;
 }
 
-.chat__header p {
+.top-bar p {
   color: var(--muted);
-  font-size: 14px;
+  font-size: 13px;
 }
 
-/* Standard / RAG mode pill toggle. */
-.mode-toggle {
+/* Two panes side by side */
+.chat-grid {
+  flex: 1;
   display: flex;
-  gap: 4px;
-  margin-top: 10px;
+  gap: 8px;
+  min-height: 0;
 }
 
-.mode-btn {
-  padding: 4px 14px;
-  border-radius: 8px;
+.pane {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  border-radius: 16px;
   border: 1px solid var(--border);
-  background: transparent;
+  overflow: hidden;
+  min-width: 0;
+}
+
+.pane__header {
+  padding: 10px 18px;
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+  font-weight: 600;
   color: var(--muted);
-  font-size: 12px;
-  font-family: inherit;
-  cursor: pointer;
-  transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.02), transparent);
+  flex-shrink: 0;
 }
 
-.mode-btn:hover:not(.active) {
-  background: var(--surface-alt);
-  color: var(--text);
-}
-
-.mode-btn.active {
-  background: var(--button-bg);
-  border-color: var(--button-bg);
-  color: #fff;
-}
-
-/* Scrollable message feed. */
+/* Scrollable message feed */
 .messages {
   flex: 1;
   overflow-y: auto;
-  padding: 20px 22px;
+  padding: 16px 18px;
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 12px;
+  min-height: 0;
 }
 
-/* Shared bubble styling for both user and assistant messages. */
+/* Chat bubbles */
 .msg {
-  max-width: 80%;
-  padding: 12px 16px;
-  border-radius: 18px;
+  max-width: 85%;
+  padding: 10px 14px;
+  border-radius: 16px;
   font-size: 14px;
   line-height: 1.6;
   white-space: pre-wrap;
-  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.14);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
 }
 
-/* User messages sit on the right and use a blue tint. */
 .msg.user {
   align-self: flex-end;
   background: linear-gradient(180deg, #2563eb, var(--user-bg));
   color: var(--user-text);
-  border-bottom-right-radius: 6px;
+  border-bottom-right-radius: 4px;
 }
 
-/* Assistant messages sit on the left and use a neutral tint. */
 .msg.assistant {
   align-self: flex-start;
   background: var(--assistant-bg);
   color: var(--assistant-text);
   border: 1px solid var(--border);
-  border-bottom-left-radius: 6px;
+  border-bottom-left-radius: 4px;
 }
 
-/* Input row keeps the prompt field and send button aligned. */
+/* Blinking cursor while waiting */
+.msg.thinking::after {
+  content: "▌";
+  animation: blink 0.8s steps(1) infinite;
+}
+
+@keyframes blink {
+  50% { opacity: 0; }
+}
+
+/* Markdown: code blocks and inline code */
+.msg pre {
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 8px;
+  padding: 10px 12px;
+  overflow-x: auto;
+  margin: 6px 0;
+}
+
+.msg code {
+  font-family: ui-monospace, "Cascadia Code", monospace;
+  font-size: 13px;
+}
+
+.msg :not(pre) > code {
+  background: rgba(0, 0, 0, 0.25);
+  padding: 2px 5px;
+  border-radius: 4px;
+}
+
+/* Shared input bar at the bottom */
 .input-row {
   display: flex;
-  gap: 12px;
-  padding: 18px 22px 22px;
-  border-top: 1px solid var(--border);
-  background: rgba(255, 255, 255, 0.01);
+  gap: 10px;
+  padding: 12px 16px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  flex-shrink: 0;
 }
 
-/* The textarea is the main place the user writes prompts. */
 .input-row textarea {
   flex: 1;
-  padding: 14px 16px;
-  border-radius: 14px;
+  padding: 10px 14px;
+  border-radius: 10px;
   border: 1px solid var(--border);
   background: var(--surface-alt);
   color: var(--text);
   font-size: 14px;
   font-family: inherit;
   resize: none;
-  min-height: 52px;
+  min-height: 44px;
   outline: none;
 }
 
@@ -167,17 +189,17 @@ body {
   box-shadow: 0 0 0 3px rgba(16, 163, 127, 0.16);
 }
 
-/* The button is disabled while the app waits for a reply. */
 .input-row button {
-  padding: 0 22px;
-  border-radius: 14px;
+  padding: 0 20px;
+  border-radius: 10px;
   border: none;
   background: var(--button-bg);
   color: white;
   cursor: pointer;
   font-size: 14px;
-  min-width: 96px;
-  transition: background-color 0.15s ease, transform 0.15s ease;
+  font-family: inherit;
+  min-width: 80px;
+  transition: background-color 0.15s ease, transform 0.1s ease;
 }
 
 .input-row button:hover:not(:disabled) {
@@ -188,32 +210,16 @@ body {
   transform: translateY(1px);
 }
 
-/* Reduced opacity makes the disabled state obvious. */
 .input-row button:disabled {
   opacity: 0.5;
   cursor: not-allowed;
 }
 
-/* Small screens should feel natural too. */
-@media (max-width: 640px) {
-  body {
-    padding: 0;
-  }
-
-  .chat {
-    width: 100%;
-    height: 100vh;
-    border-radius: 0;
-  }
-
-  .messages,
-  .chat__header,
-  .input-row {
-    padding-left: 16px;
-    padding-right: 16px;
-  }
-
-  .msg {
-    max-width: 92%;
-  }
+/* Stack panes vertically on small screens */
+@media (max-width: 768px) {
+  body { padding: 0; height: 100dvh; }
+  .layout { border-radius: 0; gap: 0; }
+  .chat-grid { flex-direction: column; gap: 4px; padding: 4px; }
+  .input-row { border-radius: 0; border-left: none; border-right: none; border-bottom: none; }
+  .msg { max-width: 92%; }
 }
