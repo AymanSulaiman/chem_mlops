@@ -1,5 +1,5 @@
 import { connect } from "@lancedb/lancedb";
-import { readdir, stat } from "node:fs/promises";
+import { readdir } from "node:fs/promises";
 import path from "node:path";
 
 // Resolved relative to this file: web/src/rag.ts → data/lancedb at the project root.
@@ -21,19 +21,13 @@ function sqlEscape(s: string): string {
 }
 
 async function resolveDbUri(lancedbDir: string): Promise<string> {
-  const entries = await readdir(lancedbDir);
-  const candidates: string[] = [];
-  for (const e of entries) {
-    if (e.startsWith("chembl_CHEMBL")) {
-      const s = await stat(path.join(lancedbDir, e));
-      if (s.isDirectory()) candidates.push(e);
-    }
-  }
-  candidates.sort();
-  if (candidates.length === 0) {
-    throw new Error(`No chembl_CHEMBL_* directory found in ${lancedbDir}`);
-  }
-  return path.join(lancedbDir, candidates[candidates.length - 1]);
+  const entries = await readdir(lancedbDir, { withFileTypes: true });
+  const match = entries
+    .filter(e => e.isDirectory() && e.name.startsWith("chembl_CHEMBL"))
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .at(-1);
+  if (!match) throw new Error(`No chembl_CHEMBL_* directory found in ${lancedbDir}`);
+  return path.join(lancedbDir, match.name);
 }
 
 // Extract capitalised words from user text as drug name candidates.

@@ -178,7 +178,7 @@ flowchart LR
 |---|---|
 | Module | `app.scripts.flows.eval.benchmark_rag_vs_finetuned` |
 | Depends on | `eval_finetuned_model_op` **and** `ingest_twosides_to_lancedb_op` (fan-in) |
-| What it does | Calls Ollama for both Standard (`chembl-drug-chat:1b`) and RAG (`gemma3:1b` + LanceDB) modes on the golden question set; raises `RuntimeError` if RAG pass rate < 40% (catches broken LanceDB/missing model, not fine-tuned vs base gap) |
+| What it does | Calls Ollama for both Finetuned (`chembl-drug-chat:1b`) and RAG (`gemma3:1b` + LanceDB) modes on the golden question set; raises `RuntimeError` if RAG pass rate < 40% (catches broken LanceDB/missing model, not fine-tuned vs base gap) |
 | Output | `data/eval/<run>/<finetuned_model>_vs_<rag_model>_benchmark.json` — keyword-match pass rates, per-question comparison, `winner`, and `delta_description` for both models |
 
 ---

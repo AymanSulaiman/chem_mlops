@@ -1,123 +1,146 @@
 /// <reference lib="dom" />
-
-import { formatModelLabel, formatReplyText, type ChatResult, type ModelInfo } from "./frontend-helpers";
+import { formatReplyText, renderMarkdown, type ChatResult, type ModelInfo } from "./frontend-helpers";
 import type { ChatMessage } from "./app";
 
-// Cache the page elements once so the browser code stays simple to follow.
-function getRequiredElement<T extends HTMLElement>(id: string, guard: (value: HTMLElement) => value is T) {
-  const element = document.getElementById(id);
-  if (!(element instanceof HTMLElement) || !guard(element)) {
-    throw new Error(`${id} is missing.`);
-  }
-
-  return element;
+function el<T extends HTMLElement>(id: string): T {
+  const e = document.getElementById(id);
+  if (!e) throw new Error(`#${id} missing`);
+  return e as T;
 }
 
-const form = getRequiredElement("chat-form", (value): value is HTMLFormElement => value instanceof HTMLFormElement);
-const input = getRequiredElement(
-  "input",
-  (value): value is HTMLTextAreaElement => value instanceof HTMLTextAreaElement,
-);
-const btn = getRequiredElement("btn", (value): value is HTMLButtonElement => value instanceof HTMLButtonElement);
-const messagesEl = getRequiredElement("messages", (value): value is HTMLElement => value instanceof HTMLElement);
-const modelLabel = getRequiredElement("model-label", (value): value is HTMLElement => value instanceof HTMLElement);
-const modeStandardBtn = getRequiredElement("mode-standard", (value): value is HTMLButtonElement => value instanceof HTMLButtonElement);
-const modeRagBtn = getRequiredElement("mode-rag", (value): value is HTMLButtonElement => value instanceof HTMLButtonElement);
+const form = el<HTMLFormElement>("chat-form");
+const input = el<HTMLTextAreaElement>("input");
+const btn = el<HTMLButtonElement>("btn");
+const modelLabel = el<HTMLElement>("model-label");
 
-const history: ChatMessage[] = [];
-let currentMode: "standard" | "rag" = "standard";
+const containers = {
+  finetuned: el<HTMLElement>("messages-finetuned"),
+  rag: el<HTMLElement>("messages-rag"),
+};
 
-modeStandardBtn.addEventListener("click", () => {
-  currentMode = "standard";
-  modeStandardBtn.classList.add("active");
-  modeRagBtn.classList.remove("active");
-});
+const histories: Record<"finetuned" | "rag", ChatMessage[]> = { finetuned: [], rag: [] };
 
-modeRagBtn.addEventListener("click", () => {
-  currentMode = "rag";
-  modeRagBtn.classList.add("active");
-  modeStandardBtn.classList.remove("active");
-});
+async function loadModel() {
+  try {
+    const res = await fetch("/api/model");
+    const data = (await res.json()) as ModelInfo;
+    modelLabel.textContent = data.source;
+    el<HTMLElement>("header-finetuned").textContent = `Finetuned — ${data.model}`;
+    el<HTMLElement>("header-rag").textContent = `RAG — ${data.ragModel}`;
+  } catch {
+    modelLabel.textContent = "model unavailable";
+  }
+}
 
-// Resize the prompt box so longer messages feel natural to type and review.
-function resizePromptBox() {
+function addBubble(container: HTMLElement, role: ChatMessage["role"], text?: string) {
+  const bubble = document.createElement("div");
+  bubble.className = `msg ${role}`;
+  if (text) {
+    role === "assistant"
+      ? (bubble.innerHTML = renderMarkdown(text))
+      : (bubble.textContent = text);
+  } else {
+    bubble.classList.add("thinking");
+  }
+  container.appendChild(bubble);
+  container.scrollTop = container.scrollHeight;
+  return bubble;
+}
+
+async function streamInto(
+  res: Response,
+  bubble: HTMLElement,
+  container: HTMLElement,
+  history: ChatMessage[],
+) {
+  if (!res.ok) {
+    const data = (await res.json()) as ChatResult;
+    bubble.classList.remove("thinking");
+    bubble.textContent = data.error || "Chat request failed.";
+    return;
+  }
+
+  bubble.classList.remove("thinking");
+  let accumulated = "";
+  const reader = res.body!.getReader();
+  const decoder = new TextDecoder();
+  let partial = "";
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    partial += decoder.decode(value, { stream: true });
+    const lines = partial.split("\n");
+    partial = lines.pop() ?? "";
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      try {
+        const chunk = JSON.parse(line) as { done?: boolean; message?: { content?: string } };
+        if (!chunk.done && chunk.message?.content) {
+          accumulated += chunk.message.content;
+          bubble.textContent = accumulated;
+          container.scrollTop = container.scrollHeight;
+        }
+      } catch {}
+    }
+  }
+
+  bubble.innerHTML = renderMarkdown(formatReplyText(accumulated));
+  history.push({ role: "assistant", content: accumulated });
+  container.scrollTop = container.scrollHeight;
+}
+
+function resizeInput() {
   input.style.height = "auto";
   input.style.height = `${Math.min(input.scrollHeight, 240)}px`;
 }
 
-// Ask the Bun backend which exported model is newest.
-async function loadModel() {
-  try {
-    const response = await fetch("/api/model");
-    const data = (await response.json()) as ModelInfo;
-    modelLabel.textContent = formatModelLabel(data);
-  } catch {
-    modelLabel.textContent = "Latest model: unavailable";
-  }
-}
-
-// Render one chat bubble and keep the scroll pinned to the newest message.
-function addBubble(role: ChatMessage["role"], text: string) {
-  const bubble = document.createElement("div");
-  bubble.className = `msg ${role}`;
-  bubble.textContent = text;
-  messagesEl.appendChild(bubble);
-  messagesEl.scrollTop = messagesEl.scrollHeight;
-  return bubble;
-}
-
-// Submit the chat message to the Bun API and render the reply.
 form.addEventListener("submit", async (event: SubmitEvent) => {
   event.preventDefault();
-
   const text = input.value.trim();
-  if (!text) {
-    return;
+  if (!text) return;
+
+  for (const mode of ["finetuned", "rag"] as const) {
+    histories[mode].push({ role: "user", content: text });
+    addBubble(containers[mode], "user", text);
   }
 
-  history.push({ role: "user", content: text });
-  addBubble("user", text);
   input.value = "";
   btn.disabled = true;
 
-  const replyBubble = addBubble("assistant", "Thinking...");
+  const bubbles = {
+    finetuned: addBubble(containers.finetuned, "assistant"),
+    rag: addBubble(containers.rag, "assistant"),
+  };
 
-  try {
-    const response = await fetch("/api/chat", {
+  const [finRes, ragRes] = await Promise.all([
+    fetch("/api/chat", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ messages: history, mode: currentMode }),
-    });
+      body: JSON.stringify({ messages: histories.finetuned, mode: "finetuned" }),
+    }),
+    fetch("/api/chat", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ messages: histories.rag, mode: "rag" }),
+    }),
+  ]).catch(err => { throw err; });
 
-    const data = (await response.json()) as ChatResult;
-    if (!response.ok) {
-      throw new Error(data.error || "Chat request failed.");
-    }
+  await Promise.allSettled([
+    streamInto(finRes, bubbles.finetuned, containers.finetuned, histories.finetuned),
+    streamInto(ragRes, bubbles.rag, containers.rag, histories.rag),
+  ]);
 
-    replyBubble.textContent = formatReplyText(data.reply);
-    history.push({ role: "assistant", content: data.reply || "" });
-  } catch (error) {
-    replyBubble.textContent =
-      error instanceof Error ? error.message : "Error: could not reach server.";
-  } finally {
-    btn.disabled = false;
-    input.focus();
-  }
+  btn.disabled = false;
+  input.focus();
 });
 
-// ChatGPT-style keyboard behavior: Enter sends, Shift+Enter inserts a newline.
 input.addEventListener("keydown", (event: KeyboardEvent) => {
-  if (event.key !== "Enter" || event.shiftKey) {
-    return;
-  }
-
+  if (event.key !== "Enter" || event.shiftKey) return;
   event.preventDefault();
   form.requestSubmit();
 });
 
-// Keep the textarea height in sync with what the user types.
-input.addEventListener("input", resizePromptBox);
-
-// Load the model label as soon as the page opens.
-resizePromptBox();
+input.addEventListener("input", resizeInput);
+resizeInput();
 loadModel();

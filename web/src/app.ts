@@ -121,20 +121,15 @@ export function createChatRequestHandler(options: ChatAppOptions = {}) {
     return cachedModel;
   }
 
-  async function chat(messages: ChatMessage[], modelOverride?: string) {
+  async function chat(messages: ChatMessage[], modelOverride?: string): Promise<Response> {
     const modelInfo = modelOverride
       ? { model: modelOverride, source: "rag-model" as const }
       : await detectLatestModel();
+    const startMs = now();
     const response = await fetchImpl(`${ollamaBaseUrl}/api/chat`, {
       method: "POST",
-      headers: {
-        "content-type": "application/json",
-      },
-      body: JSON.stringify({
-        model: modelInfo.model,
-        messages,
-        stream: false,
-      }),
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: modelInfo.model, messages, stream: true }),
     });
 
     if (!response.ok) {
@@ -142,13 +137,46 @@ export function createChatRequestHandler(options: ChatAppOptions = {}) {
       throw new Error(`Ollama chat failed: ${response.status} ${details}`);
     }
 
-    const payload = (await response.json()) as { message?: { content?: string } };
+    // ponytail: TransformStream passes bytes unchanged, snoops final chunk for metrics
+    let buf = "";
+    const logTransform = new TransformStream<Uint8Array, Uint8Array>({
+      transform(chunk, controller) {
+        buf += new TextDecoder().decode(chunk);
+        controller.enqueue(chunk);
+      },
+      flush() {
+        const last = buf.trimEnd().split("\n").at(-1) ?? "";
+        try {
+          const final = JSON.parse(last) as {
+            done?: boolean;
+            eval_count?: number;
+            prompt_eval_count?: number;
+            eval_duration?: number;
+            total_duration?: number;
+          };
+          if (final.done) {
+            console.log(JSON.stringify({
+              ts: new Date().toISOString(),
+              model: modelInfo.model,
+              source: modelInfo.source,
+              latencyMs: now() - startMs,
+              promptTokens: final.prompt_eval_count ?? null,
+              completionTokens: final.eval_count ?? null,
+              evalDurationMs: final.eval_duration != null ? Math.round(final.eval_duration / 1e6) : null,
+              totalDurationMs: final.total_duration != null ? Math.round(final.total_duration / 1e6) : null,
+            }));
+          }
+        } catch {}
+      },
+    });
 
-    return {
-      model: modelInfo.model,
-      source: modelInfo.source,
-      reply: payload.message?.content ?? "",
-    };
+    return new Response(response.body!.pipeThrough(logTransform), {
+      headers: {
+        "content-type": "application/x-ndjson",
+        "x-model": modelInfo.model,
+        "x-source": modelInfo.source,
+      },
+    });
   }
 
   return async function handleRequest(request: Request) {
@@ -172,7 +200,7 @@ export function createChatRequestHandler(options: ChatAppOptions = {}) {
 
     if (request.method === "GET" && url.pathname === "/api/model") {
       try {
-        return json(await detectLatestModel());
+        return json({ ...(await detectLatestModel()), ragModel: ragModelName });
       } catch (error) {
         return json(
           {
@@ -203,7 +231,7 @@ export function createChatRequestHandler(options: ChatAppOptions = {}) {
             }
           }
         }
-        return json(await chat(outgoing, isRag ? ragModelName : undefined));
+        return await chat(outgoing, isRag ? ragModelName : undefined);
       } catch (error) {
         return json(
           {

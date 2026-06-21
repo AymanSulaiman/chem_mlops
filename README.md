@@ -1,6 +1,6 @@
 # chem_mlops
 
-An end-to-end MLOps pipeline that downloads ChEMBL, builds a 2.85 M-compound vector store for RAG, generates a structured QA dataset, and fine-tunes a Gemma 3 1B language model to answer drug-interaction questions — optimised for Apple Silicon (M1 Pro / M2 / M3).
+An end-to-end MLOps pipeline that fine-tunes a Gemma 3 1B language model on ChEMBL drug-interaction data, builds a 2.85 M-compound vector store for retrieval-augmented generation, and serves both models side-by-side in a streaming web chat — all running locally on Apple Silicon.
 
 ---
 
@@ -44,16 +44,18 @@ The pipeline is orchestrated with **Dagster** and runs entirely locally.
 |------|---------|
 | Python | ≥ 3.13 |
 | [uv](https://docs.astral.sh/uv/) | any |
+| [Bun](https://bun.sh) | ≥ 1.3 |
+| [Ollama](https://ollama.com) | any |
 | macOS + Apple Silicon | M1 / M2 / M3 |
 
-> **Note:** The fine-tuning step uses `mlx-lm` and requires Apple Silicon. All other steps run on any platform.
+> **Note:** The fine-tuning step uses `mlx-lm` and requires Apple Silicon. All other steps — including the web app, vector store, and evaluation — run on any platform.
 
 ---
 
 ## Installation
 
 ```bash
-git clone <repo>
+git clone https://github.com/AymanSulaiman/chem_mlops.git
 cd chem_mlops
 uv sync
 ```
@@ -85,23 +87,21 @@ This executes the full pipeline via Dagster:
    - Build the QA JSONL dataset (ChEMBL + TWOSIDES)
    - Build the activity Parquet
    - **Ingest 2.85 M compounds into LanceDB** (vector store for RAG)
-   - **Ingest TWOSIDES polypharmacy pairs into LanceDB** (after both ChEMBL ingest and TWOSIDES download complete)
+   - **Ingest TWOSIDES polypharmacy pairs into LanceDB**
 4. Fine-tune Gemma 3 1B with LoRA
-5. Fuse the LoRA adapter and register the model with Ollama
+5. Evaluate the fine-tuned model (perplexity + golden benchmark) — gates Ollama export
+6. Fuse the LoRA adapter and register the model with Ollama
 
 ### Build with the full dataset
 
-To run the complete pipeline end-to-end using **all** available ChEMBL data:
-
 ```bash
-# Step 1 — Download ChEMBL (~5.6 GB, takes ~5 min on a fast connection)
+# Step 1 — Download ChEMBL (~5.6 GB, ~5 min on a fast connection)
 uv run python -m app.scripts.flows.initial_data_transformation.collect_data
 
 # Step 2 — Convert SQLite → Parquet for all 74 tables (~10–20 min)
 uv run python -m app.scripts.flows.initial_data_transformation.transform_data
 
-# Step 3a — Build the QA finetuning dataset from all 23 tables, no row cap
-#            (~16–24 GB RAM recommended; produces ~500 K+ training pairs)
+# Step 3a — Build the QA finetuning dataset (~16–24 GB RAM recommended)
 uv run python -m app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset
 
 # Step 3b — Build the activity Parquet dataset
@@ -110,14 +110,13 @@ uv run python -m app.scripts.flows.llm_finetuning_data.build_finetune_dataset
 # Step 3c — Ingest 2.85 M compounds into LanceDB (~6 min)
 uv run python -m app.scripts.flows.vector_store.ingest_to_lancedb
 
-# Step 3d — Download TWOSIDES polypharmacy dataset from Tatonetti Lab S3
-#            (streams ~120 MB gzip, decompresses in memory, saves as Parquet)
+# Step 3d — Download TWOSIDES from Tatonetti Lab S3 (~120 MB gzip, streamed)
 uv run python -m app.scripts.flows.llm_finetuning_data.download_twosides
 
-# Step 3e — Ingest TWOSIDES into LanceDB polypharmacy table (run after 3c and 3d)
+# Step 3e — Ingest TWOSIDES into the polypharmacy LanceDB table (run after 3c and 3d)
 uv run python -m app.scripts.flows.vector_store.ingest_twosides_to_lancedb
 
-# Step 4 — Fine-tune Gemma 3 1B on the full dataset (~2–4 hrs on M1 Pro)
+# Step 4 — Fine-tune Gemma 3 1B (~2–4 hrs on M1 Pro)
 uv run app/scripts/flows/finetuning/finetuning.py
 
 # Step 5 — Fuse adapter, export to GGUF, and register with Ollama
@@ -131,49 +130,71 @@ Expected disk and time requirements:
 | Download ChEMBL SQLite | 5.6 GB | ~5 min |
 | Convert to Parquet | 8–10 GB | ~15 min |
 | Build QA dataset | < 1 GB output | ~30–60 min |
-| **Ingest to LanceDB** | ~15 GB | **~6 min** |
+| Ingest to LanceDB | ~15 GB | ~6 min |
 | Download TWOSIDES | ~50 MB Parquet | ~2–3 min |
 | Ingest TWOSIDES to LanceDB | < 100 MB | ~1 min |
 | Fine-tune (1 500 iters) | ~2 GB adapter | ~2–4 hrs |
 | Export to Ollama | ~4 GB GGUF | ~5–10 min |
 
-> **Low-RAM machines:** If you have less than 16 GB of RAM, cap the table load with `--row-limit`:
+> **Low-RAM machines:** Cap each table at N rows with `--row-limit`:
 > ```bash
 > uv run python -m app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset \
 >   --row-limit 200000
 > ```
 
-### Run steps individually
+---
+
+## Web App
+
+The repository includes a Bun chat app (`web/`) that serves both inference modes **side by side** in a single view, so you can compare answers from the fine-tuned model and the RAG pipeline on the same question simultaneously.
+
+```
+┌─────────────────────────────────────────────────────┐
+│  Chem MLOps Chat                  chembl-drug-chat  │
+├──────────────────────────┬──────────────────────────┤
+│  Finetuned               │  RAG                     │
+│  chembl-drug-chat:1b     │  gemma3:1b               │
+│                          │                          │
+│  [streamed response...]  │  [streamed response...]  │
+│                          │                          │
+├──────────────────────────┴──────────────────────────┤
+│  Message both models...                      [Send] │
+└─────────────────────────────────────────────────────┘
+```
+
+| Pane | Model | How it works |
+|------|-------|-------------|
+| **Finetuned** | `chembl-drug-chat:1b` | LoRA-tuned Gemma 3 1B; domain-aware, fast |
+| **RAG** | `gemma3:1b` (base) | LanceDB context injected as system message; grounded in live ChEMBL + TWOSIDES records |
+
+Responses stream token-by-token from Ollama and render as markdown. Each pane maintains its own independent conversation history. Sending a message fires both requests in parallel.
+
+In RAG mode, `web/src/rag.ts` extracts drug-name candidates from the user message, queries the `compounds` and `polypharmacy` LanceDB tables via the `@lancedb/lancedb` TypeScript client (the same Lance files written by Python — no Python server needed), and prepends a context block before forwarding to Ollama.
+
+**Start the dev server (hot reload):**
 
 ```bash
-# 1. Download ChEMBL
-uv run python -m app.scripts.flows.initial_data_transformation.collect_data
-
-# 2. Transform to Parquet
-uv run python -m app.scripts.flows.initial_data_transformation.transform_data
-
-# 3a. Build the QA finetuning dataset
-uv run python -m app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset
-
-# 3b. Build the activity Parquet dataset
-uv run python -m app.scripts.flows.llm_finetuning_data.build_finetune_dataset
-
-# 3c. Ingest compounds into LanceDB (vector store)
-uv run python -m app.scripts.flows.vector_store.ingest_to_lancedb
-
-# 3d. Download TWOSIDES polypharmacy dataset
-uv run python -m app.scripts.flows.llm_finetuning_data.download_twosides
-
-# 3e. Ingest TWOSIDES polypharmacy pairs into LanceDB
-uv run python -m app.scripts.flows.vector_store.ingest_twosides_to_lancedb
-
-# 4. Fine-tune
-uv run app/scripts/flows/finetuning/finetuning.py
-
-# 5. Export to Ollama and start chatting
-uv run python -m app.scripts.flows.finetuning.export_to_ollama
-ollama run chembl-drug-chat:1b
+cd web
+bun run dev
 ```
+
+Open [http://localhost:3000](http://localhost:3000).
+
+**Production:**
+
+```bash
+cd web
+bun run start
+```
+
+**Tests:**
+
+```bash
+cd web
+bun test
+```
+
+A `web/.env` file with working defaults is committed — Bun loads it automatically, no setup needed. Edit it to point at a different Ollama host, swap the RAG model, or override the LanceDB path.
 
 ---
 
@@ -181,11 +202,7 @@ ollama run chembl-drug-chat:1b
 
 The pipeline builds a **LanceDB vector store** alongside fine-tuning — 2,854,996 compounds from ChEMBL, each represented as a 2048-bit Morgan fingerprint (ECFP4, radius 2).
 
-This enables **Retrieval-Augmented Generation (RAG)** at inference time: instead of relying on the model to remember facts, query the vector store first and inject the retrieved record directly into the prompt.
-
-### Why RAG alongside fine-tuning?
-
-Fine-tuning teaches the model to *sound like* a domain expert. It cannot guarantee factual accuracy for specific compounds. RAG grounds answers in real ChEMBL records — mechanisms, indications, warnings, metabolic enzymes — that the model only needs to format.
+**Why RAG alongside fine-tuning?** Fine-tuning teaches the model to sound like a domain expert. It cannot guarantee factual accuracy for specific compounds. RAG grounds answers in real ChEMBL records — mechanisms, indications, warnings, metabolic enzymes — that the model only needs to format.
 
 ### Ingest
 
@@ -203,16 +220,14 @@ from app.scripts.flows.vector_store.query_lancedb import query_compounds, get_co
 
 # Similarity search — top 5 compounds most similar to aspirin
 hits = query_compounds("CC(=O)Oc1ccccc1C(=O)O", n=5)
-# Returns list of dicts with all metadata columns + _distance
 
 # Exact lookup by ChEMBL ID
 record = get_compound("CHEMBL25")
-# Returns dict or None
 ```
 
 ### Query — polypharmacy (TWOSIDES)
 
-The `polypharmacy` table stores drug-pair adverse-event signals from the TWOSIDES dataset (Tatonetti et al., *Science Translational Medicine* 2012), derived from FDA FAERS co-reporting. Only pairs with PRR ≥ 3.0 and ≥ 5 reported cases are retained. It is a scalar-indexed lookup table with no vector column.
+The `polypharmacy` table stores drug-pair adverse-event signals from TWOSIDES (Tatonetti et al., *Science Translational Medicine* 2012), derived from FDA FAERS co-reporting. Only pairs with PRR ≥ 3.0 and ≥ 5 reported cases are retained.
 
 ```python
 from app.scripts.flows.vector_store.query_lancedb import query_polypharmacy, query_drug_side_effects
@@ -221,36 +236,22 @@ from app.scripts.flows.vector_store.query_lancedb import query_polypharmacy, que
 pair = query_polypharmacy("Warfarin", "Aspirin")
 # Returns dict with side_effects, max_prr, total_cases, n_side_effects — or None
 
-# Find all known polypharmacy partners for a single drug
+# All known polypharmacy partners for a drug
 pairs = query_drug_side_effects("Warfarin", n=20)
-# Returns list of dicts sorted by max_prr descending
 ```
-
-Run `download_twosides` and `ingest_twosides_to_lancedb` before querying this table.
-
-### Internal sanity check
-
-```bash
-# Queries the live store with known molecules and asserts correctness
-uv run python -m app.scripts.flows.vector_store.query_lancedb
-```
-
-Checks: top similarity hit is aspirin itself, exact lookup returns the right record, invalid SMILES raises `ValueError`, unknown ID returns `None`.
-
-Full details: [`app/scripts/flows/vector_store/README.md`](app/scripts/flows/vector_store/README.md)
 
 ---
 
 ## QA Dataset
 
-`build_drug_interaction_dataset` reads 23 ChEMBL tables plus the TWOSIDES polypharmacy dataset and emits 21 categories of training pairs in `### Question / ### Answer` format:
+`build_drug_interaction_dataset` reads 23 ChEMBL tables plus TWOSIDES and emits 21 categories of training pairs in `### Question / ### Answer` format:
 
 | # | Category | Source tables |
 |---|----------|--------------|
 | 1 | Mechanism of action | `drug_mechanism`, `target_dictionary` |
 | 2 | Therapeutic indication | `drug_indication` |
 | 3 | Metabolic pathways | `metabolism`, `target_dictionary` |
-| 4 | Drug-drug interactions (with severity) | `metabolism` (shared CYP substrates, HIGH/MODERATE/LOW severity) |
+| 4 | Drug-drug interactions (with severity) | `metabolism` (shared CYP substrates) |
 | 5 | Bioactivity potency | `activities` (pChEMBL values) |
 | 6 | Drug warnings | `drug_warning` |
 | 7 | Drug synonyms | `molecule_synonyms` |
@@ -264,58 +265,27 @@ Full details: [`app/scripts/flows/vector_store/README.md`](app/scripts/flows/vec
 | 15 | Protein family | `protein_classification`, `component_class`, `target_components` |
 | 16 | Biotherapeutics | `biotherapeutics` |
 | 17 | Target relations | `target_relations` |
-| 18 | CYP inhibition (quantitative) | `activities`, `assays`, `target_dictionary` (IC50/Ki values) |
-| 19 | Pharmacodynamic interactions | `drug_mechanism`, `target_dictionary` (shared receptor targets) |
+| 18 | CYP inhibition (quantitative) | `activities`, `assays`, `target_dictionary` (IC50/Ki) |
+| 19 | Pharmacodynamic interactions | `drug_mechanism`, `target_dictionary` (shared receptors) |
 | 20 | P-glycoprotein transport | `activities`, `assays`, `target_dictionary` (ABCB1/MDR1) |
 | 21 | Polypharmacy side effects | TWOSIDES (FDA FAERS · PRR-filtered drug-pair adverse events) |
 
-Output files are written to `data/llm_finetune/`:
-
-```
-data/llm_finetune/
-├── train.jsonl   (90%)
-└── valid.jsonl   (10%)
-```
+Output: `data/llm_finetune/train.jsonl` (90%) and `valid.jsonl` (10%).
 
 Each record:
 ```json
 {"text": "### Question\nWhat does Aspirin target?\n\n### Answer\nAspirin (CHEMBL25) inhibits Cyclooxygenase-1 ..."}
 ```
 
-### CLI options
+**CLI options:**
 
 ```bash
 uv run python -m app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset \
-  [--data-dir PATH]       # default: data/chembl_transform
-  [--output-dir PATH]     # default: data/llm_finetune
-  [--row-limit N]         # cap every table at N rows (useful on low-RAM machines)
-  [--workers N]           # parallel generator processes (default: CPU count)
+  [--data-dir PATH]   # default: data/chembl_transform
+  [--output-dir PATH] # default: data/llm_finetune
+  [--row-limit N]     # cap every table at N rows (useful on low-RAM machines)
+  [--workers N]       # parallel generator processes (default: CPU count)
 ```
-
-The `--row-limit` flag is useful on memory-constrained machines. For example, `--row-limit 200000` limits each table to 200 K rows. Without it, all rows are loaded (the `activities` table alone has ~19 M rows).
-
-Generators run in parallel by default (one process per CPU core). Use `--workers 1` to disable multiprocessing, which is useful for debugging tracebacks.
-
-### Using all available data
-
-To build the largest possible dataset from the full ChEMBL database, run without `--row-limit`:
-
-```bash
-uv run python -m app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset
-```
-
-This loads all rows from all 23 tables. Expected scale:
-
-| Table | Rows |
-|-------|------|
-| `activities` | ~19 M |
-| `docs` | ~99 K |
-| `assays` | ~1.5 M |
-| `molecule_dictionary` | ~2.4 M |
-| `compound_properties` | ~2.3 M |
-| other tables | < 200 K each |
-
-> **Memory requirement:** ~16–24 GB of RAM is recommended. On an M1 Pro with 32 GB unified memory this runs comfortably. On machines with less RAM, use `--row-limit` to cap the load (e.g. `--row-limit 500000`).
 
 ---
 
@@ -334,78 +304,60 @@ Fine-tuning runs `mlx-lm` LoRA on **Gemma 3 1B** (`google/gemma-3-1b-pt`), optim
 | Quantisation | 4-bit (q-group 64) |
 | Gradient checkpointing | ✓ |
 
-The script:
-1. Quantises the base model to 4-bit MLX format
-2. Splits any sequences longer than 2 048 tokens
-3. Runs LoRA training and saves adapter weights
-
 Artifacts are written to `artifacts/<timestamp>/`:
 
 ```
 artifacts/20260403_220717/
-├── mlx/gemma-3-1b-pt-mlx/        # quantised base model
-└── adapters/gemma3-1b-pt-chembl-toon/  # LoRA adapter weights
+├── mlx/gemma-3-1b-pt-mlx/                   # quantised base model
+└── adapters/gemma3-1b-pt-chembl-toon/        # LoRA adapter weights
+```
+
+---
+
+## Model Evaluation
+
+After fine-tuning, an evaluation step runs automatically before Ollama export:
+
+- **Perplexity** on `valid.jsonl`
+- **Golden benchmark** — 20 curated drug-interaction questions with keyword-match scoring
+- **RAG vs fine-tuned benchmark** — same golden set run against both modes, `winner` + `delta_description` fields
+
+Results are written to `data/eval/<run>/`:
+
+```
+data/eval/<run>/
+├── finetuned_eval_metrics.json         # perplexity + exact-match %
+├── finetuned_golden_results.jsonl      # per-question scores
+└── <ft>_vs_<rag>_benchmark.json       # head-to-head comparison
+```
+
+The Dagster pipeline gates Ollama export on eval passing. To run evaluation standalone:
+
+```bash
+uv run python -m app.scripts.flows.eval.eval_finetuned_model
 ```
 
 ---
 
 ## Loading into Ollama
 
-After fine-tuning, you can serve the model locally via [Ollama](https://ollama.com).
-
-### 1. Install Ollama
-
 ```bash
 brew install ollama
-```
 
-### 2. Export to Ollama
-
-The export script handles everything — it fuses the LoRA adapter into the base model,
-converts to GGUF via llama.cpp's conversion script (downloaded automatically on first run),
-writes a Modelfile with the system prompt, and registers the model with Ollama.
-
-**Auto-detect the latest run:**
-
-```bash
+# Auto-detect the latest fine-tuning run and export:
 uv run python -m app.scripts.flows.finetuning.export_to_ollama
-```
 
-**Target a specific run:**
-
-```bash
+# Target a specific run:
 uv run python -m app.scripts.flows.finetuning.export_to_ollama \
   --run-dir artifacts/20260403_220717
+
+# Force-overwrite an existing export:
+uv run python -m app.scripts.flows.finetuning.export_to_ollama --force
 ```
 
-**Options:**
+The export script fuses the LoRA adapter, converts to GGUF via llama.cpp, writes a Modelfile, and registers with Ollama. The llama.cpp conversion script is cached at `~/.cache/chem_mlops/convert_hf_to_gguf.py` on first run.
 
-```
---run-dir PATH        Run directory to export (default: latest in artifacts/)
---model-name NAME     Ollama model name (default: chembl-drug-chat:1b)
---force               Overwrite an existing export
-```
-
-The script runs 4 steps:
-
-1. `mlx_lm fuse --save-path` — merge LoRA adapter into base model (HF safetensors)
-2. `convert_hf_to_gguf.py` — convert to GGUF F16 (script fetched from llama.cpp on first run)
-3. Write `Modelfile` — system prompt + sampling parameters
-4. `ollama create` — register with Ollama
-
-The script produces:
-
-```
-artifacts/<timestamp>/mlx/ollama/
-├── fused_hf/                   # merged HF safetensors (intermediate)
-├── chembl-drug-chat.gguf       # final GGUF model
-└── Modelfile                   # system prompt + sampling parameters
-```
-
-> **Note:** The llama.cpp conversion script is downloaded once to
-> `~/.cache/chem_mlops/convert_hf_to_gguf.py` and reused on subsequent runs.
-
-### 3. Chat
+**Chat directly via Ollama:**
 
 ```bash
 ollama run chembl-drug-chat:1b
@@ -422,77 +374,54 @@ Example questions:
 >>> Is Adalimumab a small molecule or a biologic?
 ```
 
-### Updating after a new fine-tuning run
-
-```bash
-uv run python -m app.scripts.flows.finetuning.export_to_ollama --force
-```
-
-This re-fuses from the latest artifact and replaces the existing Ollama model.
-
+---
 
 ## Project structure
 
 ```
 chem_mlops/
-├── .github/
-│   └── workflows/
-│       └── ci.yml                      # Lint + typecheck + pytest + bun test on every push/PR
+├── .github/workflows/ci.yml               # Lint + typecheck + pytest + bun test on every push/PR
 ├── app/
 │   ├── orchestration/
-│   │   ├── chembl_drug_chat_pipeline.py # Dagster pipeline (@op / @graph / Definitions)
-│   │   └── README.md                   # Pipeline architecture and stage docs
-│   ├── scripts/
-│   │   ├── flows/
-│   │   │   ├── initial_data_transformation/
-│   │   │   │   ├── collect_data.py     # Download ChEMBL SQLite
-│   │   │   │   └── transform_data.py   # SQLite → Parquet (DuckDB)
-│   │   │   ├── llm_finetuning_data/
-│   │   │   │   ├── build_drug_interaction_dataset.py  # 21-category QA builder (parallel, incl. TWOSIDES)
-│   │   │   │   ├── build_finetune_dataset.py          # Activity Parquet → JSONL
-│   │   │   │   └── download_twosides.py               # Stream-download TWOSIDES → Parquet
-│   │   │   ├── finetuning/
-│   │   │   │   ├── finetuning.py       # MLX LoRA fine-tuning
-│   │   │   │   └── export_to_ollama.py # Standalone: export any run to Ollama
-│   │   │   ├── eval/
-│   │   │   │   ├── eval_finetuned_model.py          # Perplexity + golden benchmark eval (gates export)
-│   │   │   │   ├── benchmark_rag_vs_finetuned.py    # RAG vs fine-tuned Ollama benchmark
-│   │   │   │   └── golden.jsonl                     # Golden Q&A benchmark (20 questions)
-│   │   │   └── vector_store/
-│   │   │       ├── ingest_to_lancedb.py           # Join 13 tables → fingerprint → LanceDB
-│   │   │       ├── ingest_twosides_to_lancedb.py  # TWOSIDES → polypharmacy LanceDB table
-│   │   │       ├── query_lancedb.py               # query_compounds / get_compound / polypharmacy API
-│   │   │       └── README.md                      # Vector store architecture and tradeoffs
-│   │   └── load_data/
-│   │       └── load_data.py            # ChemblDataLoader helper
-│   └── tests/
-│       ├── flows/                      # Tests for each pipeline stage
-│       └── load_data/                  # Tests for ChemblDataLoader
-├── web/                                # Bun chat app (Standard + RAG toggle)
+│   │   └── chembl_drug_chat_pipeline.py   # Dagster pipeline (@op / @graph / Definitions)
+│   ├── scripts/flows/
+│   │   ├── initial_data_transformation/
+│   │   │   ├── collect_data.py            # Download ChEMBL SQLite
+│   │   │   └── transform_data.py          # SQLite → Parquet (DuckDB)
+│   │   ├── llm_finetuning_data/
+│   │   │   ├── build_drug_interaction_dataset.py  # 21-category QA builder (parallel)
+│   │   │   ├── build_finetune_dataset.py          # Activity Parquet → JSONL
+│   │   │   └── download_twosides.py               # Stream-download TWOSIDES → Parquet
+│   │   ├── finetuning/
+│   │   │   ├── finetuning.py              # MLX LoRA fine-tuning
+│   │   │   └── export_to_ollama.py        # Fuse adapter → GGUF → Ollama
+│   │   ├── eval/
+│   │   │   ├── eval_finetuned_model.py    # Perplexity + golden benchmark (gates export)
+│   │   │   ├── benchmark_rag_vs_finetuned.py  # Head-to-head RAG vs fine-tuned
+│   │   │   └── golden.jsonl               # 20 curated drug-interaction questions
+│   │   └── vector_store/
+│   │       ├── ingest_to_lancedb.py       # 2.85 M compounds → Morgan fingerprints → LanceDB
+│   │       ├── ingest_twosides_to_lancedb.py  # TWOSIDES → polypharmacy table
+│   │       └── query_lancedb.py           # query_compounds / get_compound / polypharmacy API
+│   └── tests/                             # pytest suite for each pipeline stage
+├── web/                                   # Bun chat app
 │   ├── src/
-│   │   ├── app.ts                      # Request handler, model detection, RAG routing
-│   │   ├── rag.ts                      # extractDrugCandidates, buildRagContext, augmentMessages
-│   │   ├── frontend.ts                 # Browser: mode toggle, chat history, submit handler
-│   │   └── frontend-helpers.ts         # Formatting helpers (testable, no DOM deps)
+│   │   ├── app.ts                         # Request handler, Ollama streaming proxy, model detection
+│   │   ├── rag.ts                         # Drug candidate extraction, LanceDB context builder
+│   │   ├── frontend.ts                    # Side-by-side chat UI, parallel streaming, per-pane history
+│   │   └── frontend-helpers.ts            # renderMarkdown, formatReplyText (no DOM deps, testable)
 │   ├── public/
-│   │   ├── index.html                  # Standard / RAG pill toggle + chat UI
+│   │   ├── index.html                     # Dual-pane layout (Finetuned | RAG)
 │   │   └── style.css
-│   ├── test/
-│   │   ├── app.test.ts
-│   │   └── rag.test.ts
-│   └── server.ts                       # Bun.serve entry point
+│   ├── test/                              # bun test suite
+│   └── server.ts                          # Bun.serve entry point + frontend build step
 ├── data/
-│   ├── chembl_transform/               # Parquet files (one per table)
-│   ├── llm_finetune/                   # train.jsonl / valid.jsonl
-│   ├── lancedb/                        # LanceDB vector store
-│   │   └── chembl_CHEMBL_37/           # compounds table (2,854,996 · 2048-bit vectors)
-│   │                                   # polypharmacy table (PRR-filtered TWOSIDES pairs)
-│   └── twosides/                       # TWOSIDES download cache
-│       └── TWOSIDES.parquet            # ~50 MB zstd-compressed (gitignored)
-├── deployments/
-│   └── workspace.yaml                  # Dagster code-location config
-├── notebooks/                          # Exploratory data analysis
-├── artifacts/                          # Fine-tuning run outputs
+│   ├── chembl_transform/                  # Parquet files (one per ChEMBL table)
+│   ├── llm_finetune/                      # train.jsonl / valid.jsonl
+│   ├── lancedb/chembl_CHEMBL_37/          # compounds (2,854,996 vectors) + polypharmacy tables
+│   └── twosides/TWOSIDES.parquet          # PRR-filtered FAERS pairs (~50 MB, gitignored)
+├── deployments/workspace.yaml             # Dagster code-location config
+├── artifacts/                             # Fine-tuning run outputs (gitignored)
 └── pyproject.toml
 ```
 
@@ -501,7 +430,7 @@ chem_mlops/
 ## Development
 
 ```bash
-# Run tests
+# Python tests
 uv run pytest
 
 # Lint
@@ -509,53 +438,16 @@ uv run ruff check .
 
 # Type check
 uv run ty check
+
+# Web tests
+cd web && bun test
 ```
 
-All three must pass with zero errors before merging. CI runs the same checks automatically on every push and pull request via `.github/workflows/ci.yml`.
-
----
-
-## Bun web app
-
-The repository includes a Bun chat app in `web/` with two inference modes selectable via a Standard / RAG pill toggle:
-
-| Mode | Model | How it works |
-|------|-------|-------------|
-| **Standard** | `chembl-drug-chat:1b` | Fine-tuned model, no retrieval |
-| **RAG** | `gemma3:1b` | Base model + LanceDB context injected as system message |
-
-In RAG mode, `web/src/rag.ts` extracts drug-name candidates from the user's message, queries the `compounds` and `polypharmacy` LanceDB tables via the `@lancedb/lancedb` TypeScript client (the same Lance files written by Python — no Python server needed), and prepends a context block before forwarding to Ollama.
-
-**Dev server (hot reload):**
-
-```bash
-cd web
-bun run dev
-```
-
-**Production:**
-
-```bash
-cd web
-bun run start
-```
-
-**Tests:**
-
-```bash
-cd web
-bun test
-```
-
-A `web/.env` file with working defaults is committed to the repo — Bun loads it automatically, so no setup is needed. Edit it to point at a different Ollama host, swap the RAG model, or override the LanceDB path.
-
-Full details live in `web/README.md`.
+All checks run automatically on every push and pull request via `.github/workflows/ci.yml`.
 
 ---
 
 ## Data sources
 
-- **ChEMBL**: [https://www.ebi.ac.uk/chembl/](https://www.ebi.ac.uk/chembl/)
-  - Schema diagram: [chembl_36_schema.png](https://ftp.ebi.ac.uk/pub/databases/chembl/ChEMBLdb/latest/chembl_36_schema.png)
-  - Schema documentation: [schema_documentation.html](https://ftp.ebi.ac.uk/pub/databases/chembl/ChEMBLdb/latest/schema_documentation.html)
-- **TWOSIDES**: Tatonetti et al., *Science Translational Medicine* 2012 — drug-pair adverse event signals derived from FDA FAERS co-reporting. Hosted by the Tatonetti Lab at Columbia University.
+- **ChEMBL** — European Bioinformatics Institute. [ebi.ac.uk/chembl](https://www.ebi.ac.uk/chembl/)
+- **TWOSIDES** — Tatonetti et al., *Science Translational Medicine* 2012. Drug-pair adverse event signals derived from FDA FAERS co-reporting, hosted by the Tatonetti Lab at Columbia University.

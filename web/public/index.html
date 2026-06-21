@@ -7,31 +7,33 @@
     <link rel="stylesheet" href="/style.css" />
   </head>
   <body>
-    <main class="chat">
-      <!-- Page header shows the app name and the model currently being used. -->
-      <header class="chat__header">
+    <div class="layout">
+      <header class="top-bar">
         <h1>Chem MLOps Chat</h1>
-        <p id="model-label">Loading latest model...</p>
-        <div class="mode-toggle" role="group" aria-label="Chat mode">
-          <button id="mode-standard" class="mode-btn active" type="button">Standard</button>
-          <button id="mode-rag" class="mode-btn" type="button">RAG</button>
-        </div>
+        <p id="model-label">Loading model...</p>
       </header>
 
-      <!-- Message feed keeps the full conversation visible. -->
-      <section id="messages" class="messages" aria-live="polite" aria-label="Chat messages"></section>
+      <div class="chat-grid">
+        <div class="pane">
+          <div class="pane__header" id="header-finetuned">Finetuned</div>
+          <section id="messages-finetuned" class="messages" aria-live="polite" aria-label="Finetuned chat messages"></section>
+        </div>
+        <div class="pane">
+          <div class="pane__header" id="header-rag">RAG</div>
+          <section id="messages-rag" class="messages" aria-live="polite" aria-label="RAG chat messages"></section>
+        </div>
+      </div>
 
-      <!-- The form supports Enter-to-send and Shift+Enter for a newline. -->
       <form id="chat-form" class="input-row">
         <textarea
           id="input"
-          placeholder="Message Chem MLOps Chat..."
+          placeholder="Message both models..."
           rows="2"
           aria-label="Chat message"
         ></textarea>
         <button id="btn" type="submit">Send</button>
       </form>
-    </main>
+    </div>
 
     <script type="module" src="/frontend.js"></script>
   </body>
