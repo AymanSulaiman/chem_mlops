@@ -2,7 +2,7 @@
 {"question": "What does Sildenafil inhibit?", "must_contain": ["phosphodiesterase"], "category": "mechanism_of_action"}
 {"question": "What enzyme does Methotrexate inhibit?", "must_contain": ["dihydrofolate"], "category": "mechanism_of_action"}
 {"question": "How does Fluoxetine work?", "must_contain": ["serotonin"], "category": "mechanism_of_action"}
-{"question": "What does Imatinib target?", "must_contain": ["tyrosine kinase"], "category": "mechanism_of_action"}
+{"question": "What does Imatinib target?", "must_contain": ["tyrosine-protein kinase"], "category": "mechanism_of_action"}
 {"question": "What enzyme metabolises Warfarin?", "must_contain": ["cyp2c9"], "category": "metabolism"}
 {"question": "What CYP enzyme metabolises Omeprazole?", "must_contain": ["cyp2c19"], "category": "metabolism"}
 {"question": "What enzyme metabolises Codeine?", "must_contain": ["cyp2d6"], "category": "metabolism"}
