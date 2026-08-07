@@ -8,19 +8,71 @@ Retrieval-Augmented Generation (RAG) at inference time.
 ## Why RAG alongside fine-tuning?
 
 Fine-tuning teaches a model to *sound like* a domain expert. It does not give
-the model reliable access to ground truth records. When asked "what are the known
-metabolic enzymes for ibuprofen?", a fine-tuned model will generate a
-plausible-sounding answer that may be subtly wrong.
+the model reliable access to ground truth records. When asked "is it safe to take
+warfarin with aspirin?", a fine-tuned model will generate a plausible-sounding
+answer that may be subtly wrong.
 
-RAG complements fine-tuning by grounding answers in real ChEMBL records:
+RAG complements fine-tuning by grounding answers in real ChEMBL and TWOSIDES records:
 
 1. Extract drug-name candidates from the user message
-2. Query the vector store for matching compounds and polypharmacy pairs
-3. Inject the retrieved records — indications, mechanisms, warnings, etc. —
-   directly into the prompt as context
+2. Look those names up in the `compounds` and `polypharmacy` tables
+3. Inject the retrieved records into the prompt as a system message
 4. The model formats the answer from retrieved facts rather than generating them from memory
 
 Both modes are served simultaneously in the web UI so their answers can be compared directly.
+
+---
+
+## RAG implementation
+
+Implemented in [`web/src/rag.ts`](../../../../web/src/rag.ts), invoked from
+`web/src/app.ts` when a request arrives with `mode: "rag"`.
+
+> **Retrieval is exact name matching, not vector similarity.** The Morgan
+> fingerprint column is not used by the chat path. It backs `query_compounds()`
+> in `query_lancedb.py`, which only the Python benchmark calls.
+
+### 1. Candidate extraction
+
+`extractDrugCandidates(text)` harvests capitalised words with the regex
+`\b[A-Z][a-zA-Z]{2,}\b`, drops a ~60-word stopword list, then title-cases each
+survivor to match the casing written at ingest time (`str.to_titlecase()`).
+
+A fully lowercase query (`"aspirin and warfarin"`) yields no candidates, so no
+context is built at all.
+
+### 2. Lookups
+
+| Table | Filter | Selected |
+|---|---|---|
+| `compounds` | `LOWER(pref_name) = '<candidate>'` — first 4 candidates | `chembl_id`, `pref_name`, `mw_freebase` |
+| `polypharmacy` | each candidate pair, both orderings | `side_effects`, `max_prr`, `total_cases` |
+| `polypharmacy` | `drug_1_name = '<c>' OR drug_2_name = '<c>'` — first 2 candidates | top 3 partners by `max_prr` |
+
+`side_effects` is stored strongest-signal-first (the TWOSIDES ingest sorts by
+`prr` before aggregating), so `.split(";").slice(0, 3)` yields the three
+strongest effects.
+
+### 3. Prompt injection
+
+Results are formatted as a bullet list under
+`"Relevant pharmacological context retrieved from ChEMBL and TWOSIDES databases:"`,
+which `augmentMessages()` prepends to the history as a `system` message.
+
+`buildRagContext()` returns `null` — and the caller falls back to an unaugmented
+chat — when the LanceDB directory is missing, no candidates are extracted, or no
+rows match.
+
+### Known limitations
+
+- **Only three compound columns are retrieved.** `indications`, `mechanisms`,
+  `warning_descriptions`, and `metabolic_enzymes` are ingested but never read by
+  the chat path. Widening the `.select()` in `rag.ts` is the cheapest available
+  improvement to answer quality.
+- **Multi-word and hyphenated names are missed.** `Ethinyl Estradiol` splits into
+  two candidates that match nothing; `Co-trimoxazole` matches nothing at all.
+- **Failures are silent.** Both lookups are wrapped in bare `try/catch`, so a
+  missing table and a genuine miss are indistinguishable to the caller.
 
 ---
 
@@ -170,7 +222,8 @@ written by the background thread, hiding ~0.5s of I/O per batch.
 | `ProcessPoolExecutor` | ❌ Removed | Keep for fingerprinting | New API is faster single-threaded than old API with 8 workers; spawn overhead is not worth it |
 | `ThreadPoolExecutor` | ✅ 1 write thread | Sync write | Overlaps LanceDB I/O with fingerprinting; GIL released during file I/O |
 | Batch size | ✅ 10,000 rows | 1,000 / 100,000 | Balances memory (~30 MB/batch), IPC cost, and LanceDB commit granularity |
-| Scalar indices | ✅ `chembl_id`, `standard_inchi_key` | None / more | Enables fast exact-match filtering alongside ANN vector search |
+| Scalar indices | ✅ `chembl_id`, `standard_inchi_key` | None / more | Enables fast exact-match filtering — the path the RAG chat actually uses |
+| Vector index | ❌ Not built | IVF-PQ / HNSW | `create_index()` is never called, so `table.search()` is a brute-force scan over all rows. Only the Python benchmark searches by vector, so this has not been a bottleneck |
 
 ---
 
