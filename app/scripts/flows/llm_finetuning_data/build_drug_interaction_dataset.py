@@ -21,8 +21,14 @@ Pulls ChEMBL tables and emits seventeen categories of training pairs:
   16. Biotherapeutics          — biologics, peptides, and their descriptions
   17. Target relations         — target hierarchy (subset/superset/overlap)
 
+Molecules in the eval holdout (see select_holdout) are excluded from every
+generator, and golden.jsonl is rebuilt from those molecules only — otherwise the
+benchmark just measures memorisation of the training templates.
+
 Output: data/llm_finetune/train.jsonl  (90 %)
         data/llm_finetune/valid.jsonl  (10 %)
+        data/llm_finetune/holdout.json (ChEMBL IDs withheld from both)
+        app/scripts/flows/eval/golden.jsonl (benchmark, holdout molecules only)
 """
 
 import functools
@@ -40,6 +46,10 @@ OUTPUT_DIR = Path("data/llm_finetune")
 
 TRAIN_RATIO = 0.9
 RANDOM_SEED = 42
+HOLDOUT_SIZE = 200  # molecules withheld from train/valid so the golden eval is honest
+GOLDEN_SIZE = 40  # golden questions to emit; each one costs an mlx generate call at eval
+HOLDOUT_FILENAME = "holdout.json"
+GOLDEN_PATH = Path(__file__).resolve().parents[1] / "eval" / "golden.jsonl"
 MAX_DDI_PAIRS = 50_000  # raised from 5 K — DDI pairs are the primary focus
 MAX_ASSAY_PAIRS = 5_000  # cap assay-context questions; they dominated the old dataset
 MAX_CYP_INHIBITION_PAIRS = 10_000
@@ -1553,6 +1563,7 @@ def generate_twosides_qa(
     min_prr: float = TWOSIDES_MIN_PRR,
     min_cases: int = TWOSIDES_MIN_CASES,
     max_pairs: int = MAX_TWOSIDES_PAIRS,
+    exclude_names: frozenset[str] = frozenset(),
 ) -> Iterator[dict]:
     """QA pairs from the TWOSIDES polypharmacy side-effect database.
 
@@ -1591,6 +1602,14 @@ def generate_twosides_qa(
         .collect()
     )
     assert isinstance(df, pl.DataFrame)
+
+    if exclude_names:
+        # TWOSIDES has no ChEMBL IDs, so the holdout is filtered by name here.
+        names = list(exclude_names)
+        df = df.filter(
+            ~pl.col("drug_1").str.to_lowercase().is_in(names)
+            & ~pl.col("drug_2").str.to_lowercase().is_in(names)
+        )
 
     # Group by drug pair, aggregate side effects ordered by PRR (strongest first)
     pairs = (
@@ -1657,10 +1676,10 @@ def generate_canonical_drug_facts_qa() -> Iterator[dict]:
     FDA labeling / pharmacology text as the ground truth and are repeated CANONICAL_REPEAT
     times so they constitute a meaningful fraction of the training corpus.
 
-    Each failing golden benchmark question has 10+ unique phrasings here so the model sees
-    the correct answer in many syntactic contexts.
+    Each drug has 10+ unique phrasings here so the model sees the correct answer in many
+    syntactic contexts. These drugs are never held out for eval (see select_holdout) —
+    curating their answers is training, and scoring the model on them would be circular.
     """
-    # Each answer block is written to always contain the golden-benchmark keyword(s).
     _ASPIRIN = (
         "Aspirin (acetylsalicylic acid) irreversibly inhibits cyclooxygenase enzymes — "
         "COX-1 (cyclooxygenase-1) and COX-2 (cyclooxygenase-2). "
@@ -2063,6 +2082,89 @@ def write_jsonl_splits(
 
 
 # ---------------------------------------------------------------------------
+# Eval holdout — keeps golden.jsonl out of the training set
+# ---------------------------------------------------------------------------
+
+
+def select_holdout(
+    molecule_dict: pl.DataFrame,
+    drug_mechanism: pl.DataFrame | None,
+    size: int = HOLDOUT_SIZE,
+    seed: int = RANDOM_SEED,
+) -> list[str]:
+    """Pick ChEMBL IDs to withhold from train/valid so the golden benchmark is honest.
+
+    A candidate needs a real preferred name and a mechanism-of-action row (otherwise
+    there is nothing to ask it about), and must not be one of the drugs hardcoded in
+    generate_canonical_drug_facts_qa — those are deliberate training data.
+    """
+    if drug_mechanism is None or drug_mechanism.is_empty():
+        return []
+
+    with_moa = {int(m) for m in drug_mechanism["molregno"].to_list() if m is not None}
+    # The 20 repeats collapse to the unique pairs, so this blob stays small.
+    canonical = "\n".join({r["text"] for r in generate_canonical_drug_facts_qa()}).lower()
+
+    candidates = sorted(  # sorted first: parquet row order must not change the split
+        mol["chembl_id"]
+        for mol in _mol_lookup(molecule_dict).values()
+        if mol["molregno"] in with_moa
+        and mol.get("chembl_id")
+        and _drug_name(mol) != mol["chembl_id"]
+        and _drug_name(mol).lower() not in canonical
+    )
+    random.Random(seed).shuffle(candidates)
+    return candidates[:size]
+
+
+def exclude_holdout(molecule_dict: pl.DataFrame, holdout_ids: list[str]) -> pl.DataFrame:
+    """Drop holdout molecules from the lookup every molregno-keyed generator builds on."""
+    if not holdout_ids:
+        return molecule_dict
+    return molecule_dict.filter(~pl.col("chembl_id").is_in(holdout_ids))
+
+
+def build_golden_benchmark(
+    molecule_dict: pl.DataFrame,
+    drug_mechanism: pl.DataFrame,
+    target_dict: pl.DataFrame,
+    holdout_ids: list[str],
+    golden_path: Path = GOLDEN_PATH,
+    limit: int = GOLDEN_SIZE,
+) -> int:
+    """Rebuild golden.jsonl from holdout molecules only; returns the question count."""
+    targets = {int(r["tid"]): r for r in target_dict.to_dicts() if r.get("tid") is not None}
+    moa: dict[int, dict] = {}
+    for row in drug_mechanism.to_dicts():
+        molregno = row.get("molregno")
+        if molregno is not None:
+            moa.setdefault(int(molregno), row)
+
+    by_chembl = {m["chembl_id"]: m for m in _mol_lookup(molecule_dict).values()}
+    items: list[dict] = []
+
+    for chembl_id in holdout_ids:
+        mol = by_chembl.get(chembl_id)
+        row = moa.get(int(mol["molregno"])) if mol else None
+        tid = row.get("tid") if row else None
+        target_name = (targets.get(int(tid)) or {}).get("pref_name") if tid is not None else None
+        if not mol or not target_name:
+            continue
+        items.append({
+            "question": f"What does {_drug_name(mol)} target?",
+            "must_contain": [target_name.lower()],
+            "category": "mechanism_of_action",
+            "chembl_id": chembl_id,
+        })
+        if len(items) >= limit:
+            break
+
+    golden_path.parent.mkdir(parents=True, exist_ok=True)
+    golden_path.write_text("\n".join(json.dumps(i) for i in items) + "\n")
+    return len(items)
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -2072,6 +2174,8 @@ def build_drug_interaction_dataset(
     output_dir: Path = OUTPUT_DIR,
     row_limit: int | None = None,
     workers: int = os.cpu_count() or 1,
+    golden_path: Path = GOLDEN_PATH,
+    holdout_size: int = HOLDOUT_SIZE,
 ) -> None:
     """
     Build QA-formatted JSONL training data for a drug-interaction chatbot.
@@ -2086,6 +2190,8 @@ def build_drug_interaction_dataset(
         row_limit:  Cap every table at this many rows on load.
         workers:    Number of parallel generator processes (default: all CPUs).
                     Pass 1 to disable multiprocessing (useful for debugging).
+        golden_path:  Where to write the rebuilt golden benchmark.
+        holdout_size: Molecules to withhold from train/valid (0 disables the holdout).
     """
     print("Loading ChEMBL tables...")
     tables = load_tables(data_dir, row_limit=row_limit)
@@ -2093,6 +2199,16 @@ def build_drug_interaction_dataset(
     mol = tables.get("molecule_dictionary")
     if mol is None:
         raise RuntimeError("molecule_dictionary table is required but not found")
+
+    holdout_ids = select_holdout(mol, tables.get("drug_mechanism"), size=holdout_size)
+    holdout_names = frozenset(
+        _drug_name(m).lower()
+        for m in _mol_lookup(mol).values()
+        if m["chembl_id"] in set(holdout_ids)
+    )
+    print(f"Eval holdout: {len(holdout_ids)} molecules withheld from train/valid")
+    mol_all = mol
+    mol = exclude_holdout(mol, holdout_ids)
 
     compound_records = tables.get("compound_records")
     _cr: pl.DataFrame = compound_records if compound_records is not None else pl.DataFrame()
@@ -2306,7 +2422,7 @@ def build_drug_interaction_dataset(
         ),
         (
             "polypharmacy side effects (TWOSIDES)",
-            functools.partial(generate_twosides_qa),
+            functools.partial(generate_twosides_qa, exclude_names=holdout_names),
             TWOSIDES_PATH.exists(),
         ),
     ]
@@ -2342,6 +2458,19 @@ def build_drug_interaction_dataset(
     print(f"  train.jsonl : {n_train:,} records")
     print(f"  valid.jsonl : {n_valid:,} records")
 
+    (output_dir / HOLDOUT_FILENAME).write_text(json.dumps(holdout_ids, indent=2) + "\n")
+    print(f"  {HOLDOUT_FILENAME} : {len(holdout_ids):,} ChEMBL IDs")
+
+    if holdout_ids and "drug_mechanism" in tables and "target_dictionary" in tables:
+        n_golden = build_golden_benchmark(
+            mol_all,
+            tables["drug_mechanism"],
+            tables["target_dictionary"],
+            holdout_ids,
+            golden_path=golden_path,
+        )
+        print(f"  {golden_path} : {n_golden:,} golden questions")
+
 
 if __name__ == "__main__":
     import argparse
@@ -2376,10 +2505,25 @@ if __name__ == "__main__":
         metavar="N",
         help="Number of parallel generator processes (default: %(default)s). Use 1 to disable.",
     )
+    parser.add_argument(
+        "--golden-path",
+        type=Path,
+        default=GOLDEN_PATH,
+        help="Where to write the rebuilt golden benchmark (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--holdout-size",
+        type=int,
+        default=HOLDOUT_SIZE,
+        metavar="N",
+        help="Molecules withheld from train/valid, 0 to disable (default: %(default)s)",
+    )
     args = parser.parse_args()
     build_drug_interaction_dataset(
         data_dir=args.data_dir,
         output_dir=args.output_dir,
         row_limit=args.row_limit,
         workers=args.workers,
+        golden_path=args.golden_path,
+        holdout_size=args.holdout_size,
     )

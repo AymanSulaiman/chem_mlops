@@ -7,7 +7,8 @@ being worth it. Items 1 and 2 are worth doing regardless of the rest.
 
 ## 1. Fix eval leakage — split by molecule, not by row
 
-**Status:** not started · **Size:** ~half a day · **Blocks:** every number in items 2–5
+**Status:** code done, awaiting a pipeline run · **Size:** ~half a day · **Blocks:**
+every number in items 2–5
 
 Every question in `app/scripts/flows/eval/golden.jsonl` is a training template
 instantiated with a drug that is in the training set. `golden.jsonl:1` is
@@ -25,6 +26,28 @@ gate at `eval_finetuned_model.py:50` is measuring memorisation, not capability.
 
 **Acceptance:** no ChEMBL ID in `golden.jsonl` appears anywhere in `train.jsonl`,
 verified by a check in the test suite, not by eye.
+
+**Done (2026-09-19)**
+- `select_holdout` / `exclude_holdout` / `build_golden_benchmark` in
+  `build_drug_interaction_dataset.py`. The holdout is filtered out of
+  `molecule_dictionary` before the generators run, so every molregno-keyed
+  category drops it at once; TWOSIDES is filtered by name since it carries no
+  ChEMBL IDs. Holdout IDs land in `data/llm_finetune/holdout.json`, and
+  `golden.jsonl` is rebuilt from those molecules in the same run — the two
+  cannot drift apart.
+- Drugs hardcoded in `generate_canonical_drug_facts_qa` are excluded from the
+  holdout: curating their answers is training, so scoring on them is circular.
+- Tests: `TestHoldout` (fixture-level, always runs) plus
+  `test_no_golden_molecule_appears_in_train` in `eval_finetuned_model_test.py`,
+  which checks the real `train.jsonl` when one exists.
+
+**Remaining:** re-run the pipeline on real ChEMBL data and record the honest
+pass rate. The committed `golden.jsonl` is still the old leaked file and no
+`data/chembl_transform` exists in this checkout, so the rebuild has not run.
+
+**Known residual leak:** literature abstracts and assay descriptions are free
+text and can name a holdout drug. Filtering on molecule ID cannot catch that;
+a text-level filter is a separate item if the honest pass rate looks too high.
 
 **Files:** `build_drug_interaction_dataset.py`, `eval/golden.jsonl`,
 `eval/eval_finetuned_model.py`, `app/tests/flows/eval_finetuned_model_test.py`

@@ -364,3 +364,21 @@ class TestGoldenJsonl:
     def test_golden_file_has_at_least_20_questions(self) -> None:
         lines = [ln for ln in GOLDEN_BENCHMARK_PATH.read_text().splitlines() if ln.strip()]
         assert len(lines) >= 20
+
+
+TRAIN_PATH = Path("data/llm_finetune/train.jsonl")
+
+
+@pytest.mark.skipif(not TRAIN_PATH.exists(), reason="train.jsonl not built in this checkout")
+def test_no_golden_molecule_appears_in_train() -> None:
+    """Acceptance criterion for the eval holdout: golden.jsonl must be unseen data.
+
+    Skipped where the dataset has not been built. Rebuild both together with
+    `python -m app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset`.
+    """
+    train = TRAIN_PATH.read_text()
+    items = [json.loads(ln) for ln in GOLDEN_BENCHMARK_PATH.read_text().splitlines() if ln.strip()]
+    for item in items:
+        chembl_id = item.get("chembl_id")
+        assert chembl_id, f"golden entry {item['question']!r} has no chembl_id — rebuild golden.jsonl"
+        assert chembl_id not in train, f"{chembl_id} ({item['question']!r}) leaked into train.jsonl"

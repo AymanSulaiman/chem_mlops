@@ -11,12 +11,14 @@ from app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset import
     _mol_lookup,
     _record_to_molregno,
     build_drug_interaction_dataset,
+    exclude_holdout,
     generate_activity_qa,
     generate_ddi_qa,
     generate_indication_qa,
     generate_mechanism_qa,
     generate_metabolism_qa,
     generate_twosides_qa,
+    select_holdout,
     write_jsonl_splits,
 )
 
@@ -1354,3 +1356,72 @@ def test_twosides_qa_respects_max_pairs(twosides_parquet: Path) -> None:
     pairs = list(generate_twosides_qa(twosides_path=twosides_parquet, min_prr=2.0, min_cases=1, max_pairs=1))
     # max_pairs=1 → only 1 unique drug pair → 3 template variants (+ maybe 1 reversed)
     assert len(pairs) <= 4
+
+
+# ---------------------------------------------------------------------------
+# Eval holdout (no train/golden leakage)
+# ---------------------------------------------------------------------------
+
+
+class TestHoldout:
+    def test_returns_nothing_without_mechanism_data(self, molecule_dict):
+        assert select_holdout(molecule_dict, None) == []
+
+    def test_skips_canonically_trained_and_unnamed_drugs(self):
+        # Aspirin is hardcoded in generate_canonical_drug_facts_qa (deliberate training
+        # data); CHEMBL999 has no usable name. Only the third drug can be held out.
+        mols = pl.DataFrame(
+            {
+                "molregno": [1, 2, 3],
+                "pref_name": ["Aspirin", None, "Zanamitest"],
+                "chembl_id": ["CHEMBL25", "CHEMBL999", "CHEMBL777"],
+                "max_phase": [4, 4, 4],
+            }
+        )
+        mechanisms = pl.DataFrame({"molregno": [1, 2, 3], "tid": [1, 1, 1]})
+        assert select_holdout(mols, mechanisms) == ["CHEMBL777"]
+
+    def test_exclude_holdout_drops_the_molecule(self, molecule_dict):
+        kept = exclude_holdout(molecule_dict, ["CHEMBL25"])
+        assert "CHEMBL25" not in kept["chembl_id"].to_list()
+
+    def test_holdout_is_absent_from_train_and_drives_golden(self, tmp_path, target_dict):
+        data_dir = tmp_path / "chembl"
+        data_dir.mkdir()
+        pl.DataFrame(
+            {
+                "molregno": [1, 2],
+                "pref_name": ["Aspirin", "Zanamitest"],
+                "chembl_id": ["CHEMBL25", "CHEMBL777"],
+                "max_phase": [4, 4],
+            }
+        ).write_parquet(data_dir / "molecule_dictionary.parquet")
+        pl.DataFrame(
+            {
+                "molregno": [1, 2],
+                "mechanism_of_action": ["Cyclooxygenase inhibitor", "Vitamin K antagonist"],
+                "tid": [1, 2],
+                "action_type": ["INHIBITOR", "INHIBITOR"],
+            }
+        ).write_parquet(data_dir / "drug_mechanism.parquet")
+        target_dict.write_parquet(data_dir / "target_dictionary.parquet")
+
+        output_dir = tmp_path / "output"
+        golden_path = tmp_path / "golden.jsonl"
+        build_drug_interaction_dataset(
+            data_dir=data_dir, output_dir=output_dir, golden_path=golden_path
+        )
+
+        holdout = json.loads((output_dir / "holdout.json").read_text())
+        assert holdout == ["CHEMBL777"]
+
+        golden = [json.loads(ln) for ln in golden_path.read_text().splitlines() if ln.strip()]
+        assert [i["chembl_id"] for i in golden] == holdout
+        assert golden[0]["question"] == "What does Zanamitest target?"
+        assert golden[0]["must_contain"] == ["vitamin k epoxide reductase"]
+
+        # The acceptance criterion: nothing about a golden molecule reaches the model.
+        for split in ("train.jsonl", "valid.jsonl"):
+            text = (output_dir / split).read_text()
+            assert "CHEMBL777" not in text
+            assert "Zanamitest" not in text
