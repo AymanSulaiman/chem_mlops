@@ -180,7 +180,9 @@ test("the tool loop stops at maxToolSteps", async () => {
     new Request("http://localhost/api/chat", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ messages: [{ role: "user", content: "draw ethanol" }] }),
+      // Not a "draw X" phrasing: this test is about the model's own loop, and
+      // routeDirectToolCall would otherwise add a call of its own.
+      body: JSON.stringify({ messages: [{ role: "user", content: "tell me about ethanol" }] }),
     }),
   );
 
@@ -264,4 +266,116 @@ test("a brace in prose is released, not swallowed", async () => {
   );
 
   expect(answerOf(await collectEvents(response))).toBe("Formula {C9H8O4} is aspirin.");
+});
+
+test("an explicit draw request is answered from the tool result, not by the model", async () => {
+  const calls: { tool: string; args: Record<string, unknown> }[] = [];
+  let modelTurns = 0;
+  const handler = createChatRequestHandler({
+    publicDir: new URL("../public/", import.meta.url),
+    fetchImpl: async (input) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (url.endsWith("/api/tags")) return Response.json({ models: [] });
+      if (url.endsWith("/api/chat")) {
+        modelTurns += 1;
+        return reply("CHEMBL999999 is paracetamol, probably.");
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    },
+    toolRunner: async (call) => {
+      calls.push(call);
+      return {
+        result: {
+          image: "data:image/png;base64,AAA",
+          smiles: "CNCCC(Oc1ccc(C(F)(F)F)cc1)c1ccccc1.Cl",
+          source: "ChEMBL",
+          chembl_id: "CHEMBL1201082",
+          pref_name: "FLUOXETINE HYDROCHLORIDE",
+          full_molformula: "C17H19ClF3NO",
+          mw_freebase: "309.33",
+        },
+      };
+    },
+  });
+
+  const response = await handler(
+    new Request("http://localhost/api/chat", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        messages: [{ role: "user", content: "Show me the molecular structure of prozac" }],
+      }),
+    }),
+  );
+
+  const events = await collectEvents(response);
+  expect(calls).toEqual([{ tool: "draw_molecule", args: { name: "prozac" } }]);
+  expect(events[0]?.tool).toEqual({ tool: "draw_molecule", args: { name: "prozac" } });
+  expect(events[1]?.toolResult?.tool).toBe("draw_molecule");
+  // Caption comes from the tool result; the model gets no turn, so it cannot
+  // contribute the hallucinated ChEMBL ID it would otherwise volunteer.
+  expect(answerOf(events)).toBe(
+    "FLUOXETINE HYDROCHLORIDE (CHEMBL1201082) — C17H19ClF3NO, MW 309.33. " +
+      "SMILES: CNCCC(Oc1ccc(C(F)(F)F)cc1)c1ccccc1.Cl",
+  );
+  expect(modelTurns).toBe(0);
+  expect(events.at(-1)?.done).toBe(true);
+});
+
+test("an ordinary question does not trigger the bridge", async () => {
+  let toolRuns = 0;
+  const handler = createChatRequestHandler({
+    publicDir: new URL("../public/", import.meta.url),
+    fetchImpl: async (input) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (url.endsWith("/api/tags")) return Response.json({ models: [] });
+      if (url.endsWith("/api/chat")) return reply("Aspirin inhibits COX-1.");
+      throw new Error(`Unexpected request: ${url}`);
+    },
+    toolRunner: async () => { toolRuns += 1; return { result: null }; },
+  });
+
+  await handler(
+    new Request("http://localhost/api/chat", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ messages: [{ role: "user", content: "What does Aspirin target?" }] }),
+    }),
+  ).then(collectEvents);
+
+  expect(toolRuns).toBe(0);
+});
+
+test("a call naming a tool we do not have is corrected, not shown to the user", async () => {
+  const replies = [
+    `{"tool": "query_compound_by_name", "args": {"name": "Prozac"}}`,  // no such tool
+    `{"tool": "get_compound_by_name", "args": {"name": "Prozac"}}`,
+    "Prozac is fluoxetine, CHEMBL1201082.",
+  ];
+  const handler = createChatRequestHandler({
+    publicDir: new URL("../public/", import.meta.url),
+    fetchImpl: async (input) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (url.endsWith("/api/tags")) return Response.json({ models: [] });
+      if (url.endsWith("/api/chat")) return reply(replies.shift() ?? "done");
+      throw new Error(`Unexpected request: ${url}`);
+    },
+    toolRunner: async () => ({ result: { chembl_id: "CHEMBL1201082" } }),
+  });
+
+  const response = await handler(
+    new Request("http://localhost/api/chat", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ messages: [{ role: "user", content: "what is prozac" }] }),
+    }),
+  );
+
+  const events = await collectEvents(response);
+  const answer = answerOf(events);
+  expect(answer).toBe("Prozac is fluoxetine, CHEMBL1201082.");
+  expect(answer).not.toContain("query_compound_by_name"); // never leaked as prose
+  const errored = events.find(e => e.toolResult?.error);
+  expect(errored?.toolResult?.tool).toBe("query_compound_by_name");
+  expect(errored?.toolResult?.error).toContain("Unknown tool");
 });

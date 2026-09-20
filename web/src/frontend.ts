@@ -1,6 +1,7 @@
 /// <reference lib="dom" />
 import { formatReplyText, renderMarkdown, type ChatResult, type ModelInfo } from "./frontend-helpers";
 import type { ChatMessage } from "./app";
+import { TOOL_SPECS } from "./tools";
 
 function el<T extends HTMLElement>(id: string): T {
   const e = document.getElementById(id);
@@ -15,6 +16,47 @@ const modelLabel = el<HTMLElement>("model-label");
 const messages = el<HTMLElement>("messages");
 
 const history: ChatMessage[] = [];
+
+// In-app manual, built from TOOL_SPECS so it cannot drift from the tools that
+// are actually wired up. Each example fills the input, so it is usable as well
+// as readable.
+function renderManual() {
+  const body = el<HTMLElement>("manual-body");
+
+  const intro = document.createElement("p");
+  intro.className = "manual__intro";
+  intro.textContent =
+    "Answers come from the ChEMBL and TWOSIDES databases through tools. " +
+    "When a tool runs you'll see a dashed bubble with the call and what it returned. " +
+    "Structure requests always run a tool; the rest depend on the model choosing to call one.";
+  body.appendChild(intro);
+
+  for (const spec of TOOL_SPECS) {
+    const row = document.createElement("div");
+    row.className = "manual__row";
+
+    const example = document.createElement("button");
+    example.type = "button";
+    example.className = "manual__ask";
+    example.textContent = spec.ask;
+    example.addEventListener("click", () => {
+      input.value = spec.ask;
+      resizeInput();
+      input.focus();
+    });
+
+    const detail = document.createElement("p");
+    detail.className = "manual__detail";
+    detail.textContent = "help" in spec ? spec.help : spec.description;
+
+    const name = document.createElement("code");
+    name.className = "manual__name";
+    name.textContent = spec.name;
+
+    row.append(example, detail, name);
+    body.appendChild(row);
+  }
+}
 
 async function loadModel() {
   try {
@@ -174,4 +216,5 @@ input.addEventListener("keydown", (event: KeyboardEvent) => {
 
 input.addEventListener("input", resizeInput);
 resizeInput();
+renderManual();
 loadModel();

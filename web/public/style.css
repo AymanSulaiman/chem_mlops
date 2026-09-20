@@ -231,3 +231,86 @@ body {
   background: white;
   max-width: 320px;
 }
+
+/* In-app manual: what the tools are and what to type to reach them */
+.manual {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  flex-shrink: 0;
+  font-size: 13px;
+}
+
+.manual > summary {
+  padding: 8px 14px;
+  cursor: pointer;
+  color: var(--muted);
+  font-weight: 600;
+  list-style: none;
+}
+
+.manual > summary::before {
+  content: "▸ ";
+}
+
+.manual[open] > summary::before {
+  content: "▾ ";
+}
+
+.manual > summary:hover {
+  color: var(--text);
+}
+
+.manual__body {
+  padding: 0 14px 12px;
+  display: grid;
+  gap: 8px;
+}
+
+.manual__intro {
+  color: var(--muted);
+  line-height: 1.5;
+  max-width: 80ch;
+}
+
+/* Example | description | tool name, collapsing to one column when narrow */
+.manual__row {
+  display: grid;
+  grid-template-columns: minmax(200px, 22rem) 1fr auto;
+  gap: 4px 14px;
+  align-items: baseline;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
+.manual__ask {
+  text-align: left;
+  background: var(--surface-alt);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  padding: 6px 10px;
+  font: inherit;
+  cursor: pointer;
+}
+
+.manual__ask:hover {
+  border-color: rgba(16, 163, 127, 0.9);
+}
+
+.manual__detail {
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.manual__name {
+  color: var(--muted);
+  font-family: ui-monospace, "Cascadia Code", monospace;
+  font-size: 12px;
+}
+
+@media (max-width: 768px) {
+  .manual { border-radius: 0; border-left: none; border-right: none; }
+  .manual__row { grid-template-columns: 1fr; }
+  .manual__name { display: none; }
+}

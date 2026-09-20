@@ -60,7 +60,11 @@ def draw_molecule(
     if name:
         record = get_compound_by_name(name)
         if record is None:
-            raise ValueError(f"No ChEMBL compound named '{name}' — check the spelling.")
+            # The caller may have routed a SMILES the user typed into `name`.
+            if Chem.MolFromSmiles(name) is not None:
+                smiles = name
+            else:
+                raise ValueError(f"No ChEMBL compound named '{name}' — check the spelling.")
     elif smiles and Chem.MolFromSmiles(smiles) is None:
         record = get_compound_by_name(smiles)  # a drug name in the smiles field
         if record is None:
@@ -81,6 +85,11 @@ def draw_molecule(
     if record:
         result["chembl_id"] = str(record["chembl_id"])
         result["pref_name"] = str(record["pref_name"])
+        # Carry the facts a caption would quote. Without them the model invents
+        # a formula to put next to the picture.
+        for field in ("full_molformula", "mw_freebase"):
+            if record.get(field) is not None:
+                result[field] = str(record[field])
     return result
 
 

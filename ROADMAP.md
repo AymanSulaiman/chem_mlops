@@ -138,12 +138,33 @@ measure against.
 
 **Scope**
 - Add a tool-call category to the dataset builder: question → JSON tool call →
-  tool result → final answer.
+  tool result → final answer. **Done (2026-09-19):** `generate_tool_call_qa` in
+  `build_drug_interaction_dataset.py`, registered as the "tool calls" category.
+  60 K records (15 K per tool) covering `get_compound_by_name`, `draw_molecule`,
+  `query_polypharmacy`, `query_drug_side_effects`. `query_compounds` is left out:
+  a similarity search needs a SMILES the model does not know, so a truthful
+  example is a two-hop chain whose second tool result needs the vector store.
+  The record layout is byte-identical to the serve-time prompt (Ollama's
+  template plus `formatToolResult`), asserted in both test suites.
+- **Open question the run will answer: the ratio.** 60 K tool records sit
+  against ~900 K prose records that answer the same question shapes from memory.
+  If the fine-tune still skips tools, raising `MAX_TOOL_CALL_PAIRS` alone will
+  not fix it — the competing prose categories (compound facts, polypharmacy)
+  have to be converted or downsampled.
 - Alternative if that underperforms: constrained decoding at serve time, forcing
   valid JSON on the tool-call turn. Cheaper to try first, worth benchmarking
   against the fine-tune approach.
 - Measure tool-call validity rate on the item 1 holdout set as its own metric,
   separate from answer quality.
+
+**Temporary bridge (2026-09-19):** `routeDirectToolCall` + `describeDrawResult`
+in `web/src/tools.ts` answer an explicit "draw X" deterministically — tool call
+and caption both, with no model turn. It exists because the current fine-tune
+not only fails to call tools, it cannot use a tool result it is handed: given
+one it echoes the JSON shape (`{ CHEMBL1201082 }`, an invented ebi.ac.uk URL).
+Delete it and its call site when this item lands; both are marked TEMPORARY.
+A bogus tool name from the model is now fed back as an error rather than shown
+to the user (`unknownToolName`).
 
 **Acceptance:** tool-call JSON parses on a stated majority of attempts, measured
 on held-out drugs. This item decides whether the agent is real — if the number

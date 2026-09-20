@@ -17,6 +17,7 @@ from app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset import
     generate_indication_qa,
     generate_mechanism_qa,
     generate_metabolism_qa,
+    generate_tool_call_qa,
     generate_twosides_qa,
     select_holdout,
     write_jsonl_splits,
@@ -1425,3 +1426,124 @@ class TestHoldout:
             text = (output_dir / split).read_text()
             assert "CHEMBL777" not in text
             assert "Zanamitest" not in text
+
+
+# ---------------------------------------------------------------------------
+# Tool-call generator
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def tool_call_tables():
+    """A molecule with properties and a structure, plus one unnamed molecule."""
+    mol = pl.DataFrame(
+        {
+            "molregno": [1, 2],
+            "pref_name": ["Aspirin", None],
+            "chembl_id": ["CHEMBL25", "CHEMBL999"],
+            "max_phase": [4, 1],
+        }
+    )
+    props = pl.DataFrame(
+        {
+            "molregno": [1, 2],
+            "full_mwt": [180.16, 200.0],
+            "full_molformula": ["C9H8O4", "C10H10O4"],
+            "alogp": [1.31, 2.0],
+        }
+    )
+    structures = pl.DataFrame(
+        {
+            "molregno": [1, 2],
+            "canonical_smiles": ["CC(=O)Oc1ccccc1C(=O)O", "CCO"],
+        }
+    )
+    return mol, props, structures
+
+
+def test_tool_call_record_matches_the_serve_time_prompt(tool_call_tables) -> None:
+    """The layout must equal what web/src/app.ts + the Modelfile template produce."""
+    mol, props, structures = tool_call_tables
+    records = list(generate_tool_call_qa(mol, props, structures, twosides_path=Path("nope")))
+    lookup = next(r for r in records if "get_compound_by_name" in r["text"])
+
+    assert lookup["text"] == (
+        "### Question\nWhat is the molecular weight of Aspirin?\n\n"
+        '### Answer\n{"tool": "get_compound_by_name", "args": {"name": "Aspirin"}}\n\n'
+        "### Question\n### Tool result (get_compound_by_name)\n"
+        '{"chembl_id": "CHEMBL25", "pref_name": "ASPIRIN", "mw_freebase": 180.16, '
+        '"full_molformula": "C9H8O4", "alogp": 1.31}\n\n'
+        "### Answer\nAspirin is CHEMBL25 in ChEMBL, with a molecular weight of 180.16. "
+        "Its molecular formula is C9H8O4."
+    )
+    # Two turns: the call, then the grounded answer.
+    assert lookup["text"].count("### Question") == 2
+    assert lookup["text"].count("### Answer") == 2
+
+
+def test_tool_call_json_is_parseable(tool_call_tables) -> None:
+    mol, props, structures = tool_call_tables
+    for record in generate_tool_call_qa(mol, props, structures, twosides_path=Path("nope")):
+        call_block = record["text"].split("### Answer\n")[1].split("\n\n")[0]
+        call = json.loads(call_block)
+        assert call["tool"] in {"get_compound_by_name", "draw_molecule"}
+        assert isinstance(call["args"], dict)
+
+
+def test_draw_examples_pass_a_name_never_a_smiles(tool_call_tables) -> None:
+    """The whole point: a model that invents SMILES draws the wrong molecule."""
+    mol, props, structures = tool_call_tables
+    draws = [
+        r for r in generate_tool_call_qa(mol, props, structures, twosides_path=Path("nope"))
+        if "draw_molecule" in r["text"]
+    ]
+    assert draws
+    for record in draws:
+        call = json.loads(record["text"].split("### Answer\n")[1].split("\n\n")[0])
+        assert call["args"] == {"name": "Aspirin"}
+        assert "smiles" not in call["args"]
+
+
+def test_tool_call_skips_molecules_without_a_real_name(tool_call_tables) -> None:
+    # CHEMBL999 has no pref_name, so _drug_name falls back to the ID — looking
+    # that up by name would fail at inference.
+    mol, props, structures = tool_call_tables
+    text = " ".join(
+        r["text"] for r in generate_tool_call_qa(mol, props, structures, twosides_path=Path("nope"))
+    )
+    assert "CHEMBL999" not in text
+
+
+def test_tool_call_respects_the_holdout(tool_call_tables) -> None:
+    mol, props, structures = tool_call_tables
+    records = list(
+        generate_tool_call_qa(
+            mol, props, structures, twosides_path=Path("nope"), exclude_names=frozenset({"aspirin"})
+        )
+    )
+    assert records == []
+
+
+def test_tool_call_works_without_structures(tool_call_tables) -> None:
+    mol, props, _ = tool_call_tables
+    records = list(generate_tool_call_qa(mol, props, None, twosides_path=Path("nope")))
+    assert records
+    assert all("draw_molecule" not in r["text"] for r in records)
+
+
+def test_tool_call_covers_both_polypharmacy_tools(tool_call_tables, twosides_parquet) -> None:
+    mol, props, structures = tool_call_tables
+    records = list(
+        generate_tool_call_qa(mol, props, structures, twosides_path=twosides_parquet)
+    )
+    tools = {json.loads(r["text"].split("### Answer\n")[1].split("\n\n")[0])["tool"] for r in records}
+    assert {"query_polypharmacy", "query_drug_side_effects"} <= tools
+
+
+def test_tool_call_respects_max_pairs(tool_call_tables) -> None:
+    mol, props, structures = tool_call_tables
+    records = list(
+        generate_tool_call_qa(mol, props, structures, twosides_path=Path("nope"), max_pairs=1)
+    )
+    lookups = [r for r in records if "get_compound_by_name" in r["text"]]
+    assert len(lookups) == 1

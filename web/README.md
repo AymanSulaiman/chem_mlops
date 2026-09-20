@@ -42,6 +42,17 @@ table, and a name mistakenly passed in the `smiles` field is retried as a lookup
 A SMILES is only drawn as given when the user supplied one, and the result says
 which (`source: ChEMBL` or `supplied by the user`).
 
+### Temporary: the draw bridge
+
+`routeDirectToolCall` in `src/tools.ts` routes an explicit "draw X" / "show me
+the structure of X" straight to `draw_molecule`, and captions it from the tool
+result with `describeDrawResult` — the model gets no turn at all. This is **not
+the model calling a tool**: handed a tool result, `chembl-drug-chat:1b` mimics
+its JSON shape rather than reading it (real captures: `{ CHEMBL1201082 }`, and
+an invented ebi.ac.uk image URL). Delete both functions and their call sites in
+`app.ts` once a fine-tune trained on the dataset's "tool calls" category does
+the routing itself. Every other question still goes to the model.
+
 ### Tool calls are prompted, not native
 
 Ollama refuses its `tools` field for this model (`does not support tools` — Gemma 3
@@ -52,12 +63,26 @@ not yet a reliable caller. Teaching it is roadmap item 3.
 
 ---
 
+## In-app manual
+
+The page carries its own manual: a collapsed **"What can I ask?"** panel above
+the chat, listing every tool with a clickable example that fills the input.
+It is rendered from `TOOL_SPECS` in `src/tools.ts`, so adding a tool adds a row
+— there is no second list to keep in sync. Each spec carries `description`
+(written for the model, goes in the system prompt) and optionally `help`
+(written for a person, shown in the manual) for the cases where those differ.
+
+A test asserts each example actually reaches the tool it advertises: the draw
+phrasing through the bridge, the rest left for the model to decide.
+
+---
+
 ## Folder structure
 
 ```
 web/
 ├── public/
-│   ├── index.html          # Single-pane layout
+│   ├── index.html          # Single-pane layout + manual container
 │   ├── style.css
 │   └── frontend.js         # Bundled from src/frontend.ts at server startup
 ├── src/

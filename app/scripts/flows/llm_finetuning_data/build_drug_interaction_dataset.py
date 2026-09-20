@@ -38,6 +38,7 @@ import random
 from collections.abc import Iterator
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from pathlib import Path
+from typing import Any
 
 import polars as pl
 
@@ -56,6 +57,12 @@ MAX_CYP_INHIBITION_PAIRS = 10_000
 MAX_PD_PAIRS = 20_000
 MAX_PGP_PAIRS = 5_000
 MAX_TWOSIDES_PAIRS = 50_000
+MAX_TOOL_CALL_PAIRS = 15_000  # per tool; see generate_tool_call_qa on the ratio that matters
+# Must match web/src/tools.ts: the header the server puts on a tool result, and
+# the length it truncates results to. Training text and serve-time prompt have
+# to be byte-identical in shape or the fine-tune learns a format it never sees.
+TOOL_RESULT_HEADER = "### Tool result"
+TOOL_RESULT_LIMIT = 2_000
 
 TWOSIDES_PATH = Path("data/twosides/TWOSIDES.parquet")
 # Minimum signal thresholds — PRR >= 3 and at least 5 co-reported cases
@@ -86,6 +93,13 @@ _REQUIRED_TABLES = {
     "protein_classification",
     "biotherapeutics",
     "target_relations",
+    "compound_structures",
+}
+
+# compound_structures.parquet is 2 GB because of the molfile column; the two
+# columns we need are 185 MB. Loading is column-scoped for exactly this reason.
+_TABLE_COLUMNS: dict[str, list[str]] = {
+    "compound_structures": ["molregno", "canonical_smiles"],
 }
 
 
@@ -137,7 +151,7 @@ def load_tables(
         path = data_dir / f"{name}.parquet"
         if not path.exists():
             return name, None
-        return name, pl.read_parquet(path, n_rows=row_limit)
+        return name, pl.read_parquet(path, n_rows=row_limit, columns=_TABLE_COLUMNS.get(name))
 
     tables: dict[str, pl.DataFrame] = {}
     missing: list[str] = []
@@ -1558,26 +1572,20 @@ def generate_pgp_interaction_qa(
 # ---------------------------------------------------------------------------
 
 
-def generate_twosides_qa(
+def _twosides_pairs(
     twosides_path: Path = TWOSIDES_PATH,
     min_prr: float = TWOSIDES_MIN_PRR,
     min_cases: int = TWOSIDES_MIN_CASES,
     max_pairs: int = MAX_TWOSIDES_PAIRS,
     exclude_names: frozenset[str] = frozenset(),
-) -> Iterator[dict]:
-    """QA pairs from the TWOSIDES polypharmacy side-effect database.
+) -> pl.DataFrame | None:
+    """Drug pairs with aggregated side effects, strongest PRR signal first.
 
-    TWOSIDES contains drug-pair adverse event signals derived from FDA FAERS.
-    Each (drug_1, drug_2) pair is associated with one or more side effects that
-    show disproportionate reporting when both drugs are taken together, measured
-    by the Proportional Reporting Ratio (PRR).
-
-    Yields nothing if TWOSIDES has not been downloaded yet — run
-    `python -m app.scripts.flows.llm_finetuning_data.download_twosides` first.
+    Returns ``None`` when TWOSIDES has not been downloaded yet. Shared by the
+    prose generator and the tool-call generator so the two cannot drift apart.
     """
-
     if not twosides_path.exists():
-        return
+        return None
 
     # Read and filter in one pass using Polars lazy evaluation over Parquet.
     # Explicit casts guard against Parquet files written with all-String schemas
@@ -1624,6 +1632,29 @@ def generate_twosides_qa(
         .sort("max_prr", descending=True)
         .head(max_pairs)
     )
+    return pairs
+
+
+def generate_twosides_qa(
+    twosides_path: Path = TWOSIDES_PATH,
+    min_prr: float = TWOSIDES_MIN_PRR,
+    min_cases: int = TWOSIDES_MIN_CASES,
+    max_pairs: int = MAX_TWOSIDES_PAIRS,
+    exclude_names: frozenset[str] = frozenset(),
+) -> Iterator[dict]:
+    """QA pairs from the TWOSIDES polypharmacy side-effect database.
+
+    TWOSIDES contains drug-pair adverse event signals derived from FDA FAERS.
+    Each (drug_1, drug_2) pair is associated with one or more side effects that
+    show disproportionate reporting when both drugs are taken together, measured
+    by the Proportional Reporting Ratio (PRR).
+
+    Yields nothing if TWOSIDES has not been downloaded yet — run
+    `python -m app.scripts.flows.llm_finetuning_data.download_twosides` first.
+    """
+    pairs = _twosides_pairs(twosides_path, min_prr, min_cases, max_pairs, exclude_names)
+    if pairs is None:
+        return
 
     templates = [
         lambda d1, d2, se, prr, n: (
@@ -1666,6 +1697,190 @@ def generate_twosides_qa(
         if rng.random() < 0.5:
             question, answer = templates[0](d2, d1, se, prr, n)
             yield {"text": f"### Question\n{question}\n\n### Answer\n{answer}"}
+
+
+def _tool_call_record(
+    question: str,
+    tool: str,
+    args: dict[str, Any],
+    result: Any,
+    answer: str,
+) -> dict:
+    """One record covering both turns of a tool call: the call, then the answer.
+
+    The layout is exactly what the model sees at inference. Ollama's Modelfile
+    template wraps every user message in ``### Question`` / ``### Answer``, and
+    the server sends the tool result as a user message that starts with
+    ``### Tool result (<tool>)`` — so the result block appears *inside* a
+    question block. Odd to read, but copying it verbatim is the whole point:
+    train-serve mismatch is why prompted tool calling fails on this model.
+    """
+    call = json.dumps({"tool": tool, "args": args})
+    body = json.dumps(result, default=str)[:TOOL_RESULT_LIMIT]
+    return {
+        "text": (
+            f"### Question\n{question}\n\n"
+            f"### Answer\n{call}\n\n"
+            f"### Question\n{TOOL_RESULT_HEADER} ({tool})\n{body}\n\n"
+            f"### Answer\n{answer}"
+        )
+    }
+
+
+def generate_tool_call_qa(
+    molecule_dict: pl.DataFrame,
+    compound_properties: pl.DataFrame,
+    compound_structures: pl.DataFrame | None = None,
+    twosides_path: Path = TWOSIDES_PATH,
+    max_pairs: int = MAX_TOOL_CALL_PAIRS,
+    exclude_names: frozenset[str] = frozenset(),
+) -> Iterator[dict]:
+    """Teach the model to call the web app's tools instead of answering from memory.
+
+    Covers four of the five tools in `app/scripts/flows/vector_store/tools.py`.
+    `query_compounds` is left out on purpose: a similarity search needs a SMILES
+    the model does not know, so a truthful example would be a two-hop chain whose
+    second tool result cannot be produced without querying the vector store.
+
+    **The ratio is what decides whether this works.** Every other generator maps
+    "What is the molecular weight of X?" to prose, and there are ~900 K of those.
+    These examples map the same question shape to a tool call. If the fine-tune
+    still answers from memory after a run, the fix is not more tool examples but
+    fewer competing prose ones — convert or downsample the compound-fact and
+    polypharmacy categories rather than raising `max_pairs` alone.
+    """
+    props = {
+        row["molregno"]: row
+        for row in compound_properties.select(
+            ["molregno", "full_mwt", "full_molformula", "alogp"]
+        ).to_dicts()
+    }
+    smiles_by_molregno: dict[int, str] = {}
+    if compound_structures is not None:
+        smiles_by_molregno = {
+            row["molregno"]: row["canonical_smiles"]
+            for row in compound_structures.select(["molregno", "canonical_smiles"]).to_dicts()
+            if row.get("canonical_smiles")
+        }
+
+    lookup_questions = [
+        "What is the molecular weight of {drug}?",
+        "Look up {drug} in ChEMBL.",
+        "What is the ChEMBL ID for {drug}?",
+    ]
+    draw_questions = [
+        "Draw {drug}.",
+        "Show me the structure of {drug}.",
+        "What does {drug} look like?",
+    ]
+
+    emitted_lookup = 0
+    emitted_draw = 0
+    for mol in _mol_lookup(molecule_dict).values():
+        if emitted_lookup >= max_pairs and emitted_draw >= max_pairs:
+            break
+
+        drug = _drug_name(mol)
+        chembl_id = mol.get("chembl_id") or ""
+        # _drug_name falls back to the ChEMBL ID; asking to look up an ID by name
+        # teaches a lookup that fails at inference.
+        if not chembl_id or drug == chembl_id or drug.lower() in exclude_names:
+            continue
+
+        prop = props.get(mol["molregno"], {})
+        mw = prop.get("full_mwt")
+        formula = prop.get("full_molformula")
+
+        if mw is not None and emitted_lookup < max_pairs:
+            result = {"chembl_id": chembl_id, "pref_name": drug.upper(), "mw_freebase": mw}
+            if formula:
+                result["full_molformula"] = formula
+            if prop.get("alogp") is not None:
+                result["alogp"] = prop["alogp"]
+            answer = (
+                f"{drug} is {chembl_id} in ChEMBL, with a molecular weight of {mw:.2f}."
+                + (f" Its molecular formula is {formula}." if formula else "")
+            )
+            question = lookup_questions[emitted_lookup % len(lookup_questions)]
+            yield _tool_call_record(
+                question.format(drug=drug),
+                "get_compound_by_name",
+                {"name": drug},
+                result,
+                answer,
+            )
+            emitted_lookup += 1
+
+        smiles = smiles_by_molregno.get(mol["molregno"])
+        if smiles and emitted_draw < max_pairs:
+            # The name is the argument, never the SMILES: a model that invents
+            # SMILES draws a molecule that parses and is wrong.
+            result = {
+                "smiles": smiles,
+                "source": "ChEMBL",
+                "chembl_id": chembl_id,
+                "pref_name": drug.upper(),
+                "image": "the picture is already displayed to the user",
+            }
+            # The answer below quotes the formula, so the tool result has to
+            # contain it — an answer citing a fact the result lacks is a worked
+            # example of hallucination.
+            if formula:
+                result["full_molformula"] = formula
+            answer = (
+                f"The structure of {drug} ({chembl_id}) is shown above. "
+                f"Its canonical SMILES is {smiles}."
+                + (f" Molecular formula: {formula}." if formula else "")
+            )
+            question = draw_questions[emitted_draw % len(draw_questions)]
+            yield _tool_call_record(
+                question.format(drug=drug),
+                "draw_molecule",
+                {"name": drug},
+                result,
+                answer,
+            )
+            emitted_draw += 1
+
+    pairs = _twosides_pairs(
+        twosides_path, max_pairs=max_pairs, exclude_names=exclude_names
+    )
+    if pairs is None:
+        return
+
+    for row in pairs.iter_rows(named=True):
+        d1, d2 = row["drug_1"], row["drug_2"]
+        effects = row["side_effects"]
+        prr = row["max_prr"]
+        top = effects.split(";")[0].strip()
+
+        pair_result = {
+            "drug_1_name": d1,
+            "drug_2_name": d2,
+            "side_effects": effects,
+            "max_prr": prr,
+            "total_cases": row["total_cases"],
+            "n_side_effects": row["n_effects"],
+        }
+        yield _tool_call_record(
+            f"Is it safe to take {d1} with {d2}?",
+            "query_polypharmacy",
+            {"drug_1": d1, "drug_2": d2},
+            pair_result,
+            f"TWOSIDES reports {row['n_effects']} adverse effect(s) for {d1} with {d2}, "
+            f"the strongest being {top} (PRR {prr:.1f}, {row['total_cases']} cases). "
+            f"Full list: {effects}.",
+        )
+
+        # One drug, many partners — the other polypharmacy tool.
+        yield _tool_call_record(
+            f"Which drugs interact with {d1}?",
+            "query_drug_side_effects",
+            {"drug_name": d1, "n": 10},
+            [pair_result],
+            f"The strongest reported interaction for {d1} in TWOSIDES is with {d2}: "
+            f"{top} (PRR {prr:.1f}).",
+        )
 
 
 def generate_canonical_drug_facts_qa() -> Iterator[dict]:
@@ -2224,6 +2439,19 @@ def build_drug_interaction_dataset(
             "greetings & capabilities",
             functools.partial(generate_greeting_qa),
             True,
+        ),
+        (
+            "tool calls",
+            functools.partial(
+                generate_tool_call_qa,
+                mol,
+                tables["compound_properties"],
+                tables.get("compound_structures"),
+                exclude_names=holdout_names,
+            )
+            if "compound_properties" in tables
+            else functools.partial(generate_greeting_qa),
+            "compound_properties" in tables,
         ),
         (
             "mechanism-of-action",

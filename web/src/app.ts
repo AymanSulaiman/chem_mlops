@@ -1,8 +1,13 @@
 import {
+  describeDrawResult,
   formatToolResult,
   parseToolCall,
+  routeDirectToolCall,
   runTool,
+  TOOL_RESULT_HEADER,
   TOOL_SYSTEM_PROMPT,
+  unknownToolError,
+  unknownToolName,
   type ToolCall,
   type ToolOutcome,
 } from "./tools";
@@ -209,6 +214,23 @@ export function createChatRequestHandler(options: ChatAppOptions = {}) {
         let steps = 0;
 
         try {
+          // TEMPORARY bridge — see routeDirectToolCall in tools.ts. An explicit
+          // "draw X" runs the tool before the model gets a turn, so the answer
+          // is grounded even though this fine-tune never calls tools itself.
+          const direct = routeDirectToolCall(messages.at(-1)?.content ?? "");
+          if (direct) {
+            steps++;
+            send({ tool: direct });
+            const outcome = await toolRunner(direct);
+            send({ toolResult: { tool: direct.tool, ...outcome } });
+            // The caption is written from the tool result, and the model gets no
+            // turn at all: handed a tool result this fine-tune echoes its JSON
+            // shape rather than reading it. Both halves go when the bridge goes.
+            send({ message: { content: describeDrawResult(outcome) } });
+            send({ done: true });
+            return;
+          }
+
           for (let step = 0; ; step++) {
             let forwarded = 0; // characters of this turn already sent to the client
             let holding = false;
@@ -228,6 +250,18 @@ export function createChatRequestHandler(options: ChatAppOptions = {}) {
 
             const call = step < maxToolSteps ? parseToolCall(content) : null;
             if (!call) {
+              // A call naming a tool we do not have: hand the model the error
+              // rather than releasing unusable JSON into the transcript.
+              const unknown = step < maxToolSteps ? unknownToolName(content) : null;
+              if (unknown) {
+                send({ toolResult: { tool: unknown, error: unknownToolError(unknown) } });
+                convo.push({ role: "assistant", content });
+                convo.push({
+                  role: "user",
+                  content: `${TOOL_RESULT_HEADER} (${unknown})\n${unknownToolError(unknown)}`,
+                });
+                continue;
+              }
               // Release whatever was held back: it was prose, not a tool call.
               const tail = content.slice(forwarded);
               if (tail) send({ message: { content: tail } });
