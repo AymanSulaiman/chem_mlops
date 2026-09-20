@@ -99,7 +99,7 @@ This executes the full pipeline via Dagster:
    - Download TWOSIDES polypharmacy dataset (FDA FAERS, Tatonetti et al.)
    - Build the QA JSONL dataset (ChEMBL + TWOSIDES)
    - Build the activity Parquet
-   - **Ingest 2.85 M compounds into LanceDB** (vector store for RAG)
+   - **Ingest 2.85 M compounds into LanceDB** (vector store behind the agent's tools)
    - **Ingest TWOSIDES polypharmacy pairs into LanceDB**
 4. Fine-tune Gemma 3 1B with LoRA
 5. Evaluate the fine-tuned model (perplexity + golden benchmark) — gates Ollama export
@@ -159,30 +159,32 @@ Expected disk and time requirements:
 
 ## Web App
 
-The repository includes a Bun chat app (`web/`) that serves both inference modes **side by side** in a single view, so you can compare answers from the fine-tuned model and the RAG pipeline on the same question simultaneously.
+The repository includes a Bun chat app (`web/`): a single agentic pane where the fine-tuned model answers with **tools**. It asks for a ChEMBL or TWOSIDES lookup, the server runs it against LanceDB, and the result comes back into the conversation — nothing is injected unless a tool asked for it.
 
 ```
 ┌─────────────────────────────────────────────────────┐
-│  Chem MLOps Chat                  chembl-drug-chat  │
-├──────────────────────────┬──────────────────────────┤
-│  Finetuned               │  RAG                     │
-│  chembl-drug-chat:1b     │  gemma3:1b               │
-│                          │                          │
-│  [streamed response...]  │  [streamed response...]  │
-│                          │                          │
-├──────────────────────────┴──────────────────────────┤
-│  Message both models...                      [Send] │
+│  Chem MLOps Chat        chembl-drug-chat:1b · tags  │
+├─────────────────────────────────────────────────────┤
+│                    What is the MW of Aspirin?  [me] │
+│                                                     │
+│  get_compound_by_name({"name":"Aspirin"})           │
+│  {"chembl_id":"CHEMBL25","mw_freebase":180.16,...}  │
+│                                                     │
+│  Aspirin (CHEMBL25) has a molecular weight of       │
+│  180.16, formula C9H8O4.                            │
+├─────────────────────────────────────────────────────┤
+│  Ask about a drug, an interaction, or a structure…  │
 └─────────────────────────────────────────────────────┘
 ```
 
-| Pane | Model | How it works |
-|------|-------|-------------|
-| **Finetuned** | `chembl-drug-chat:1b` | LoRA-tuned Gemma 3 1B; domain-aware, fast |
-| **RAG** | `gemma3:1b` (base) | LanceDB context injected as system message; grounded in live ChEMBL + TWOSIDES records |
+| Tool | Backed by |
+|------|-----------|
+| `get_compound_by_name` | LanceDB `compounds` |
+| `query_compounds` | Morgan-fingerprint similarity search |
+| `query_polypharmacy` / `query_drug_side_effects` | LanceDB `polypharmacy` (TWOSIDES) |
+| `draw_molecule` | ChEMBL structure → RDKit `Draw.MolToImage` → PNG in the chat |
 
-Responses stream token-by-token from Ollama and render as markdown. Each pane maintains its own independent conversation history. Sending a message fires both requests in parallel.
-
-In RAG mode, `web/src/rag.ts` extracts drug-name candidates from the user message, queries the `compounds` and `polypharmacy` LanceDB tables via the `@lancedb/lancedb` TypeScript client (the same Lance files written by Python — no Python server needed), and prepends a context block before forwarding to Ollama.
+The first four are the existing functions in `app/scripts/flows/vector_store/query_lancedb.py`, reached through the `app.scripts.flows.vector_store.tools` CLI. Ollama refuses its native `tools` field for this model (Gemma 3 has no tool template), so tool calls are prompted as JSON and parsed out of the reply; the current fine-tune is a prose completer and is not yet a reliable caller — see ROADMAP item 3. Each tool call and its result render as their own bubble, so the lookup is visible.
 
 **Start the dev server (hot reload):**
 
@@ -207,15 +209,15 @@ cd web
 bun test
 ```
 
-A `web/.env` file with working defaults is committed — Bun loads it automatically, no setup needed. Edit it to point at a different Ollama host, swap the RAG model, or override the LanceDB path.
+A `web/.env` file with working defaults is committed — Bun loads it automatically, no setup needed. Edit it to point at a different Ollama host or override the model prefix.
 
 ---
 
-## Vector Store (RAG)
+## Vector Store
 
 The pipeline builds a **LanceDB vector store** alongside fine-tuning — 2,854,996 compounds from ChEMBL, each represented as a 2048-bit Morgan fingerprint (ECFP4, radius 2).
 
-**Why RAG alongside fine-tuning?** Fine-tuning teaches the model to sound like a domain expert. It cannot guarantee factual accuracy for specific compounds. RAG grounds answers in real ChEMBL records — mechanisms, indications, warnings, metabolic enzymes — that the model only needs to format.
+**Why a vector store alongside fine-tuning?** Fine-tuning teaches the model to sound like a domain expert. It cannot guarantee factual accuracy for specific compounds. The store is what the agent's tools read, grounding answers in real ChEMBL records — mechanisms, indications, warnings, metabolic enzymes — that the model only needs to format.
 
 ### Ingest
 
@@ -333,15 +335,13 @@ After fine-tuning, an evaluation step runs automatically before Ollama export:
 
 - **Perplexity** on `valid.jsonl`
 - **Golden benchmark** — 20 curated drug-interaction questions with keyword-match scoring
-- **RAG vs fine-tuned benchmark** — same golden set run against both modes, `winner` + `delta_description` fields
 
 Results are written to `data/eval/<run>/`:
 
 ```
 data/eval/<run>/
 ├── finetuned_eval_metrics.json         # perplexity + exact-match %
-├── finetuned_golden_results.jsonl      # per-question scores
-└── <ft>_vs_<rag>_benchmark.json       # head-to-head comparison
+└── finetuned_golden_results.jsonl      # per-question scores
 ```
 
 The Dagster pipeline gates Ollama export on eval passing. To run evaluation standalone:
@@ -410,21 +410,21 @@ chem_mlops/
 │   │   │   └── export_to_ollama.py        # Fuse adapter → GGUF → Ollama
 │   │   ├── eval/
 │   │   │   ├── eval_finetuned_model.py    # Perplexity + golden benchmark (gates export)
-│   │   │   ├── benchmark_rag_vs_finetuned.py  # Head-to-head RAG vs fine-tuned
 │   │   │   └── golden.jsonl               # 20 curated drug-interaction questions
 │   │   └── vector_store/
 │   │       ├── ingest_to_lancedb.py       # 2.85 M compounds → Morgan fingerprints → LanceDB
 │   │       ├── ingest_twosides_to_lancedb.py  # TWOSIDES → polypharmacy table
-│   │       └── query_lancedb.py           # query_compounds / get_compound / polypharmacy API
+│   │       ├── query_lancedb.py           # query_compounds / get_compound / polypharmacy API
+│   │       └── tools.py                   # Tool CLI the web agent calls (adds draw_molecule)
 │   └── tests/                             # pytest suite for each pipeline stage
 ├── web/                                   # Bun chat app
 │   ├── src/
-│   │   ├── app.ts                         # Request handler, Ollama streaming proxy, model detection
-│   │   ├── rag.ts                         # Drug candidate extraction, LanceDB context builder
-│   │   ├── frontend.ts                    # Side-by-side chat UI, parallel streaming, per-pane history
+│   │   ├── app.ts                         # Request handler, agent loop, model detection
+│   │   ├── tools.ts                       # Tool specs, system prompt, tool-call parsing
+│   │   ├── frontend.ts                    # Single-pane chat UI, tool-call rendering
 │   │   └── frontend-helpers.ts            # renderMarkdown, formatReplyText (no DOM deps, testable)
 │   ├── public/
-│   │   ├── index.html                     # Dual-pane layout (Finetuned | RAG)
+│   │   ├── index.html                     # Single-pane agentic chat layout
 │   │   └── style.css
 │   ├── test/                              # bun test suite
 │   └── server.ts                          # Bun.serve entry point + frontend build step

@@ -2,7 +2,7 @@
 Ingest the TWOSIDES polypharmacy side-effect dataset into LanceDB.
 
 Creates a `polypharmacy` table (separate from the `compounds` vector table) keyed
-by drug name pairs. At RAG inference time, this table can be queried by drug name
+by drug name pairs. At inference time, the chat app's agent tools query this table by drug name
 to retrieve known polypharmacy side-effect signals for prompt augmentation.
 
 The table has no vector column — it is a scalar-indexed lookup store.

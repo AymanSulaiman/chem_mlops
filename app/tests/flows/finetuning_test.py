@@ -1,11 +1,15 @@
 """Tests for app/scripts/flows/finetuning/finetuning.py."""
 
 import json
+import subprocess
 from pathlib import Path
 from unittest.mock import DEFAULT, MagicMock, patch
 
+import pytest
+
 from app.scripts.flows.finetuning.finetuning import (
     HF_MODEL_ID,
+    MAX_METAL_RETRIES,
     convert_to_mlx,
     finetune_lora,
     gemma3_chembl_toon_finetune_flow,
@@ -324,3 +328,83 @@ class TestGemma3ChemblToonFinetuneFlow:
             gemma3_chembl_toon_finetune_flow(hf_model_id=custom_id, run_name="test_run")
 
         assert mocks["split_long_sequences"].call_args.args[1] == custom_id
+
+
+# ── Metal watchdog retry ──────────────────────────────────────────────────────
+
+
+class TestMetalWatchdogRetry:
+    """A killed command buffer must resume from the last checkpoint, not restart."""
+
+    @staticmethod
+    def _crash_then_succeed(adapter_dir: Path, log_file: Path, checkpoint_iter: int | None):
+        calls: list[list[str]] = []
+
+        def fake_run(cmd, cwd=None, log_file=log_file):  # noqa: ARG001
+            calls.append(cmd)
+            if len(calls) == 1:
+                log_file.parent.mkdir(parents=True, exist_ok=True)
+                log_file.write_text("Iter 100: Train loss 1.5\nlibc++abi: ... Impacting Interactivity ...\n")
+                if checkpoint_iter is not None:
+                    adapter_dir.mkdir(parents=True, exist_ok=True)
+                    (adapter_dir / f"{checkpoint_iter:07d}_adapters.safetensors").touch()
+                raise subprocess.CalledProcessError(6, cmd)
+
+        return calls, fake_run
+
+    def test_resumes_from_latest_checkpoint_with_remaining_iters(self, tmp_path: Path) -> None:
+        adapter_dir, log_file = tmp_path / "adapter", tmp_path / "logs" / "finetune.log"
+        calls, fake_run = self._crash_then_succeed(adapter_dir, log_file, checkpoint_iter=100)
+
+        with patch("app.scripts.flows.finetuning.finetuning._run", side_effect=fake_run):
+            finetune_lora(tmp_path / "mlx", adapter_dir, iters=3000, log_file=log_file)
+
+        assert len(calls) == 2
+        assert "--resume-adapter-file" not in calls[0]
+        assert calls[0][calls[0].index("--iters") + 1] == "3000"
+        resumed = calls[1][calls[1].index("--resume-adapter-file") + 1]
+        assert resumed.endswith("0000100_adapters.safetensors")
+        assert calls[1][calls[1].index("--iters") + 1] == "2900"
+        # The crash log is kept rather than overwritten by the retry.
+        assert (log_file.parent / "finetune.attempt1.log").exists()
+
+    def test_restarts_when_the_crash_predates_the_first_checkpoint(self, tmp_path: Path) -> None:
+        adapter_dir, log_file = tmp_path / "adapter", tmp_path / "logs" / "finetune.log"
+        calls, fake_run = self._crash_then_succeed(adapter_dir, log_file, checkpoint_iter=None)
+
+        with patch("app.scripts.flows.finetuning.finetuning._run", side_effect=fake_run):
+            finetune_lora(tmp_path / "mlx", adapter_dir, iters=3000, log_file=log_file)
+
+        assert len(calls) == 2
+        assert "--resume-adapter-file" not in calls[1]
+        assert calls[1][calls[1].index("--iters") + 1] == "3000"
+
+    def test_other_failures_are_not_retried(self, tmp_path: Path) -> None:
+        log_file = tmp_path / "logs" / "finetune.log"
+
+        def fake_run(cmd, cwd=None, log_file=log_file):  # noqa: ARG001
+            log_file.parent.mkdir(parents=True, exist_ok=True)
+            log_file.write_text("RuntimeError: something else entirely\n")
+            raise subprocess.CalledProcessError(1, cmd)
+
+        with (
+            patch("app.scripts.flows.finetuning.finetuning._run", side_effect=fake_run) as mock_run,
+            pytest.raises(subprocess.CalledProcessError),
+        ):
+            finetune_lora(tmp_path / "mlx", tmp_path / "adapter", log_file=log_file)
+        assert mock_run.call_count == 1
+
+    def test_gives_up_after_max_retries(self, tmp_path: Path) -> None:
+        log_file = tmp_path / "logs" / "finetune.log"
+
+        def always_killed(cmd, cwd=None, log_file=log_file):  # noqa: ARG001
+            log_file.parent.mkdir(parents=True, exist_ok=True)
+            log_file.write_text("libc++abi: ... Impacting Interactivity ...\n")
+            raise subprocess.CalledProcessError(6, cmd)
+
+        with (
+            patch("app.scripts.flows.finetuning.finetuning._run", side_effect=always_killed) as mock_run,
+            pytest.raises(subprocess.CalledProcessError),
+        ):
+            finetune_lora(tmp_path / "mlx", tmp_path / "adapter", log_file=log_file)
+        assert mock_run.call_count == MAX_METAL_RETRIES + 1

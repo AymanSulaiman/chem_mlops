@@ -1,31 +1,54 @@
 # Bun Web App
 
-A streaming chat interface that serves the fine-tuned and RAG models **side by side**, so you can compare their answers on the same question simultaneously.
+A single-pane chat interface where the fine-tuned model answers with **tools**: it
+asks for a ChEMBL or TWOSIDES lookup, the server runs it, and the result comes back
+into the conversation. Nothing is injected unless a tool asked for it.
 
 ```
 ┌─────────────────────────────────────────────────────┐
-│  Chem MLOps Chat                  chembl-drug-chat  │
-├──────────────────────────┬──────────────────────────┤
-│  Finetuned               │  RAG                     │
-│  chembl-drug-chat:1b     │  gemma3:1b               │
-│                          │                          │
-│  [streamed response...]  │  [streamed response...]  │
-│                          │                          │
-├──────────────────────────┴──────────────────────────┤
-│  Message both models...                      [Send] │
+│  Chem MLOps Chat        chembl-drug-chat:1b · tags  │
+├─────────────────────────────────────────────────────┤
+│                    What is the MW of Aspirin?  [me] │
+│                                                     │
+│  get_compound_by_name({"name":"Aspirin"})           │
+│  {"chembl_id":"CHEMBL25","mw_freebase":180.16,...}  │
+│                                                     │
+│  Aspirin (CHEMBL25) has a molecular weight of       │
+│  180.16, formula C9H8O4.                            │
+├─────────────────────────────────────────────────────┤
+│  Ask about a drug, an interaction, or a structure…  │
 └─────────────────────────────────────────────────────┘
 ```
 
-Sending a message fires both requests in parallel. Responses stream token-by-token from Ollama and render as markdown. Each pane keeps its own independent conversation history.
-
 ---
 
-## Modes
+## Tools
 
-| Pane | Model | How it works |
-|------|-------|-------------|
-| **Finetuned** | `chembl-drug-chat:1b` | LoRA-tuned Gemma 3 1B; domain-aware and fast |
-| **RAG** | `gemma3:1b` (base) | LanceDB context injected as system message; grounded in live ChEMBL + TWOSIDES records |
+| Tool | Arguments | Backed by |
+|------|-----------|-----------|
+| `get_compound_by_name` | `{"name": "Aspirin"}` | LanceDB `compounds` |
+| `query_drug_side_effects` | `{"drug_name": "Warfarin", "n": 10}` | LanceDB `polypharmacy` (TWOSIDES) |
+| `query_polypharmacy` | `{"drug_1": "Warfarin", "drug_2": "Aspirin"}` | LanceDB `polypharmacy` |
+| `query_compounds` | `{"smiles": "CCO", "n": 5}` | Morgan-fingerprint similarity search |
+| `draw_molecule` | `{"name": "Ibuprofen"}` | ChEMBL `canonical_smiles` → RDKit `Draw.MolToImage` → PNG data URL |
+
+The first four are the existing functions in
+`app/scripts/flows/vector_store/query_lancedb.py`, reached through the
+`app.scripts.flows.vector_store.tools` CLI — one subprocess per call.
+
+`draw_molecule` takes a **name**, not a SMILES: models invent SMILES strings that
+parse but draw the wrong molecule. The structure comes from the `compounds`
+table, and a name mistakenly passed in the `smiles` field is retried as a lookup.
+A SMILES is only drawn as given when the user supplied one, and the result says
+which (`source: ChEMBL` or `supplied by the user`).
+
+### Tool calls are prompted, not native
+
+Ollama refuses its `tools` field for this model (`does not support tools` — Gemma 3
+has no tool template), so the system prompt asks for a bare JSON object and
+`parseToolCall` digs it out of the reply. The current fine-tune is trained to
+complete prose and mostly ignores that instruction: the loop works, the model is
+not yet a reliable caller. Teaching it is roadmap item 3.
 
 ---
 
@@ -34,17 +57,17 @@ Sending a message fires both requests in parallel. Responses stream token-by-tok
 ```
 web/
 ├── public/
-│   ├── index.html          # Dual-pane layout (Finetuned | RAG)
+│   ├── index.html          # Single-pane layout
 │   ├── style.css
 │   └── frontend.js         # Bundled from src/frontend.ts at server startup
 ├── src/
-│   ├── app.ts              # Request handler, Ollama streaming proxy, model detection
-│   ├── rag.ts              # extractDrugCandidates, buildRagContext, augmentMessages
-│   ├── frontend.ts         # Parallel streaming, per-pane history, markdown rendering
+│   ├── app.ts              # Request handler, agent loop, model detection
+│   ├── tools.ts            # Tool specs, system prompt, parseToolCall, runTool
+│   ├── frontend.ts         # NDJSON event rendering, history, markdown
 │   └── frontend-helpers.ts # renderMarkdown, formatReplyText (no DOM deps, testable)
 ├── test/
-│   ├── app.test.ts         # Handler routing, streaming, model detection, RAG model selection
-│   ├── rag.test.ts         # extractDrugCandidates, augmentMessages, buildRagContext
+│   ├── app.test.ts         # Handler routing, agent loop, step cap, model detection
+│   ├── tools.test.ts       # parseToolCall, formatToolResult, prompt/spec agreement
 │   ├── chat.test.ts        # normalizeMessages
 │   ├── frontend.test.ts    # renderMarkdown, formatReplyText
 │   └── model.test.ts       # pickLatestModel
@@ -59,46 +82,46 @@ web/
 
 ```mermaid
 flowchart LR
-    BR([Browser]) -->|POST /api/chat\nmode: finetuned| BUN[Bun backend\nsrc/app.ts]
-    BR -->|POST /api/chat\nmode: rag| BUN
-
-    BUN -->|Finetuned\ndetect latest chembl-drug-chat| OLL[(Ollama\nchembl-drug-chat:1b)]
-    BUN -->|RAG — buildRagContext| LDB[(LanceDB\ncompounds +\npolypharmacy)]
-    LDB -->|context string| BUN
-    BUN -->|augmented messages| OLL2[(Ollama\ngemma3:1b)]
-
-    OLL -->|NDJSON stream| BR
-    OLL2 -->|NDJSON stream| BR
+    BR([Browser]) -->|POST /api/chat| BUN[Bun backend\nsrc/app.ts]
+    BUN -->|messages + tool prompt| OLL[(Ollama\nchembl-drug-chat)]
+    OLL -->|reply| BUN
+    BUN -->|tool call JSON| PY[tools.py\nsubprocess]
+    PY --> LDB[(LanceDB\ncompounds +\npolypharmacy)]
+    PY -->|result| BUN
+    BUN -->|NDJSON events:\ntool / toolResult / message| BR
 ```
 
 ### `server.ts`
 
 - Bundles `src/frontend.ts` into `public/frontend.js` via `Bun.build` at startup
-- Starts `Bun.serve` on port `3000`
+- Starts `Bun.serve` on port `3000` with `idleTimeout: 255` — a tool loop makes
+  several model calls and the 10 s default cuts the response off
 
 ### `src/app.ts`
 
 - Normalises and validates incoming chat messages
 - Detects the latest `chembl-drug-chat:*` Ollama model (cached 15 s)
-- Routes `mode: "finetuned"` → fine-tuned model
-- Routes `mode: "rag"` → `buildRagContext` → `augmentMessages` → base `gemma3:1b`
-- Proxies the Ollama NDJSON stream through a `TransformStream` that snoops the final `done: true` chunk to log token counts and latency
-- Returns `x-model` / `x-source` headers alongside the streamed body
-- Serves static files, `/api/health`, and `/api/model` (returns both finetuned and RAG model names)
+- Agent loop: ask Ollama (non-streaming) → `parseToolCall` → run the tool → append
+  `### Tool result` → ask again, up to `maxToolSteps` (default 3)
+- Emits NDJSON events as they happen: `{tool}`, `{toolResult}`, `{message}`, `{done}`
+- Returns `x-model` / `x-source` headers, and logs one JSON line per request
+- Serves static files, `/api/health`, `/api/model`
 
-### `src/rag.ts`
+### `src/tools.ts`
 
-- `extractDrugCandidates(text)` — regex extracts capitalised words, filters a stopword list, title-cases to match DB format
-- `buildRagContext(message, lancedbDir)` — queries `compounds` by name and `polypharmacy` for pair signals and top per-drug partners; returns a bullet-list context string or `null` if nothing is found
-- `augmentMessages(messages, context)` — prepends `{ role: "system", content: context }` to the history
+- `TOOL_SPECS` / `TOOL_SYSTEM_PROMPT` — the tool list the model is shown
+- `parseToolCall(text)` — first balanced `{…}` in the reply that names a known tool;
+  accepts `{tool, args}` and `{name, arguments}`
+- `runTool(call)` — spawns `uv run python -m app.scripts.flows.vector_store.tools`
+- `formatToolResult(call, outcome)` — truncates to 2000 chars and strips base64
+  images (they go to the browser, not the prompt)
 
 ### `src/frontend.ts`
 
-- Holds two independent `histories` (`finetuned` and `rag`)
-- On submit: adds user bubble to both panes, fires both fetches with `Promise.all`, streams each response independently with `Promise.allSettled`
-- During streaming: `textContent` is updated chunk-by-chunk for live output
-- On stream end: switches to `innerHTML = renderMarkdown(accumulated)` for formatted display
-- Pane headers show the live model name fetched from `/api/model`
+- One history, one message feed
+- Tool calls render as their own bubble: `name(args)`, then the result — or the
+  molecule image when `draw_molecule` returns one
+- Errors from the stream replace the pending bubble's contents
 
 ### `src/frontend-helpers.ts`
 
@@ -134,14 +157,14 @@ bun test
 
 ## Required services
 
-Both Ollama models must be available before starting the server:
-
 ```bash
 ollama serve
-ollama list | grep -E "chembl-drug-chat|gemma3"
+ollama list | grep chembl-drug-chat
 ```
 
-The finetuned pane uses the newest `chembl-drug-chat:*` tag. The RAG pane uses `gemma3:1b` (or whatever `RAG_MODEL_NAME` is set to in `.env`).
+Tools need the LanceDB store (`data/lancedb/chembl_CHEMBL_*`) and the project's
+Python environment — `uv run` must work from the repo root. A missing table comes
+back to the model as an error string, not a crash.
 
 ---
 
@@ -154,18 +177,17 @@ PORT=3000
 OLLAMA_BASE_URL=http://127.0.0.1:11434
 OLLAMA_MODEL_PREFIX=chembl-drug-chat
 OLLAMA_MODEL_NAME=chembl-drug-chat:1b   # fallback if /api/tags is unreachable
-RAG_MODEL_NAME=gemma3:1b                # model used in the RAG pane
-# LANCEDB_DIR=                          # default: auto-resolved from web/src/rag.ts
 ```
 
 ---
 
 ## Observability
 
-Each inference request logs a JSON line to stdout:
+Each request logs a JSON line to stdout:
 
 ```json
-{"ts":"...","model":"chembl-drug-chat:1b","source":"ollama-tags","latencyMs":342,"promptTokens":61,"completionTokens":87,"evalDurationMs":2445,"totalDurationMs":5589}
+{"ts":"...","model":"chembl-drug-chat:1b","source":"ollama-tags","latencyMs":4210,"toolCalls":1,"promptTokens":612,"completionTokens":87}
 ```
 
-Fields come from the Ollama `done: true` chunk and wall-clock time around the request. Pipe to `jq` or any log aggregator.
+Token counts are summed over every turn in the loop; `toolCalls` is how many tools
+ran. Pipe to `jq` or any log aggregator.

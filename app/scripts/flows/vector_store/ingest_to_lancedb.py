@@ -1,4 +1,4 @@
-# ChEMBL → LanceDB RAG Vector Store
+# ChEMBL → LanceDB Vector Store
 # Ingests all ChEMBL compound data into a single flat LanceDB table.
 # Each row = one compound with a Morgan fingerprint `vector` column for
 # similarity search, plus all metadata columns for scalar filtering.

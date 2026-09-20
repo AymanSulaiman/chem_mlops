@@ -98,6 +98,19 @@ def export_to_ollama(
         raise FileNotFoundError(f"MLX model not found: {mlx_model_dir}")
     if not adapter_dir.exists():
         raise FileNotFoundError(f"Adapter not found: {adapter_dir}")
+    # mlx_lm writes adapters.safetensors only when training finishes. A crashed run
+    # leaves adapter_config.json alone, or numbered checkpoints if it got past
+    # --save-every; fail here rather than inside mlx_lm's traceback.
+    if not (adapter_dir / "adapters.safetensors").exists():
+        checkpoints = sorted(adapter_dir.glob("*_adapters.safetensors"))
+        hint = (
+            f"Latest checkpoint is {checkpoints[-1].name} — copy it to adapters.safetensors "
+            "to export a partially trained adapter."
+            if checkpoints
+            else "No checkpoints either: the run crashed before the first --save-every. "
+            "Check the training log and re-run the fine-tune."
+        )
+        raise FileNotFoundError(f"Training did not finish: no adapters.safetensors in {adapter_dir}. {hint}")
 
     print(f"\n{'=' * 60}")
     print(f"Exporting run: {run_dir}")

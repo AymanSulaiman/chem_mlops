@@ -7,7 +7,7 @@ being worth it. Items 1 and 2 are worth doing regardless of the rest.
 
 ## 1. Fix eval leakage — split by molecule, not by row
 
-**Status:** code done, awaiting a pipeline run · **Size:** ~half a day · **Blocks:**
+**Status:** dataset rebuilt, honest pass rate not yet recorded · **Size:** ~half a day · **Blocks:**
 every number in items 2–5
 
 Every question in `app/scripts/flows/eval/golden.jsonl` is a training template
@@ -41,9 +41,12 @@ verified by a check in the test suite, not by eye.
   `test_no_golden_molecule_appears_in_train` in `eval_finetuned_model_test.py`,
   which checks the real `train.jsonl` when one exists.
 
-**Remaining:** re-run the pipeline on real ChEMBL data and record the honest
-pass rate. The committed `golden.jsonl` is still the old leaked file and no
-`data/chembl_transform` exists in this checkout, so the rebuild has not run.
+**Remaining:** record the honest pass rate. The rebuild has since run —
+`data/llm_finetune/holdout.json`, `train.jsonl`, `valid.jsonl` and the
+molecule-keyed `golden.jsonl` are all from the same run, and
+`test_no_golden_molecule_appears_in_train` passes against the real files. It was
+failing on a substring match (`CHEMBL413` inside `CHEMBL413552`); it now compares
+whole IDs. The eval gate itself still has to be run and its number written down.
 
 **Known residual leak:** literature abstracts and assay descriptions are free
 text and can name a holdout drug. Filtering on molecule ID cannot catch that;
@@ -56,7 +59,7 @@ a text-level filter is a separate item if the honest pass rate looks too high.
 
 ## 2. Collapse to one pane — tools instead of RAG injection
 
-**Status:** not started · **Size:** ~1–2 days · **Depends on:** nothing
+**Status:** done (2026-09-19) · **Size:** ~1–2 days · **Depends on:** nothing
 
 The side-by-side layout asks the user to judge which answer is better and gives
 them nothing to judge with. Replace it with a single agentic pane: the
@@ -81,16 +84,57 @@ grounded answer; no LanceDB context is injected unless a tool asked for it.
 `web/public/index.html`, `app/scripts/flows/vector_store/query_lancedb.py`,
 `app/scripts/flows/eval/benchmark_rag_vs_finetuned.py` (delete)
 
+**Done (2026-09-19)**
+- One pane. `rag.ts` and its test are gone; `web/src/tools.ts` holds the tool
+  specs, the system prompt, `parseToolCall` and `runTool`. `app.ts` runs the loop
+  (max 3 tool steps) and emits NDJSON events — `{tool}`, `{toolResult}`,
+  `{message}` — so each lookup renders as its own bubble, image included.
+- `app/scripts/flows/vector_store/tools.py` is the bridge: the four
+  `query_lancedb.py` functions plus `draw_molecule`, dispatched by name, every
+  failure returned as `{"error": ...}` so the model can retry. One subprocess per
+  call (~2 s of RDKit/LanceDB import); a stdin worker loop is the upgrade if that
+  starts to hurt.
+- `benchmark_rag_vs_finetuned.py`, its test, and its Dagster op are deleted;
+  export now gates on `eval_finetuned_model_op` alone and the TWOSIDES ingest is
+  a terminal op.
+- `Bun.serve` needed `idleTimeout: 255` — the 10 s default cut the loop off
+  mid-response.
+- Prose streams token by token; text from the first `{` is held back until the
+  turn ends, since a tool call is only recognisable once its JSON closes. Held
+  text that is not a call is released, so nothing is dropped.
+- `draw_molecule` (was `draw_smiles`) takes a drug **name** and reads
+  `canonical_smiles` from ChEMBL. Models invent SMILES that parse but draw the
+  wrong molecule — ibuprofen and paracetamol both came out wrong — so the
+  structure is never taken from the model when a name is available.
+- `get_compound_by_name` falls back to the `synonyms` column, matching whole
+  entries only. ChEMBL stores paracetamol as ACETAMINOPHEN, so the plain lookup
+  missed it; "combogesic" still must not match "Ibuprofen component of
+  combogesic".
+
+**Tool calls are prompted, not native.** Ollama rejects its `tools` field for
+this model outright (`does not support tools` — Gemma 3 has no tool template), so
+the system prompt asks for a bare JSON object and `parseToolCall` digs it out of
+the reply.
+
+**Verified end to end** with a tool-capable local model: "molecular weight of
+Aspirin according to ChEMBL?" → visible `get_compound_by_name` call → CHEMBL25
+row → "180.16, C9H8O4". The fine-tune itself does **not** call tools — it answers
+from memory and hallucinates (`Aspirin (CHEMBL3984700) ... 69.5 kDa`), and will
+not even echo a JSON object when told to. That is item 3, now measured rather
+than predicted.
+
 ---
 
 ## 3. Teach the model to call tools
 
 **Status:** not started · **Size:** ~2–3 days · **Depends on:** 2
 
-This is the load-bearing risk in the agentic plan. Gemma 3 1B has no native
-function calling, and the fine-tune at `finetuning.py` trains it to emit prose
-in `### Question / ### Answer` format. A model trained to complete prose is a
-poor tool-caller.
+This is the load-bearing risk in the agentic plan, and item 2 confirmed it:
+Ollama refuses its `tools` field for `chembl-drug-chat:1b` outright, and the
+fine-tune ignores a JSON-only instruction even when the question plainly needs a
+lookup — it answers from memory with invented ChEMBL IDs. The loop and the tools
+work; the caller does not. `parseToolCall` in `web/src/tools.ts` is the seam to
+measure against.
 
 **Scope**
 - Add a tool-call category to the dataset builder: question → JSON tool call →

@@ -1,6 +1,6 @@
 # ChEMBL MLOps Pipeline
 
-Orchestrated with [Dagster](https://dagster.io). The pipeline downloads ChEMBL and TWOSIDES, transforms them into Parquet, builds training datasets and a vector store in parallel, fine-tunes Gemma 3, evaluates the model, benchmarks RAG vs fine-tuned, and exports to Ollama.
+Orchestrated with [Dagster](https://dagster.io). The pipeline downloads ChEMBL and TWOSIDES, transforms them into Parquet, builds training datasets and a vector store in parallel, fine-tunes Gemma 3, evaluates the model, and exports to Ollama.
 
 ---
 
@@ -34,16 +34,14 @@ flowchart LR
     DDI --> F
 
     F --> G([eval_finetuned_model_op])
-    G --> BM([benchmark_rag_vs_finetuned_op])
-    TW --> BM
-    BM --> H([export_to_ollama_op])
+    G --> H([export_to_ollama_op])
 ```
 
 > `download_twosides_op` starts immediately in parallel with `collect_chembl_op` — it has no dependency on ChEMBL data.
 >
 > `ingest_chembl_to_lancedb_op` and `finetune_llm_op` run in parallel after `transform_chembl_op` — the vector store and the fine-tuning have no data dependency on each other.
 >
-> `benchmark_rag_vs_finetuned_op` fans in from both `eval_finetuned_model_op` (fine-tuned quality gate) and `ingest_twosides_to_lancedb_op` (LanceDB/RAG ready), then gates export.
+> `ingest_twosides_to_lancedb_op` is terminal: the vector store serves the web app's agent tools at query time, so nothing downstream in this pipeline depends on it.
 
 ---
 
@@ -166,29 +164,12 @@ flowchart LR
 
 ---
 
-### Stage 6 — `benchmark_rag_vs_finetuned_op` (fan-in)
-
-```mermaid
-flowchart LR
-    G([eval_finetuned_model_op]) --> BM([benchmark_rag_vs_finetuned_op])
-    TW([ingest_twosides_to_lancedb_op]) --> BM
-```
-
-| Property | Detail |
-|---|---|
-| Module | `app.scripts.flows.eval.benchmark_rag_vs_finetuned` |
-| Depends on | `eval_finetuned_model_op` **and** `ingest_twosides_to_lancedb_op` (fan-in) |
-| What it does | Calls Ollama for both Finetuned (`chembl-drug-chat:1b`) and RAG (`gemma3:1b` + LanceDB) modes on the golden question set; raises `RuntimeError` if RAG pass rate < 40% (catches broken LanceDB/missing model, not fine-tuned vs base gap) |
-| Output | `data/eval/<run>/<finetuned_model>_vs_<rag_model>_benchmark.json` — keyword-match pass rates, per-question comparison, `winner`, and `delta_description` for both models |
-
----
-
-### Stage 7 — `export_to_ollama_op`
+### Stage 6 — `export_to_ollama_op`
 
 | Property | Detail |
 |---|---|
 | Module | `app.scripts.flows.finetuning.export_to_ollama` |
-| Depends on | `benchmark_rag_vs_finetuned_op` |
+| Depends on | `eval_finetuned_model_op` |
 | What it does | Fuses the LoRA adapter, converts to GGUF, writes a Modelfile with the correct `### Question / ### Answer` template, and runs `ollama create chembl-drug-chat:1b` |
 | After export | `ollama run chembl-drug-chat:1b` |
 
@@ -245,7 +226,7 @@ flowchart LR
     TW --> FT
 
     FT -->|MLX LoRA| ART[artifacts/\nadapter weights]
-    ART -->|eval + RAG benchmark\n→ Modelfile| OLL[(Ollama\nchembl-drug-chat:1b)]
+    ART -->|eval → Modelfile| OLL[(Ollama\nchembl-drug-chat:1b)]
 ```
 
 ---
@@ -274,5 +255,5 @@ All ops, jobs, and schedules are exported through the `defs` object.
 | `ingest_twosides_to_lancedb_op` fan-in from both ChEMBL LanceDB + TWOSIDES | After ChEMBL only | Needs the ChEMBL DB to exist (same LanceDB dir) and the TWOSIDES Parquet to be ready |
 | Fan-in before finetuning | Start finetuning on first dataset ready | MLX training needs both datasets for a balanced model |
 | `eval_finetuned_model_op` gates finetuned quality | Export unconditionally | Prevents a regressed model from overwriting a good one |
-| `benchmark_rag_vs_finetuned_op` gates RAG quality at 40% | No RAG gate | Catches a broken LanceDB/missing model (not a base-vs-fine-tuned gap); threshold is intentionally below fine-tuned pass rate |
+| Export gates on `eval_finetuned_model_op` only | Also gate on a RAG head-to-head | The RAG pane is gone — the vector store is agent tools now, so a base-vs-fine-tuned comparison measures nothing |
 | Daily schedule at midnight UTC | On-demand only | ChEMBL releases are periodic; overnight run avoids peak hours |

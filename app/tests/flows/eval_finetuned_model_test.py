@@ -2,6 +2,7 @@
 
 import json
 import math
+import re
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -376,9 +377,11 @@ def test_no_golden_molecule_appears_in_train() -> None:
     Skipped where the dataset has not been built. Rebuild both together with
     `python -m app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset`.
     """
-    train = TRAIN_PATH.read_text()
+    # Whole IDs only: a substring check reports CHEMBL413 as leaked because
+    # CHEMBL413552 — a different molecule — appears in the training text.
+    train_ids = set(re.findall(r"CHEMBL\d+", TRAIN_PATH.read_text()))
     items = [json.loads(ln) for ln in GOLDEN_BENCHMARK_PATH.read_text().splitlines() if ln.strip()]
     for item in items:
         chembl_id = item.get("chembl_id")
         assert chembl_id, f"golden entry {item['question']!r} has no chembl_id — rebuild golden.jsonl"
-        assert chembl_id not in train, f"{chembl_id} ({item['question']!r}) leaked into train.jsonl"
+        assert chembl_id not in train_ids, f"{chembl_id} ({item['question']!r}) leaked into train.jsonl"

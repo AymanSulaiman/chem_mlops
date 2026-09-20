@@ -19,10 +19,11 @@ from app.scripts.flows.finetuning.export_to_ollama import (
 
 @pytest.fixture()
 def run_dir(tmp_path: Path) -> Path:
-    """A run directory with the expected mlx model and adapter subdirs present."""
+    """A run directory as a finished training run leaves it."""
     rd = tmp_path / "20260101_000000"
     (rd / DEFAULT_MLX_SUBDIR).mkdir(parents=True)
     (rd / DEFAULT_ADAPTER_SUBDIR).mkdir(parents=True)
+    (rd / DEFAULT_ADAPTER_SUBDIR / "adapters.safetensors").touch()
     return rd
 
 
@@ -70,6 +71,19 @@ class TestExportToOllama:
         # Only mlx model dir exists — adapter is absent
         (rd / DEFAULT_MLX_SUBDIR).mkdir(parents=True)
         with pytest.raises(FileNotFoundError, match="Adapter not found"):
+            export_to_ollama(run_dir=rd)
+
+    def test_raises_if_training_did_not_finish(self, tmp_path: Path) -> None:
+        rd = tmp_path / "20260101_000000"
+        (rd / DEFAULT_MLX_SUBDIR).mkdir(parents=True)
+        (rd / DEFAULT_ADAPTER_SUBDIR).mkdir(parents=True)  # config only, no weights
+        with pytest.raises(FileNotFoundError, match="crashed before the first"):
+            export_to_ollama(run_dir=rd)
+
+        # A crash after --save-every leaves numbered checkpoints; name the newest.
+        (rd / DEFAULT_ADAPTER_SUBDIR / "0000100_adapters.safetensors").touch()
+        (rd / DEFAULT_ADAPTER_SUBDIR / "0000200_adapters.safetensors").touch()
+        with pytest.raises(FileNotFoundError, match="0000200_adapters.safetensors"):
             export_to_ollama(run_dir=rd)
 
     def test_skips_without_force_if_output_exists(self, run_dir: Path) -> None:

@@ -142,12 +142,15 @@ def get_compound_by_name(
     name: str,
     lancedb_dir: str = LANCEDB_DIR,
 ) -> dict[str, Any] | None:
-    """Exact lookup by preferred name (case-insensitive).
+    """Lookup by preferred name, falling back to trade names and synonyms.
 
-    Uses a scalar filter on ``pref_name`` for a fast filtered search.
+    ChEMBL's ``pref_name`` is not always the name people use: paracetamol is
+    stored as ACETAMINOPHEN, and Tylenol only appears in ``synonyms``. The
+    fallback scans that column and accepts a row only when the query matches a
+    whole synonym, so "Codeine" cannot match "Codeine component of ...".
 
     Args:
-        name: Drug preferred name, e.g. ``"Aspirin"``.
+        name: Drug name, e.g. ``"Aspirin"``, ``"Paracetamol"``, ``"Tylenol"``.
         lancedb_dir: Root directory that contains the ``chembl_CHEMBL_*``
             subdirectory (default ``data/lancedb``).
 
@@ -163,10 +166,28 @@ def get_compound_by_name(
         table.search().where(f"LOWER(pref_name) = '{safe.lower()}'").limit(1).to_list()
     )
     if not rows:
+        rows = _search_synonyms(table, safe)
+    if not rows:
         return None
     row = rows[0]
     row.pop("vector", None)
     return row
+
+
+def _search_synonyms(table: Table, safe_name: str) -> list[dict[str, Any]]:
+    """Rows whose ``synonyms`` list contains *safe_name* as a whole entry."""
+    wanted = safe_name.lower()
+    # LIKE narrows 2.8M rows to a handful (~0.1s); the exact check happens here,
+    # because LIKE '%codeine%' also hits "Codeine component of ..." entries.
+    like = wanted.replace("%", "").replace("_", "")
+    candidates: list[dict[str, Any]] = (
+        table.search().where(f"LOWER(synonyms) LIKE '%{like}%'").limit(25).to_list()
+    )
+    return [
+        row
+        for row in candidates
+        if wanted in {s.strip().lower() for s in (row.get("synonyms") or "").split(";")}
+    ]
 
 
 def query_polypharmacy(

@@ -2,19 +2,39 @@ import { expect, test } from "bun:test";
 
 import { createChatRequestHandler } from "../src/app";
 
-function ndjson(...chunks: object[]): Response {
-  const body = chunks.map(c => JSON.stringify(c)).join("\n") + "\n";
-  return new Response(body, { headers: { "content-type": "application/x-ndjson" } });
+type Event = {
+  tool?: { tool: string; args: Record<string, unknown> };
+  toolResult?: { tool: string; result?: unknown; error?: string };
+  message?: { content?: string };
+  done?: boolean;
+  error?: string;
+};
+
+// Ollama streams NDJSON: one chunk per token, counts on the final chunk.
+function reply(content: string, chunkSize = 1000): Response {
+  const pieces = content.match(new RegExp(`[\\s\\S]{1,${chunkSize}}`, "g")) ?? [""];
+  const lines = pieces.map(piece =>
+    JSON.stringify({ message: { role: "assistant", content: piece }, done: false }),
+  );
+  lines.push(JSON.stringify({ message: { content: "" }, done: true, eval_count: 7, prompt_eval_count: 11 }));
+  return new Response(`${lines.join("\n")}\n`, {
+    headers: { "content-type": "application/x-ndjson" },
+  });
 }
 
-async function collectStream(response: Response): Promise<string> {
+async function collectEvents(response: Response): Promise<Event[]> {
   const text = await response.text();
-  return text.trim().split("\n").reduce((acc, line) => {
+  return text.trim().split("\n").flatMap(line => {
     try {
-      const c = JSON.parse(line) as { done?: boolean; message?: { content?: string } };
-      return acc + ((!c.done && c.message?.content) ? c.message.content : "");
-    } catch { return acc; }
-  }, "");
+      return [JSON.parse(line) as Event];
+    } catch {
+      return [];
+    }
+  });
+}
+
+function answerOf(events: Event[]): string {
+  return events.map(e => e.message?.content ?? "").join("");
 }
 
 test("request handler serves the app shell and health route", async () => {
@@ -35,9 +55,8 @@ test("request handler chats with the latest model and caches the lookup", async 
   let tagsCalls = 0;
   const handler = createChatRequestHandler({
     publicDir: new URL("../public/", import.meta.url),
-    fetchImpl: async (input, init) => {
+    fetchImpl: async (input) => {
       const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
-
       if (url.endsWith("/api/tags")) {
         tagsCalls += 1;
         return Response.json({
@@ -47,19 +66,7 @@ test("request handler chats with the latest model and caches the lookup", async 
           ],
         });
       }
-
-      if (url.endsWith("/api/chat")) {
-        const body = init?.body ? JSON.parse(init.body as string) : null;
-        expect(body.model).toBe("chembl-drug-chat:newer");
-        expect(body.stream).toBe(true);
-        expect(body.messages).toEqual([{ role: "user", content: "hello" }]);
-        return ndjson(
-          { message: { role: "assistant", content: "hi " }, done: false },
-          { message: { role: "assistant", content: "there" }, done: false },
-          { message: { role: "assistant", content: "" }, done: true, eval_count: 10, prompt_eval_count: 5, eval_duration: 1_000_000_000, total_duration: 2_000_000_000 },
-        );
-      }
-
+      if (url.endsWith("/api/chat")) return reply("hi there");
       throw new Error(`Unexpected request: ${url}`);
     },
     now: () => 0,
@@ -76,81 +83,110 @@ test("request handler chats with the latest model and caches the lookup", async 
   expect(response.status).toBe(200);
   expect(response.headers.get("x-model")).toBe("chembl-drug-chat:newer");
   expect(response.headers.get("x-source")).toBe("ollama-tags");
-  expect(await collectStream(response)).toBe("hi there");
+  expect(answerOf(await collectEvents(response))).toBe("hi there");
 
   const response2 = await handler(new Request("http://localhost/api/model"));
   expect(response2.status).toBe(200);
   expect(tagsCalls).toBe(1);
 });
 
-test("RAG mode routes to gemma3:1b, not the fine-tuned model", async () => {
-  let capturedModel: string | null = null;
+test("a tool call is run, reported, and fed back for a grounded answer", async () => {
+  const sentMessages: { role: string; content: string }[][] = [];
+  const replies = [
+    `Let me look that up.\n{"tool": "get_compound_by_name", "args": {"name": "Aspirin"}}`,
+    "Aspirin is CHEMBL25, MW 180.16.",
+  ];
 
   const handler = createChatRequestHandler({
     publicDir: new URL("../public/", import.meta.url),
-    ragModelName: "gemma3:1b",
+    fallbackModelName: "chembl-drug-chat:1b",
     fetchImpl: async (input, init) => {
       const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (url.endsWith("/api/tags")) return Response.json({ models: [] });
       if (url.endsWith("/api/chat")) {
-        capturedModel = (JSON.parse(init?.body as string)).model;
-        return ndjson(
-          { message: { role: "assistant", content: "rag reply" }, done: false },
-          { message: { role: "assistant", content: "" }, done: true },
-        );
+        sentMessages.push(JSON.parse(init?.body as string).messages);
+        return reply(replies.shift() ?? "no more replies");
       }
       throw new Error(`Unexpected request: ${url}`);
     },
+    toolRunner: async (call) => ({ result: { chembl_id: "CHEMBL25", pref_name: "ASPIRIN", asked: call.args } }),
   });
 
   const response = await handler(
     new Request("http://localhost/api/chat", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ messages: [{ role: "user", content: "What is Warfarin?" }], mode: "rag" }),
+      body: JSON.stringify({ messages: [{ role: "user", content: "What is Aspirin?" }] }),
     }),
   );
 
-  expect(response.status).toBe(200);
-  expect(capturedModel).toBe("gemma3:1b");
-  expect(response.headers.get("x-model")).toBe("gemma3:1b");
-  expect(response.headers.get("x-source")).toBe("rag-model");
-  expect(await collectStream(response)).toBe("rag reply");
+  const events = await collectEvents(response);
+  // Prose before the call streams first, so find the events rather than index them.
+  expect(events.find(e => e.tool)?.tool).toEqual({
+    tool: "get_compound_by_name",
+    args: { name: "Aspirin" },
+  });
+  expect(events.find(e => e.toolResult)?.toolResult?.tool).toBe("get_compound_by_name");
+  expect(answerOf(events)).toBe("Let me look that up.\nAspirin is CHEMBL25, MW 180.16.");
+  expect(events.at(-1)?.done).toBe(true);
+
+  // The second turn must carry the tool result — that is what grounds the answer.
+  expect(sentMessages).toHaveLength(2);
+  expect(sentMessages[1]?.at(-1)?.content).toContain("CHEMBL25");
 });
 
-test("finetuned mode routes to the fine-tuned model", async () => {
-  let capturedModel: string | null = null;
-
+test("no tool call means no LanceDB lookup happens", async () => {
+  let toolRuns = 0;
   const handler = createChatRequestHandler({
     publicDir: new URL("../public/", import.meta.url),
-    ragModelName: "gemma3:1b",
-    fetchImpl: async (input, init) => {
+    fetchImpl: async (input) => {
       const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
-      if (url.endsWith("/api/tags")) {
-        return Response.json({ models: [{ name: "chembl-drug-chat:1b", modified_at: "2026-04-19T10:00:00Z" }] });
-      }
-      if (url.endsWith("/api/chat")) {
-        capturedModel = (JSON.parse(init?.body as string)).model;
-        return ndjson(
-          { message: { role: "assistant", content: "standard reply" }, done: false },
-          { message: { role: "assistant", content: "" }, done: true },
-        );
-      }
+      if (url.endsWith("/api/tags")) return Response.json({ models: [] });
+      if (url.endsWith("/api/chat")) return reply("Paracetamol is an analgesic.");
       throw new Error(`Unexpected request: ${url}`);
     },
-    now: () => 0,
+    toolRunner: async () => { toolRuns += 1; return { result: null }; },
   });
 
   const response = await handler(
     new Request("http://localhost/api/chat", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ messages: [{ role: "user", content: "hello" }] }),
+      body: JSON.stringify({ messages: [{ role: "user", content: "What is an analgesic?" }] }),
     }),
   );
 
-  expect(response.status).toBe(200);
-  expect(capturedModel).toBe("chembl-drug-chat:1b");
-  expect(response.headers.get("x-source")).toBe("ollama-tags");
+  const events = await collectEvents(response);
+  expect(toolRuns).toBe(0);
+  expect(events.some(e => e.tool)).toBe(false);
+  expect(answerOf(events)).toBe("Paracetamol is an analgesic.");
+});
+
+test("the tool loop stops at maxToolSteps", async () => {
+  const handler = createChatRequestHandler({
+    publicDir: new URL("../public/", import.meta.url),
+    maxToolSteps: 2,
+    fetchImpl: async (input) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (url.endsWith("/api/tags")) return Response.json({ models: [] });
+      // A model stuck in a loop: every turn asks for another lookup.
+      if (url.endsWith("/api/chat")) return reply(`{"tool": "draw_molecule", "args": {"name": "Ethanol"}}`);
+      throw new Error(`Unexpected request: ${url}`);
+    },
+    toolRunner: async () => ({ result: { image: "data:image/png;base64,AAA" } }),
+  });
+
+  const response = await handler(
+    new Request("http://localhost/api/chat", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ messages: [{ role: "user", content: "draw ethanol" }] }),
+    }),
+  );
+
+  const events = await collectEvents(response);
+  expect(events.filter(e => e.tool).length).toBe(2);
+  expect(events.at(-1)?.done).toBe(true);
 });
 
 test("request handler handles errors gracefully", async () => {
@@ -168,4 +204,64 @@ test("request handler handles errors gracefully", async () => {
   );
 
   expect(response.status).toBe(503);
+});
+
+test("prose streams token by token, and a tool call never leaks to the client", async () => {
+  const replies = [
+    // Narration then a tool call: the prose streams, the JSON is held back.
+    `Let me look that up.\n{"tool": "get_compound_by_name", "args": {"name": "Aspirin"}}`,
+    "Aspirin is CHEMBL25.",
+  ];
+
+  const handler = createChatRequestHandler({
+    publicDir: new URL("../public/", import.meta.url),
+    fetchImpl: async (input) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (url.endsWith("/api/tags")) return Response.json({ models: [] });
+      // 4-character chunks: forces the tool-call JSON to arrive split up.
+      if (url.endsWith("/api/chat")) return reply(replies.shift() ?? "no more replies", 4);
+      throw new Error(`Unexpected request: ${url}`);
+    },
+    toolRunner: async () => ({ result: { chembl_id: "CHEMBL25" } }),
+  });
+
+  const response = await handler(
+    new Request("http://localhost/api/chat", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ messages: [{ role: "user", content: "What is Aspirin?" }] }),
+    }),
+  );
+
+  const events = await collectEvents(response);
+  const deltas = events.filter(e => e.message?.content !== undefined);
+  expect(deltas.length).toBeGreaterThan(1); // streamed, not one blob
+  const text = answerOf(events);
+  expect(text).toContain("Let me look that up.");
+  expect(text).toContain("Aspirin is CHEMBL25.");
+  expect(text).not.toContain('"tool"'); // the call itself is never shown
+  expect(events.find(e => e.tool)?.tool?.tool).toBe("get_compound_by_name");
+});
+
+test("a brace in prose is released, not swallowed", async () => {
+  const handler = createChatRequestHandler({
+    publicDir: new URL("../public/", import.meta.url),
+    fetchImpl: async (input) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (url.endsWith("/api/tags")) return Response.json({ models: [] });
+      if (url.endsWith("/api/chat")) return reply('Formula {C9H8O4} is aspirin.', 4);
+      throw new Error(`Unexpected request: ${url}`);
+    },
+    toolRunner: async () => ({ result: null }),
+  });
+
+  const response = await handler(
+    new Request("http://localhost/api/chat", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ messages: [{ role: "user", content: "formula?" }] }),
+    }),
+  );
+
+  expect(answerOf(await collectEvents(response))).toBe("Formula {C9H8O4} is aspirin.");
 });

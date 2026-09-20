@@ -1,78 +1,55 @@
 # ChEMBL → LanceDB Vector Store
 
-This module ingests all ChEMBL compound data into a LanceDB vector store for
-Retrieval-Augmented Generation (RAG) at inference time.
+This module ingests all ChEMBL compound data into a LanceDB vector store, which
+the chat app's agent reads through tools at inference time.
 
 ---
 
-## Why RAG alongside fine-tuning?
+## Why a vector store alongside fine-tuning?
 
 Fine-tuning teaches a model to *sound like* a domain expert. It does not give
 the model reliable access to ground truth records. When asked "is it safe to take
 warfarin with aspirin?", a fine-tuned model will generate a plausible-sounding
 answer that may be subtly wrong.
 
-RAG complements fine-tuning by grounding answers in real ChEMBL and TWOSIDES records:
+The store grounds answers in real ChEMBL and TWOSIDES records:
 
-1. Extract drug-name candidates from the user message
-2. Look those names up in the `compounds` and `polypharmacy` tables
-3. Inject the retrieved records into the prompt as a system message
-4. The model formats the answer from retrieved facts rather than generating them from memory
+1. The model asks for a lookup by emitting a JSON tool call
+2. The server runs it against the `compounds` or `polypharmacy` table
+3. The result is appended to the conversation as a `### Tool result` message
+4. The model formats the answer from retrieved facts rather than from memory
 
-Both modes are served simultaneously in the web UI so their answers can be compared directly.
+Nothing is retrieved unless a tool asked for it — there is no automatic context
+injection.
 
 ---
 
-## RAG implementation
+## Tools
 
-Implemented in [`web/src/rag.ts`](../../../../web/src/rag.ts), invoked from
-`web/src/app.ts` when a request arrives with `mode: "rag"`.
+[`tools.py`](tools.py) is the bridge the Bun server spawns, one subprocess per
+call:
 
-> **Retrieval is exact name matching, not vector similarity.** The Morgan
-> fingerprint column is not used by the chat path. It backs `query_compounds()`
-> in `query_lancedb.py`, which only the Python benchmark calls.
+```bash
+uv run python -m app.scripts.flows.vector_store.tools \
+    get_compound_by_name '{"name": "Aspirin"}'
+# {"result": {"chembl_id": "CHEMBL25", "mw_freebase": 180.16, ...}}
+```
 
-### 1. Candidate extraction
-
-`extractDrugCandidates(text)` harvests capitalised words with the regex
-`\b[A-Z][a-zA-Z]{2,}\b`, drops a ~60-word stopword list, then title-cases each
-survivor to match the casing written at ingest time (`str.to_titlecase()`).
-
-A fully lowercase query (`"aspirin and warfarin"`) yields no candidates, so no
-context is built at all.
-
-### 2. Lookups
-
-| Table | Filter | Selected |
+| Tool | Function | Table |
 |---|---|---|
-| `compounds` | `LOWER(pref_name) = '<candidate>'` — first 4 candidates | `chembl_id`, `pref_name`, `mw_freebase` |
-| `polypharmacy` | each candidate pair, both orderings | `side_effects`, `max_prr`, `total_cases` |
-| `polypharmacy` | `drug_1_name = '<c>' OR drug_2_name = '<c>'` — first 2 candidates | top 3 partners by `max_prr` |
+| `get_compound_by_name` | `query_lancedb.get_compound_by_name` | `compounds` (exact, case-insensitive `pref_name`) |
+| `query_compounds` | `query_lancedb.query_compounds` | `compounds` (Morgan fingerprint similarity) |
+| `query_polypharmacy` | `query_lancedb.query_polypharmacy` | `polypharmacy` (one drug pair, both orderings) |
+| `query_drug_side_effects` | `query_lancedb.query_drug_side_effects` | `polypharmacy` (all pairs for one drug, by `max_prr`) |
+| `draw_molecule` | `tools.draw_molecule` | `compounds` — resolves the name to `canonical_smiles`, then RDKit draws it |
 
-`side_effects` is stored strongest-signal-first (the TWOSIDES ingest sorts by
-`prr` before aggregating), so `.split(";").slice(0, 3)` yields the three
-strongest effects.
+Every failure — unknown tool, bad arguments, missing table, unparseable SMILES —
+is returned as `{"error": "..."}` rather than raised, because the consumer is a
+model that can retry, not a human reading a traceback.
 
-### 3. Prompt injection
-
-Results are formatted as a bullet list under
-`"Relevant pharmacological context retrieved from ChEMBL and TWOSIDES databases:"`,
-which `augmentMessages()` prepends to the history as a `system` message.
-
-`buildRagContext()` returns `null` — and the caller falls back to an unaugmented
-chat — when the LanceDB directory is missing, no candidates are extracted, or no
-rows match.
-
-### Known limitations
-
-- **Only three compound columns are retrieved.** `indications`, `mechanisms`,
-  `warning_descriptions`, and `metabolic_enzymes` are ingested but never read by
-  the chat path. Widening the `.select()` in `rag.ts` is the cheapest available
-  improvement to answer quality.
-- **Multi-word and hyphenated names are missed.** `Ethinyl Estradiol` splits into
-  two candidates that match nothing; `Co-trimoxazole` matches nothing at all.
-- **Failures are silent.** Both lookups are wrapped in bare `try/catch`, so a
-  missing table and a genuine miss are indistinguishable to the caller.
+Whether the fine-tuned model reliably *emits* these calls is a separate problem;
+Ollama refuses its native `tools` field for Gemma 3, so calls are prompted as
+JSON and parsed out of the reply (see `web/src/tools.ts` and ROADMAP item 3).
 
 ---
 
@@ -222,7 +199,7 @@ written by the background thread, hiding ~0.5s of I/O per batch.
 | `ProcessPoolExecutor` | ❌ Removed | Keep for fingerprinting | New API is faster single-threaded than old API with 8 workers; spawn overhead is not worth it |
 | `ThreadPoolExecutor` | ✅ 1 write thread | Sync write | Overlaps LanceDB I/O with fingerprinting; GIL released during file I/O |
 | Batch size | ✅ 10,000 rows | 1,000 / 100,000 | Balances memory (~30 MB/batch), IPC cost, and LanceDB commit granularity |
-| Scalar indices | ✅ `chembl_id`, `standard_inchi_key` | None / more | Enables fast exact-match filtering — the path the RAG chat actually uses |
+| Scalar indices | ✅ `chembl_id`, `standard_inchi_key` | None / more | Enables fast exact-match filtering — the path the name-lookup tools use |
 | Vector index | ❌ Not built | IVF-PQ / HNSW | `create_index()` is never called, so `table.search()` is a brute-force scan over all rows. Only the Python benchmark searches by vector, so this has not been a bottleneck |
 
 ---

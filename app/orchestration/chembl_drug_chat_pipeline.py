@@ -1,12 +1,5 @@
-from pathlib import Path
-
 from dagster import Config, Definitions, In, Nothing, Out, ScheduleDefinition, graph, op
 
-from app.scripts.flows.eval.benchmark_rag_vs_finetuned import (
-    check_rag_quality,
-    run_benchmark,
-    write_benchmark_artifacts,
-)
 from app.scripts.flows.eval.eval_finetuned_model import eval_flow
 from app.scripts.flows.finetuning.export_to_ollama import (
     ARTIFACTS_DIR,
@@ -86,17 +79,6 @@ def eval_finetuned_model_op() -> None:
     eval_flow(run_dir=latest_run_dir(ARTIFACTS_DIR))
 
 
-# Fan-in from fine-tuned eval (quality gate) + TWOSIDES LanceDB ingest (RAG data ready).
-# Verifies RAG context quality before allowing Ollama export.
-@op(ins={"start_finetuned_eval": In(Nothing), "start_polypharmacy_store": In(Nothing)}, out=Out(Nothing))
-def benchmark_rag_vs_finetuned_op() -> None:
-    run_dir = latest_run_dir(ARTIFACTS_DIR)
-    eval_dir = Path("data/eval") / run_dir.name
-    results = run_benchmark()
-    write_benchmark_artifacts(results, out_dir=eval_dir)  # always write before gate
-    check_rag_quality(results)
-
-
 @op(ins={"start": In(Nothing)})
 def export_to_ollama_op() -> None:
     export_to_ollama(run_dir=latest_run_dir(ARTIFACTS_DIR), force=True)
@@ -112,18 +94,16 @@ def chembl_pipeline_graph() -> None:
         start_chembl=chembl_parquet, start_twosides=raw_twosides
     )
     compounds_vector_store = ingest_chembl_to_lancedb_op(start=chembl_parquet)
-    polypharmacy_vector_store = ingest_twosides_to_lancedb_op(
+    # Terminal op: the vector store serves the web app's agent tools at query
+    # time, so nothing downstream in this pipeline depends on it.
+    ingest_twosides_to_lancedb_op(
         start_lancedb=compounds_vector_store, start_twosides=raw_twosides
     )
     finetuned_model = finetune_llm_op(
         start_a=chembl_finetune_dataset, start_b=drug_interaction_dataset
     )
     finetuned_model_eval = eval_finetuned_model_op(start=finetuned_model)
-    rag_benchmark = benchmark_rag_vs_finetuned_op(
-        start_finetuned_eval=finetuned_model_eval,
-        start_polypharmacy_store=polypharmacy_vector_store,
-    )
-    export_to_ollama_op(start=rag_benchmark)
+    export_to_ollama_op(start=finetuned_model_eval)
 
 
 chembl_pipeline = chembl_pipeline_graph.to_job(name="chembl_pipeline")

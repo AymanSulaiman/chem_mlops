@@ -1,4 +1,11 @@
-import { augmentMessages, buildRagContext } from "./rag";
+import {
+  formatToolResult,
+  parseToolCall,
+  runTool,
+  TOOL_SYSTEM_PROMPT,
+  type ToolCall,
+  type ToolOutcome,
+} from "./tools";
 
 export type ChatMessage = {
   role: "user" | "assistant";
@@ -14,10 +21,11 @@ export type ChatAppOptions = {
   ollamaBaseUrl?: string;
   ollamaModelPrefix?: string;
   fallbackModelName?: string;
-  ragModelName?: string;
-  ragLancedbDir?: string;
   publicDir?: URL;
-  fetchImpl?: typeof fetch;
+  // Only the shape the handler uses, so tests can pass a plain function.
+  fetchImpl?: (input: URL | RequestInfo, init?: RequestInit) => Promise<Response>;
+  toolRunner?: (call: ToolCall) => Promise<ToolOutcome>;
+  maxToolSteps?: number;
   now?: () => number;
   cacheTtlMs?: number;
 };
@@ -26,6 +34,12 @@ type CachedModel = {
   model: string;
   source: "ollama-tags" | "fallback";
   fetchedAt: number;
+};
+
+type OllamaReply = {
+  message?: { content?: string };
+  prompt_eval_count?: number;
+  eval_count?: number;
 };
 
 export function isValidChatMessage(value: unknown): value is ChatMessage {
@@ -90,10 +104,10 @@ export function createChatRequestHandler(options: ChatAppOptions = {}) {
   const ollamaBaseUrl = options.ollamaBaseUrl ?? Bun.env.OLLAMA_BASE_URL ?? "http://127.0.0.1:11434";
   const ollamaModelPrefix = options.ollamaModelPrefix ?? Bun.env.OLLAMA_MODEL_PREFIX ?? "chembl-drug-chat";
   const fallbackModelName = options.fallbackModelName ?? Bun.env.OLLAMA_MODEL_NAME ?? "chembl-drug-chat:1b";
-  const ragModelName = options.ragModelName ?? Bun.env.RAG_MODEL_NAME ?? "gemma3:1b";
-  const ragLancedbDir = options.ragLancedbDir ?? Bun.env.LANCEDB_DIR ?? null;
   const publicDir = options.publicDir ?? new URL("../public/", import.meta.url);
   const fetchImpl = options.fetchImpl ?? fetch;
+  const toolRunner = options.toolRunner ?? ((call: ToolCall) => runTool(call));
+  const maxToolSteps = options.maxToolSteps ?? 3;
   const now = options.now ?? (() => Date.now());
   const cacheTtlMs = options.cacheTtlMs ?? 15_000;
 
@@ -121,56 +135,131 @@ export function createChatRequestHandler(options: ChatAppOptions = {}) {
     return cachedModel;
   }
 
-  async function chat(messages: ChatMessage[], modelOverride?: string): Promise<Response> {
-    const modelInfo = modelOverride
-      ? { model: modelOverride, source: "rag-model" as const }
-      : await detectLatestModel();
-    const startMs = now();
+  // One streamed turn. Ollama refuses its native `tools` field for
+  // chembl-drug-chat ("does not support tools" — Gemma 3 has no tool template),
+  // so tool calls are prompted and parsed out of the prose instead.
+  // onDelta sees each token as it arrives; the caller decides what to forward.
+  async function streamOllamaTurn(
+    model: string,
+    messages: { role: string; content: string }[],
+    onDelta: (delta: string) => void,
+  ): Promise<OllamaReply> {
     const response = await fetchImpl(`${ollamaBaseUrl}/api/chat`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ model: modelInfo.model, messages, stream: true }),
+      body: JSON.stringify({ model, messages, stream: true }),
     });
-
     if (!response.ok) {
-      const details = await response.text();
-      throw new Error(`Ollama chat failed: ${response.status} ${details}`);
+      throw new Error(`Ollama chat failed: ${response.status} ${await response.text()}`);
     }
 
-    // ponytail: TransformStream passes bytes unchanged, snoops final chunk for metrics
-    let buf = "";
-    const logTransform = new TransformStream<Uint8Array, Uint8Array>({
-      transform(chunk, controller) {
-        buf += new TextDecoder().decode(chunk);
-        controller.enqueue(chunk);
-      },
-      flush() {
-        const last = buf.trimEnd().split("\n").at(-1) ?? "";
+    const reader = response.body!.getReader();
+    const decoder = new TextDecoder();
+    let partial = "";
+    const reply: OllamaReply = { message: { content: "" } };
+
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      partial += decoder.decode(value, { stream: true });
+      const lines = partial.split("\n");
+      partial = lines.pop() ?? "";
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        let chunk: OllamaReply;
         try {
-          const final = JSON.parse(last) as {
-            done?: boolean;
-            eval_count?: number;
-            prompt_eval_count?: number;
-            eval_duration?: number;
-            total_duration?: number;
-          };
-          if (final.done) {
-            console.log(JSON.stringify({
-              ts: new Date().toISOString(),
-              model: modelInfo.model,
-              source: modelInfo.source,
-              latencyMs: now() - startMs,
-              promptTokens: final.prompt_eval_count ?? null,
-              completionTokens: final.eval_count ?? null,
-              evalDurationMs: final.eval_duration != null ? Math.round(final.eval_duration / 1e6) : null,
-              totalDurationMs: final.total_duration != null ? Math.round(final.total_duration / 1e6) : null,
-            }));
+          chunk = JSON.parse(line) as OllamaReply;
+        } catch {
+          continue;
+        }
+        const delta = chunk.message?.content ?? "";
+        if (delta) {
+          reply.message!.content += delta;
+          onDelta(delta);
+        }
+        // Token counts only appear on the final chunk.
+        reply.prompt_eval_count = chunk.prompt_eval_count ?? reply.prompt_eval_count;
+        reply.eval_count = chunk.eval_count ?? reply.eval_count;
+      }
+    }
+
+    return reply;
+  }
+
+  // Agentic chat: loop on tool calls, streaming NDJSON events out as they happen.
+  // Prose streams token by token; text from the first "{" onwards is held back
+  // until the turn ends, because a tool call cannot be recognised until its JSON
+  // closes. Held text that turns out not to be a call is released at the end, so
+  // nothing is ever dropped.
+  async function agentChat(messages: ChatMessage[]): Promise<Response> {
+    const modelInfo = await detectLatestModel();
+    const startMs = now();
+    const convo: { role: string; content: string }[] = [
+      { role: "system", content: TOOL_SYSTEM_PROMPT },
+      ...messages,
+    ];
+
+    const stream = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        const encoder = new TextEncoder();
+        const send = (event: unknown) =>
+          controller.enqueue(encoder.encode(`${JSON.stringify(event)}\n`));
+        let promptTokens = 0;
+        let completionTokens = 0;
+        let steps = 0;
+
+        try {
+          for (let step = 0; ; step++) {
+            let forwarded = 0; // characters of this turn already sent to the client
+            let holding = false;
+            const reply = await streamOllamaTurn(modelInfo.model, convo, (delta) => {
+              if (holding) return;
+              const brace = delta.indexOf("{");
+              const head = brace === -1 ? delta : delta.slice(0, brace);
+              if (head) {
+                send({ message: { content: head } });
+                forwarded += head.length;
+              }
+              if (brace !== -1) holding = true;
+            });
+            const content = reply.message?.content ?? "";
+            promptTokens += reply.prompt_eval_count ?? 0;
+            completionTokens += reply.eval_count ?? 0;
+
+            const call = step < maxToolSteps ? parseToolCall(content) : null;
+            if (!call) {
+              // Release whatever was held back: it was prose, not a tool call.
+              const tail = content.slice(forwarded);
+              if (tail) send({ message: { content: tail } });
+              break;
+            }
+
+            steps++;
+            send({ tool: call });
+            const outcome = await toolRunner(call);
+            send({ toolResult: { tool: call.tool, ...outcome } });
+            convo.push({ role: "assistant", content });
+            convo.push({ role: "user", content: formatToolResult(call, outcome) });
           }
-        } catch {}
+          send({ done: true });
+        } catch (error) {
+          send({ error: error instanceof Error ? error.message : "Chat request failed." });
+        } finally {
+          console.log(JSON.stringify({
+            ts: new Date().toISOString(),
+            model: modelInfo.model,
+            source: modelInfo.source,
+            latencyMs: now() - startMs,
+            toolCalls: steps,
+            promptTokens,
+            completionTokens,
+          }));
+          controller.close();
+        }
       },
     });
 
-    return new Response(response.body!.pipeThrough(logTransform), {
+    return new Response(stream, {
       headers: {
         "content-type": "application/x-ndjson",
         "x-model": modelInfo.model,
@@ -200,7 +289,7 @@ export function createChatRequestHandler(options: ChatAppOptions = {}) {
 
     if (request.method === "GET" && url.pathname === "/api/model") {
       try {
-        return json({ ...(await detectLatestModel()), ragModel: ragModelName });
+        return json(await detectLatestModel());
       } catch (error) {
         return json(
           {
@@ -212,7 +301,7 @@ export function createChatRequestHandler(options: ChatAppOptions = {}) {
     }
 
     if (request.method === "POST" && url.pathname === "/api/chat") {
-      const body = (await request.json()) as { messages?: unknown; mode?: string };
+      const body = (await request.json()) as { messages?: unknown };
       const messages = normalizeMessages(body.messages);
 
       if (messages.length === 0) {
@@ -220,18 +309,7 @@ export function createChatRequestHandler(options: ChatAppOptions = {}) {
       }
 
       try {
-        const isRag = body.mode === "rag";
-        let outgoing = messages;
-        if (isRag && ragLancedbDir !== null) {
-          const lastUserMessage = [...messages].reverse().find(m => m.role === "user");
-          if (lastUserMessage) {
-            const context = await buildRagContext(lastUserMessage.content, ragLancedbDir);
-            if (context) {
-              outgoing = augmentMessages(messages, context);
-            }
-          }
-        }
-        return await chat(outgoing, isRag ? ragModelName : undefined);
+        return await agentChat(messages);
       } catch (error) {
         return json(
           {

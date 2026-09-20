@@ -215,3 +215,4 @@ web/.bun/
 # web/.env contains only localhost defaults — no secrets — so it is committed
 !web/.env
 .ua
+.gstack/

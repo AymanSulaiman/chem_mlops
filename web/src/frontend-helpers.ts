@@ -1,4 +1,4 @@
-export type ModelInfo = { model: string; source: string; ragModel: string };
+export type ModelInfo = { model: string; source: string };
 export type ChatResult = { reply?: string; error?: string };
 
 export function formatReplyText(reply?: string): string {
