@@ -1592,21 +1592,22 @@ def _twosides_pairs(
     # (which Polars infers when schema_overrides was not applied at download time).
     df = (
         pl.scan_parquet(twosides_path)
-        .with_columns([
-            pl.col("PRR").cast(pl.Float32, strict=False),
-            pl.col("A").cast(pl.Int32, strict=False),
-        ])
-        .filter(
-            (pl.col("PRR") >= min_prr)
-            & (pl.col("A") >= min_cases)
+        .with_columns(
+            [
+                pl.col("PRR").cast(pl.Float32, strict=False),
+                pl.col("A").cast(pl.Int32, strict=False),
+            ]
         )
-        .select([
-            pl.col("drug_1_concept_name").str.to_titlecase().alias("drug_1"),
-            pl.col("drug_2_concept_name").str.to_titlecase().alias("drug_2"),
-            pl.col("condition_concept_name").alias("side_effect"),
-            pl.col("PRR"),
-            pl.col("A").alias("cases"),
-        ])
+        .filter((pl.col("PRR") >= min_prr) & (pl.col("A") >= min_cases))
+        .select(
+            [
+                pl.col("drug_1_concept_name").str.to_titlecase().alias("drug_1"),
+                pl.col("drug_2_concept_name").str.to_titlecase().alias("drug_2"),
+                pl.col("condition_concept_name").alias("side_effect"),
+                pl.col("PRR"),
+                pl.col("A").alias("cases"),
+            ]
+        )
         .collect()
     )
     assert isinstance(df, pl.DataFrame)
@@ -1623,12 +1624,14 @@ def _twosides_pairs(
     pairs = (
         df.sort("PRR", descending=True)
         .group_by(["drug_1", "drug_2"])
-        .agg([
-            pl.col("side_effect").str.join("; ").alias("side_effects"),
-            pl.col("PRR").max().alias("max_prr"),
-            pl.col("cases").sum().alias("total_cases"),
-            pl.len().alias("n_effects"),
-        ])
+        .agg(
+            [
+                pl.col("side_effect").str.join("; ").alias("side_effects"),
+                pl.col("PRR").max().alias("max_prr"),
+                pl.col("cases").sum().alias("total_cases"),
+                pl.len().alias("n_effects"),
+            ]
+        )
         .sort("max_prr", descending=True)
         .head(max_pairs)
     )
@@ -1663,21 +1666,21 @@ def generate_twosides_qa(
             f"together has been associated with a disproportionate reporting of {n} adverse effect(s): "
             f"{se}. The strongest signal has a Proportional Reporting Ratio (PRR) of {prr:.1f}, "
             f"indicating these effects occur more frequently with this drug combination than with "
-            f"either drug alone."
+            f"either drug alone.",
         ),
         lambda d1, d2, se, prr, n: (
             f"What adverse effects are associated with combining {d1} and {d2}?",
             f"Post-marketing pharmacovigilance data (TWOSIDES/FAERS) shows that the combination "
             f"of {d1} and {d2} is associated with the following adverse effects: {se}. "
             f"These signals are based on disproportionate co-reporting in the FDA adverse event "
-            f"database (max PRR: {prr:.1f})."
+            f"database (max PRR: {prr:.1f}).",
         ),
         lambda d1, d2, se, prr, n: (
             f"What does FDA adverse event data show about taking {d1} with {d2}?",
             f"FDA FAERS data analysed in the TWOSIDES database shows a disproportionate reporting "
             f"of {n} adverse effect(s) when {d1} and {d2} are co-administered: {se}. "
             f"A PRR of {prr:.1f} for the strongest signal suggests this combination warrants "
-            f"clinical attention."
+            f"clinical attention.",
         ),
     ]
 
@@ -1797,9 +1800,8 @@ def generate_tool_call_qa(
                 result["full_molformula"] = formula
             if prop.get("alogp") is not None:
                 result["alogp"] = prop["alogp"]
-            answer = (
-                f"{drug} is {chembl_id} in ChEMBL, with a molecular weight of {mw:.2f}."
-                + (f" Its molecular formula is {formula}." if formula else "")
+            answer = f"{drug} is {chembl_id} in ChEMBL, with a molecular weight of {mw:.2f}." + (
+                f" Its molecular formula is {formula}." if formula else ""
             )
             question = lookup_questions[emitted_lookup % len(lookup_questions)]
             yield _tool_call_record(
@@ -1842,9 +1844,7 @@ def generate_tool_call_qa(
             )
             emitted_draw += 1
 
-    pairs = _twosides_pairs(
-        twosides_path, max_pairs=max_pairs, exclude_names=exclude_names
-    )
+    pairs = _twosides_pairs(twosides_path, max_pairs=max_pairs, exclude_names=exclude_names)
     if pairs is None:
         return
 
@@ -2365,12 +2365,16 @@ def build_golden_benchmark(
         target_name = (targets.get(int(tid)) or {}).get("pref_name") if tid is not None else None
         if not mol or not target_name:
             continue
-        items.append({
-            "question": f"What does {_drug_name(mol)} target?",
-            "must_contain": [target_name.lower()],
-            "category": "mechanism_of_action",
-            "chembl_id": chembl_id,
-        })
+        items.append(
+            {
+                "question": f"What does {_drug_name(mol)} target?",
+                "must_contain": [target_name.lower()],
+                "category": "mechanism_of_action",
+                "chembl_id": chembl_id,
+                # The tool-call benchmark composes its own questions from this name.
+                "drug": _drug_name(mol),
+            }
+        )
         if len(items) >= limit:
             break
 

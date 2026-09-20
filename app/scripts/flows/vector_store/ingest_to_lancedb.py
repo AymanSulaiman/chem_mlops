@@ -64,40 +64,60 @@ def _build_flat_df(parquet_dir: str) -> pl.DataFrame:
     Rows with no canonical SMILES are dropped (no fingerprint possible).
     """
     # ── Base + 1:1 joins ──────────────────────────────────────────────────
-    base: pl.DataFrame = pl.scan_parquet(f"{parquet_dir}/molecule_dictionary.parquet").filter(  # ty: ignore[invalid-assignment]
-        pl.col("structure_type") == "MOL"
-    ).collect()
+    base: pl.DataFrame = (
+        pl.scan_parquet(f"{parquet_dir}/molecule_dictionary.parquet")
+        .filter(  # ty: ignore[invalid-assignment]
+            pl.col("structure_type") == "MOL"
+        )
+        .collect()
+    )
 
-    cs: pl.DataFrame = pl.scan_parquet(f"{parquet_dir}/compound_structures.parquet").select(  # ty: ignore[invalid-assignment]
-        ["molregno", "canonical_smiles", "standard_inchi_key"]
-    ).collect()
+    cs: pl.DataFrame = (
+        pl.scan_parquet(f"{parquet_dir}/compound_structures.parquet")
+        .select(  # ty: ignore[invalid-assignment]
+            ["molregno", "canonical_smiles", "standard_inchi_key"]
+        )
+        .collect()
+    )
 
-    cp: pl.DataFrame = pl.scan_parquet(f"{parquet_dir}/compound_properties.parquet").select(  # ty: ignore[invalid-assignment]
-        [
-            "molregno",
-            "mw_freebase",
-            "alogp",
-            "hba",
-            "hbd",
-            "psa",
-            "qed_weighted",
-            "full_molformula",
-            "num_ro5_violations",
-            "heavy_atoms",
-        ]
-    ).collect()
+    cp: pl.DataFrame = (
+        pl.scan_parquet(f"{parquet_dir}/compound_properties.parquet")
+        .select(  # ty: ignore[invalid-assignment]
+            [
+                "molregno",
+                "mw_freebase",
+                "alogp",
+                "hba",
+                "hbd",
+                "psa",
+                "qed_weighted",
+                "full_molformula",
+                "num_ro5_violations",
+                "heavy_atoms",
+            ]
+        )
+        .collect()
+    )
 
-    mh: pl.DataFrame = pl.scan_parquet(f"{parquet_dir}/molecule_hierarchy.parquet").select(  # ty: ignore[invalid-assignment]
-        ["molregno", "parent_molregno", "active_molregno"]
-    ).collect()
+    mh: pl.DataFrame = (
+        pl.scan_parquet(f"{parquet_dir}/molecule_hierarchy.parquet")
+        .select(  # ty: ignore[invalid-assignment]
+            ["molregno", "parent_molregno", "active_molregno"]
+        )
+        .collect()
+    )
 
-    usan: pl.DataFrame = pl.scan_parquet(f"{parquet_dir}/usan_stems.parquet").select(  # ty: ignore[invalid-assignment]
-        [
-            "stem",
-            pl.col("annotation").alias("usan_stem_annotation"),
-            pl.col("stem_class").alias("usan_stem_class"),
-        ]
-    ).collect()
+    usan: pl.DataFrame = (
+        pl.scan_parquet(f"{parquet_dir}/usan_stems.parquet")
+        .select(  # ty: ignore[invalid-assignment]
+            [
+                "stem",
+                pl.col("annotation").alias("usan_stem_annotation"),
+                pl.col("stem_class").alias("usan_stem_class"),
+            ]
+        )
+        .collect()
+    )
 
     base = (
         base.join(cs, on="molregno", how="left")
@@ -319,9 +339,7 @@ def _build_flat_df(parquet_dir: str) -> pl.DataFrame:
         .collect()
     )
 
-    _assays = pl.scan_parquet(f"{parquet_dir}/assays.parquet").select(
-        ["assay_id", "tid"]
-    )
+    _assays = pl.scan_parquet(f"{parquet_dir}/assays.parquet").select(["assay_id", "tid"])
     _act_targets = pl.scan_parquet(f"{parquet_dir}/target_dictionary.parquet").select(
         ["tid", pl.col("pref_name").alias("target_name")]
     )

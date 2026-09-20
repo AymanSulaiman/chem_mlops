@@ -344,7 +344,9 @@ class TestMetalWatchdogRetry:
             calls.append(cmd)
             if len(calls) == 1:
                 log_file.parent.mkdir(parents=True, exist_ok=True)
-                log_file.write_text("Iter 100: Train loss 1.5\nlibc++abi: ... Impacting Interactivity ...\n")
+                log_file.write_text(
+                    "Iter 100: Train loss 1.5\nlibc++abi: ... Impacting Interactivity ...\n"
+                )
                 if checkpoint_iter is not None:
                     adapter_dir.mkdir(parents=True, exist_ok=True)
                     (adapter_dir / f"{checkpoint_iter:07d}_adapters.safetensors").touch()
@@ -403,7 +405,9 @@ class TestMetalWatchdogRetry:
             raise subprocess.CalledProcessError(6, cmd)
 
         with (
-            patch("app.scripts.flows.finetuning.finetuning._run", side_effect=always_killed) as mock_run,
+            patch(
+                "app.scripts.flows.finetuning.finetuning._run", side_effect=always_killed
+            ) as mock_run,
             pytest.raises(subprocess.CalledProcessError),
         ):
             finetune_lora(tmp_path / "mlx", tmp_path / "adapter", log_file=log_file)

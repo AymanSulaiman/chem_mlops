@@ -146,8 +146,13 @@ def finetune_lora(
     steps_per_eval: int = STEPS_PER_EVAL,
     save_every: int = SAVE_EVERY,
     log_file: Path | None = None,
+    resume_from: Path | None = None,
 ) -> Path:
-    """Launch LoRA fine-tuning using mlx_lm, resuming after a Metal watchdog kill."""
+    """Launch LoRA fine-tuning using mlx_lm, resuming after a Metal watchdog kill.
+
+    *resume_from* starts training from existing adapter weights instead of from
+    scratch — continued training on a new dataset rather than a fresh run.
+    """
     adapter_dir.mkdir(parents=True, exist_ok=True)
 
     def lora_cmd(remaining: int, resume_from: Path | None) -> list[str]:
@@ -196,7 +201,6 @@ def finetune_lora(
         return newest, int(newest.name.split("_")[0])
 
     done = 0
-    resume_from: Path | None = None
     for attempt in range(1, MAX_METAL_RETRIES + 2):
         try:
             _run(lora_cmd(iters - done, resume_from), log_file=log_file)

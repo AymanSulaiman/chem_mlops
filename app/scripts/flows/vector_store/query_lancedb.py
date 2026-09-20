@@ -55,8 +55,7 @@ def _open_table(lancedb_dir: str, table_name: str) -> Table:
     db: DBConnection = lancedb.connect(uri)
     if table_name not in db.list_tables().tables:
         raise FileNotFoundError(
-            f"Table '{table_name}' not found in '{uri}'. "
-            "Run the appropriate ingest step first."
+            f"Table '{table_name}' not found in '{uri}'. Run the appropriate ingest step first."
         )
     return db.open_table(table_name)
 
@@ -252,10 +251,7 @@ def query_drug_side_effects(
     table: Table = _open_table(lancedb_dir, POLYPHARMACY_TABLE)
     name = drug_name.strip().title()
     rows: list[dict[str, Any]] = (
-        table.search()
-        .where(f"drug_1_name = '{name}' OR drug_2_name = '{name}'")
-        .limit(n)
-        .to_list()
+        table.search().where(f"drug_1_name = '{name}' OR drug_2_name = '{name}'").limit(n).to_list()
     )
     return sorted(rows, key=lambda r: r.get("max_prr", 0), reverse=True)
 
@@ -326,7 +322,11 @@ def _run_sanity_check(lancedb_dir: str = LANCEDB_DIR) -> None:
         print(f"    Found {len(pairs)} pair(s) involving Warfarin")
         if pairs:
             top = pairs[0]
-            partner = top.get("drug_2_name") if top.get("drug_1_name", "").title() == "Warfarin" else top.get("drug_1_name")
+            partner = (
+                top.get("drug_2_name")
+                if top.get("drug_1_name", "").title() == "Warfarin"
+                else top.get("drug_1_name")
+            )
             print(f"    Strongest signal: Warfarin + {partner}  max_prr={top.get('max_prr')}")
             print("    ✓ Drug side-effect query succeeded")
     except FileNotFoundError:

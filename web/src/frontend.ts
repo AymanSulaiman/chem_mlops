@@ -47,7 +47,7 @@ function renderManual() {
 
     const detail = document.createElement("p");
     detail.className = "manual__detail";
-    detail.textContent = "help" in spec ? spec.help : spec.description;
+    detail.textContent = spec.help ?? spec.description;
 
     const name = document.createElement("code");
     name.className = "manual__name";

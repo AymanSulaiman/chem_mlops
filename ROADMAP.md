@@ -7,8 +7,8 @@ being worth it. Items 1 and 2 are worth doing regardless of the rest.
 
 ## 1. Fix eval leakage — split by molecule, not by row
 
-**Status:** dataset rebuilt, honest pass rate not yet recorded · **Size:** ~half a day · **Blocks:**
-every number in items 2–5
+**Status:** dataset rebuilt, honest pass rate recorded (5.0%) · **Size:** ~half a day
+· **Remaining:** re-point golden at the agent loop · **Blocks:** every number in items 2–5
 
 Every question in `app/scripts/flows/eval/golden.jsonl` is a training template
 instantiated with a drug that is in the training set. `golden.jsonl:1` is
@@ -41,7 +41,22 @@ verified by a check in the test suite, not by eye.
   `test_no_golden_molecule_appears_in_train` in `eval_finetuned_model_test.py`,
   which checks the real `train.jsonl` when one exists.
 
-**Remaining:** record the honest pass rate. The rebuild has since run —
+**Honest pass rate (2026-09-20): 5.0% (2/40), against a 70% gate.** The number
+is real and the gate was wrong, not the model. Every golden question is "What
+does {drug} target?" about a molecule this item deliberately deleted from
+training, so the fine-tune guesses a plausible protein — SIROLIMUS ->
+"Insulin receptor substrate 1", BRECANAVIR -> "Adenovirus". The two passes are
+EGFR and asparagine, the two most guessable answers in the set. Recalling a
+held-out drug's target is a **lookup**, not something weights can supply, so
+golden is now **recorded, not gated** (`golden_gated: false`); the tool-call
+parse rate gates the export instead. Re-point golden at the agent loop (model +
+tools) and it becomes a real gate again — that is the remaining work here.
+
+**Also worth fixing:** `build_golden_benchmark` only ever emits
+`mechanism_of_action` questions, so all 40 golden items test one skill. The
+benchmark is narrower than it reads.
+
+**Earlier remaining (done):** the rebuild has run —
 `data/llm_finetune/holdout.json`, `train.jsonl`, `valid.jsonl` and the
 molecule-keyed `golden.jsonl` are all from the same run, and
 `test_no_golden_molecule_appears_in_train` passes against the real files. It was
@@ -127,14 +142,19 @@ than predicted.
 
 ## 3. Teach the model to call tools
 
-**Status:** not started · **Size:** ~2–3 days · **Depends on:** 2
+**Status:** routing/grounding/prose all 100% after dropping the system prompt;
+bridge removal + self-continuation open · **Size:** ~2–3 days · **Depends on:** 2
 
-This is the load-bearing risk in the agentic plan, and item 2 confirmed it:
-Ollama refuses its `tools` field for `chembl-drug-chat:1b` outright, and the
-fine-tune ignores a JSON-only instruction even when the question plainly needs a
-lookup — it answers from memory with invented ChEMBL IDs. The loop and the tools
-work; the caller does not. `parseToolCall` in `web/src/tools.ts` is the seam to
-measure against.
+This is the load-bearing risk in the agentic plan. Item 2 found the caller
+broken outright: Ollama refuses its `tools` field for `chembl-drug-chat:1b`, and
+the fine-tune ignored a JSON-only instruction even when the question plainly
+needed a lookup, answering from memory with invented ChEMBL IDs.
+
+**That has changed.** A full retrain including the tool-call category
+(`20260920_081335`) emits parseable tool-call JSON 87.5% of the time. The open
+question is no longer *whether* it calls a tool but *which* — see the measured
+rates below. `parseToolCall` / `resolve_tool_call` are the seam to measure
+against.
 
 **Scope**
 - Add a tool-call category to the dataset builder: question → JSON tool call →
@@ -155,7 +175,228 @@ measure against.
   valid JSON on the tool-call turn. Cheaper to try first, worth benchmarking
   against the fine-tune approach.
 - Measure tool-call validity rate on the item 1 holdout set as its own metric,
-  separate from answer quality.
+  separate from answer quality. **Done (2026-09-20):** `run_tool_call_benchmark`
+  in `eval_finetuned_model.py` asks four tool-shaped questions about each of 10
+  held-out drugs and reports three rates, because they fail independently and
+  the fixes differ:
+  `parse_rate` (JSON came back at all — a decoding problem), `known_rate` (it
+  named a tool that exists — a naming problem), `correct_rate` (right tool, with
+  the expected argument — the routing problem that decides whether the agent is
+  real). Written to `data/eval/<run>/finetuned_tool_call_results.jsonl` and
+  summarised in the metrics file. **Measured, not gated**: the model this gate
+  protects cannot call a tool at all yet, so a threshold would block every
+  export. Turn `tool_call_gated` on once a trained model clears it.
+
+**Measured on the exported model (run `20260920_081335`, 2026-09-20).** 40 calls,
+10 held-out drugs. Before aliasing / after:
+
+| rate | before | after |
+|---|---|---|
+| `parse_rate` | 87.5% | 87.5% |
+| `known_rate` | 67.5% | **87.5%** |
+| `correct_rate` | 42.5% | **55.0%** |
+
+`known_rate` now equals `parse_rate`: every call the model produces reaches a
+real tool. That is the ceiling for a name-mapping layer, and it was reached
+without training anything.
+
+**Aliasing landed (2026-09-20).** `resolve_tool_call` in
+`vector_store/tools.py`, mirrored by `resolveToolCall` in `web/src/tools.ts`,
+maps near-miss names (`query_compound`, `query_drugs` -> `get_compound_by_name`)
+and argument keys (`drug_name` -> `name`) onto the registry, and rereads a
+`query_compounds` call carrying a drug name instead of a SMILES as the by-name
+lookup. The benchmark scores *through* the resolver, so the measured rate is the
+rate users get; a test asserts the two alias tables match, because a silent
+drift between them would make the number a lie. `run_tool` also drops arguments
+the tool does not take — models pad calls with `"n": 10` on a single-record
+lookup, and a TypeError is worse than an ignored key.
+
+**What aliasing cannot fix — this is what the training run is for:**
+- `query_polypharmacy` **0/10.** "Is it safe to take X with warfarin?" gets
+  `query_drug_side_effects` with a single drug. The model does not distinguish a
+  one-drug interaction scan from a named-pair lookup. Genuinely the wrong tool,
+  not the wrong spelling.
+- `get_compound_by_name` **5/10.** The misses call `query_compounds` with an
+  **invented SMILES** — the same hallucination that made `draw_molecule` take a
+  name instead of a structure (item 2). A made-up SMILES parses, so nothing
+  downstream can catch it.
+- `draw_molecule` 9/10 and `query_drug_side_effects` 8/10 already work.
+
+**The second half of the loop, now measured (2026-09-20).**
+`run_tool_result_benchmark` hands the model a tool result and scores whether it
+*reads* it. Every expected value is fabricated (`481.27`, `C23H31N5O4`,
+`Zalbovir`, `7.43`) on a held-out drug, so a memorised answer cannot score — an
+answer containing the marker is proof it read the result. Two rates:
+`grounded_rate` 45%, `prose_rate` 60% of 40.
+
+| tool | grounded | prose |
+|---|---|---|
+| `query_drug_side_effects` | 9/10 | 10/10 |
+| `query_polypharmacy` | 5/10 | 4/10 |
+| `draw_molecule` | 4/10 | 10/10 |
+| `get_compound_by_name` | **0/10** | **0/10** |
+
+- `get_compound_by_name` is fully broken: handed the answer, it re-emits its own
+  tool call verbatim — `{"drug_name": "SIROLIMUS", "n": 1, "tool":
+  "get_compound_by_name", ...}`. It asks the question again instead of answering
+  it. This is the most common lookup shape in the product.
+- `query_polypharmacy` fabricates *data* in half the cases: handed one side
+  effect it emits a JSON object listing several it was never given
+  (`thrombocytopenia`, `platelet count decreased`). Invented interactions in a
+  drug-interaction tool is the worst failure mode on this list.
+- `draw_molecule` answers in prose every time but pads with invented facts — "a
+  molecular weight of 290.0 Da" appears nowhere in the result it was handed.
+
+**Bridge verdict: keep it, for a new reason.** `routeDirectToolCall` was
+justified by "handed a tool result it echoes the JSON shape". For draws that is
+now false — 10/10 prose. But grounding is 4/10, so deleting the bridge would
+swap a deterministic correct caption for a fluent one that invents a molecular
+weight more often than not. It goes when `draw_molecule` grounding is high, not
+when the echoing stops. The comment in `web/src/tools.ts` still states the old
+premise and should be corrected when the bridge is revisited.
+
+**The export gate moved (2026-09-20).** It was the golden pass rate, which after
+item 1 measures whether the model can recall facts deliberately withheld from it
+— so it blocked every export for a capability the fine-tune is not supposed to
+have. Golden is now recorded (`golden_gated: false`) and `tool_call_parse_rate`
+gates instead, at `TOOL_CALL_PARSE_THRESHOLD = 0.5` — this item's stated
+acceptance criterion. `correct_rate` is printed but not gated: gating it at a
+useful level today blocks every export, and it is the number to gate once the
+training run lands.
+
+**The continued-training run happened (2026-09-20, `20260920_114710_tools`).**
+Mix was balanced — 12 K records per tool against 97 K prose, the 1:2 this item
+specified — 600 iters at 1e-5. Head to head with the full retrain, both measured
+under the same prompt:
+
+| metric | full retrain `081335` | continued `114710_tools` |
+|---|---|---|
+| tool-call parse | 85.0% | **90.0%** |
+| routing (correct tool) | 42.5% | **50.0%** |
+| tool-result grounded | 37.5% | **60.0%** |
+| tool-result prose | 52.5% | **77.5%** |
+| golden | 5.0% | 2.5% |
+
+**Serve the continued adapter.** It wins on every agent metric. Golden drops by
+one question out of 40, which is inside the noise of a 40-item benchmark and is
+the prose-forgetting risk this item flagged — worth watching, not acting on yet.
+
+**The ratio hypothesis in the Scope above is falsified.** It predicted that if
+the model still skipped tools, the fix was fewer competing prose records. The
+mix was rebalanced from ~6% tool records to 33% and **routing did not improve
+from the ratio** — what improved was the second half of the loop (grounding
+45% -> 60%, prose 60% -> 77.5%). Tool share buys comprehension, not
+discrimination. Do not spend another run on the ratio alone.
+
+**The decoy: an untrained tool in the prompt is worse than no tool.**
+`query_compounds` is the one tool `generate_tool_call_qa` excludes, but it was
+still advertised in `TOOL_SYSTEM_PROMPT`. On the continued model it absorbed
+**17 of 40** tool calls, 10 of them copying the prompt's example SMILES
+`CC(=O)Oc1ccccc1C(=O)O` verbatim — aspirin, emitted for questions about other
+drugs. Unsure which tool to use, the model copies the nearest literal example in
+the prompt, and continued training made it more fluent at tool-call syntax
+without teaching discrimination, so the decoy got stronger (4 calls -> 17).
+
+Fixed by `advertised: false` in `web/src/tools.ts` (callable, and still in the
+in-app manual — only the model prompt drops it), mirrored in the eval's prompt
+copy. Effect on the continued model:
+
+| expected tool | with decoy | without |
+|---|---|---|
+| `query_drug_side_effects` routing | 0/10 | **9/10** |
+| `get_compound_by_name` grounding | 0/10 | **10/10** |
+
+`get_compound_by_name` handed a result had been re-emitting its own tool call
+instead of answering — 0/10 on both rates, the worst failure found. Deleting one
+line from the prompt fixed it outright.
+
+**Read these per-tool, not in aggregate.** Removing the decoy moved the
+aggregate grounding rate *down* (77.5% -> 60%) while fixing the worst tool
+completely; `draw_molecule` and `query_polypharmacy` regressed and the average
+buried both facts. At n=10 per tool the aggregate is the least informative
+number produced.
+
+**The system prompt was the bug (2026-09-20). Routing 50% -> 100%.**
+`query_polypharmacy` routed 0/10 on every model tried, despite 12,150 training
+records using the *exact* benchmark phrasing. It was not phrasing, and not drug
+familiarity — "Is it safe to take Warfarin with Aspirin?", both drugs known and
+both named in the prompt, failed the same way. Every polypharmacy question
+collapsed onto `draw_molecule` with `{"name": "Ibuprofen"}`: the literal
+argument of the *last* tool example in the system prompt. Moving
+`query_polypharmacy` to last moved the attractor onto it — the failure relocated
+rather than resolving, which is what identified the mechanism.
+
+**Training records carry no system prompt at all.** `_tool_call_record` is bare
+`### Question` / `### Answer`; its docstring claims "the layout is exactly what
+the model sees at inference", and that was false — `app.ts` prepended a
+`{role: "system"}` tool list the model had never seen in training. So the tool
+list was out-of-distribution text the model copied from rather than reasoned
+over. This is the train-serve mismatch this item was always about, sitting in
+the one place nobody checked.
+
+Removing it, on `20260920_114710_tools`:
+
+| metric | with system prompt | without |
+|---|---|---|
+| tool-call parse | 90.0% | **100%** |
+| routing (correct tool) | 50.0% | **100%** |
+| tool-result grounded | 60.0% | **100%** |
+| tool-result prose | 77.5% | **100%** |
+
+40/40 on every tool metric, args correctly lifted from the question
+(`{"drug_1": "SIROLIMUS", "drug_2": "warfarin"}`). Landed as: no system message
+in `app.ts`, and `system_prompt=""` by default on both benchmarks.
+`TOOL_SYSTEM_PROMPT` stays exported and parity-tested for a general
+tool-capable model, which does need to be told what the tools are.
+
+**What 100% does not mean.** The rates score one planted marker per case. The
+model quotes it correctly every time and then pads with invented detail around
+it: handed a result containing a single side effect it answered "TWOSIDES
+reports 7 adverse effect(s)", and rendered a planted "tachycardia" as
+"tachycardiac arrest". Grounding measures *did it read the value*, not *is the
+whole answer faithful*. Faithfulness of the surrounding prose is unmeasured and
+is the next thing worth a benchmark.
+
+**Still broken after all of the above:**
+- ~~`query_polypharmacy` 0/10 routing~~ — fixed, 10/10.
+- ~~`get_compound_by_name` 1/10 routing~~ — fixed, 10/10.
+- **Self-continuation persists.** The model still writes its own fabricated
+  `### Tool result` after its call, on every tool-call response. Removing the
+  system prompt did not touch this — it is the record shape:
+  `_tool_call_record` puts call + result + answer in one completion, so the
+  model learns to produce the whole transcript. Harmless to scoring and to
+  serving (both take the *first* JSON object and discard the tail) but it is
+  generated text the streaming path has to suppress. Masking the loss after the
+  call turn is the fix, and it is a dataset change.
+
+**A crashed generation used to score as a wrong answer (fixed 2026-09-20).**
+`_generate` ignored the subprocess exit code, so when two evals ran at once and
+Metal ran out, all 40 completions came back empty and the rates reported
+"0.0% routing · 0.0% grounded" — indistinguishable from a real regression. The
+only tell was golden dropping to 0.0% in the same run, and golden shares no code
+with the tool prompt. It now raises on a non-zero exit or empty stdout: a *bad*
+reply is data to score, a *missing* one is a broken run. **Do not run two evals
+concurrently** — one exhausts the GPU and the other silently produced garbage
+before this fix.
+
+**The benchmarks are deterministic** — two runs give byte-identical responses,
+so these before/after deltas are real effects, not sampling noise. Perplexity is
+the exception: it samples 50 batches and wobbles ~0.2-0.6 between runs, which is
+harmless against a baseline of ~17.
+
+**Two ways to train it, and the cheap one first**
+- `continue_tool_training.py` — continue the existing adapter on a tool-heavy
+  mix (every tool record plus prose at 1:2) for ~600 iters, into a new run dir
+  so the current adapter is untouched. Minutes, not hours, and it attacks the
+  ratio problem directly: tool calls are a third of what the model sees instead
+  of six percent. Risk is forgetting prose, which is what the prose share and
+  the golden benchmark are there to catch.
+- A full retrain stays available and unchanged (`finetuning.py`); it is the
+  honest end state if continued training drifts.
+
+**Also done:** `num_ctx` 2048 → 8192 in the Modelfile. A 2000-char tool result
+plus the system prompt plus history overflowed the old window and silently
+dropped the oldest turns — including the tool result the answer depends on.
 
 **Temporary bridge (2026-09-19):** `routeDirectToolCall` + `describeDrawResult`
 in `web/src/tools.ts` answer an explicit "draw X" deterministically — tool call
@@ -167,11 +408,16 @@ A bogus tool name from the model is now fed back as an error rather than shown
 to the user (`unknownToolName`).
 
 **Acceptance:** tool-call JSON parses on a stated majority of attempts, measured
-on held-out drugs. This item decides whether the agent is real — if the number
-is bad, items 4 and 5 are deploying something that does not work.
+on held-out drugs. **Met: 87.5% parse.** But the acceptance criterion turned out
+to be the wrong bar — it only covers the first half of the loop. The three
+numbers that decide whether the agent is real are routing, grounding and prose.
+On `20260920_114710_tools` with no system prompt, all three are **100%** (40/40),
+every tool 10/10. The agent is real. What remains is faithfulness of the prose
+*around* a correctly-read value, which no benchmark covers yet.
 
 **Files:** `build_drug_interaction_dataset.py`, `finetuning/finetuning.py`,
-`eval/eval_finetuned_model.py`
+`finetuning/continue_tool_training.py`, `eval/eval_finetuned_model.py`,
+`vector_store/tools.py`, `web/src/tools.ts`
 
 ---
 

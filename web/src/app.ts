@@ -5,7 +5,6 @@ import {
   routeDirectToolCall,
   runTool,
   TOOL_RESULT_HEADER,
-  TOOL_SYSTEM_PROMPT,
   unknownToolError,
   unknownToolName,
   type ToolCall,
@@ -199,10 +198,15 @@ export function createChatRequestHandler(options: ChatAppOptions = {}) {
   async function agentChat(messages: ChatMessage[]): Promise<Response> {
     const modelInfo = await detectLatestModel();
     const startMs = now();
-    const convo: { role: string; content: string }[] = [
-      { role: "system", content: TOOL_SYSTEM_PROMPT },
-      ...messages,
-    ];
+    // No system prompt. The fine-tune's training records carry none — they are
+    // bare ### Question / ### Answer — so prepending the tool list is
+    // out-of-distribution text it copies from rather than reasons over: every
+    // "is it safe to take X with Y?" collapsed onto whichever tool example sat
+    // last in the list. Dropping it took routing from 50% to 100% and
+    // tool-result grounding from 60% to 100% on run 20260920_114710_tools.
+    // TOOL_SYSTEM_PROMPT stays exported for a general tool-capable model, which
+    // does need to be told what the tools are; this model already knows.
+    const convo: { role: string; content: string }[] = [...messages];
 
     const stream = new ReadableStream<Uint8Array>({
       async start(controller) {

@@ -15,6 +15,7 @@ Prints one JSON object on stdout: ``{"result": ...}`` or ``{"error": "..."}``.
 from __future__ import annotations
 
 import base64
+import inspect
 import io
 import json
 import sys
@@ -99,20 +100,105 @@ TOOLS: dict[str, Callable[..., Any]] = {
     "query_polypharmacy": query_polypharmacy,
     "query_drug_side_effects": query_drug_side_effects,
     "draw_molecule": draw_molecule,
-    "draw_smiles": draw_molecule,  # old name, kept so a stale prompt still works
 }
+
+# Near-miss names the fine-tune invents. Measured on the item 3 benchmark:
+# 11 of 40 calls named a tool that does not exist (query_compound, query_drugs)
+# or picked query_compounds — a SMILES similarity search — for a lookup by drug
+# name. The intent was right and the spelling was not, so mapping them recovers
+# the call instead of returning an error the model has to recover from.
+# Delete an entry once a trained model stops emitting it.
+TOOL_ALIASES: dict[str, str] = {
+    "draw_smiles": "draw_molecule",  # old name, kept so a stale prompt still works
+    "draw": "draw_molecule",
+    "query_compound": "get_compound_by_name",
+    "query_drug": "get_compound_by_name",
+    "query_drugs": "get_compound_by_name",
+    "get_compound": "get_compound_by_name",
+    "get_drug_by_name": "get_compound_by_name",
+    "compound_by_name": "get_compound_by_name",
+    "query_compound_by_name": "get_compound_by_name",
+    "query_side_effects": "query_drug_side_effects",
+    "query_interactions": "query_drug_side_effects",
+    "query_drug_interactions": "query_drug_side_effects",
+}
+
+# What each tool calls its primary argument, against the keys a model reaches
+# for instead. Same failure as the names: right intent, wrong spelling.
+ARG_ALIASES: dict[str, dict[str, str]] = {
+    "get_compound_by_name": {
+        "drug_name": "name",
+        "compound_name": "name",
+        "compound": "name",
+        "drug": "name",
+    },
+    "draw_molecule": {
+        "drug_name": "name",
+        "compound_name": "name",
+        "compound": "name",
+        "drug": "name",
+        "molecule": "name",
+    },
+    "query_drug_side_effects": {"name": "drug_name", "drug": "drug_name", "compound": "drug_name"},
+    "query_polypharmacy": {
+        "drug_a": "drug_1",
+        "drug_b": "drug_2",
+        "drug1": "drug_1",
+        "drug2": "drug_2",
+    },
+    "query_compounds": {"smiles_string": "smiles", "structure": "smiles"},
+}
+
+_NAME_KEYS = ("name", "drug_name", "compound_name", "compound", "drug")
+
+
+def resolve_tool_call(name: str, args: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    """Map a near-miss tool name and argument keys onto the real registry.
+
+    Mirrored by ``resolveToolCall`` in ``web/src/tools.ts`` — the serving path
+    and the benchmark have to agree, or the measured rate is not the rate users
+    get. Unknown names that match nothing are returned untouched, so the caller
+    still reports them as unknown.
+
+    Returns:
+        (tool name, arguments with aliased keys renamed).
+    """
+    tool = TOOL_ALIASES.get(name, name)
+
+    # A similarity search needs a SMILES string. Handed a drug name instead,
+    # the model meant the by-name lookup: 4 of 40 benchmark calls did this.
+    if tool == "query_compounds" and "smiles" not in args:
+        if any(key in args for key in _NAME_KEYS):
+            tool = "get_compound_by_name"
+
+    renames = ARG_ALIASES.get(tool, {})
+    resolved = {k: v for k, v in args.items() if k not in renames}
+    for key, value in args.items():
+        # A correctly named key already present wins over the aliased spelling.
+        if key in renames and renames[key] not in resolved:
+            resolved[renames[key]] = value
+    return tool, resolved
 
 
 def run_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
     """Dispatch one tool call, returning ``{"result": ...}`` or ``{"error": ...}``.
 
+    The name and argument keys go through :func:`resolve_tool_call` first, so a
+    near-miss spelling runs instead of erroring.
+
     Every failure — unknown tool, bad arguments, missing table, invalid SMILES —
     comes back as an ``error`` string, because the caller feeds it to a model
     that can retry rather than to a human reading a traceback.
     """
+    name, args = resolve_tool_call(name, args)
     fn = TOOLS.get(name)
     if fn is None:
         return {"error": f"Unknown tool '{name}'. Available: {', '.join(sorted(TOOLS))}"}
+    # Models pad calls with arguments the tool does not take ("n": 10 on a
+    # single-record lookup). Dropping them beats a TypeError the model then has
+    # to interpret; a *missing* required argument still raises and is reported.
+    accepted = inspect.signature(fn).parameters
+    args = {k: v for k, v in args.items() if k in accepted}
     try:
         return {"result": fn(**args)}
     except Exception as exc:  # noqa: BLE001 — the model is the error handler here
@@ -121,7 +207,9 @@ def run_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
 
 def main(argv: list[str]) -> dict[str, Any]:
     if len(argv) < 2:
-        return {"error": f"Usage: tools <tool_name> '<json args>'. Tools: {', '.join(sorted(TOOLS))}"}
+        return {
+            "error": f"Usage: tools <tool_name> '<json args>'. Tools: {', '.join(sorted(TOOLS))}"
+        }
     try:
         args = json.loads(argv[2]) if len(argv) > 2 else {}
     except json.JSONDecodeError as exc:

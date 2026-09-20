@@ -96,9 +96,7 @@ def chembl_pipeline_graph() -> None:
     compounds_vector_store = ingest_chembl_to_lancedb_op(start=chembl_parquet)
     # Terminal op: the vector store serves the web app's agent tools at query
     # time, so nothing downstream in this pipeline depends on it.
-    ingest_twosides_to_lancedb_op(
-        start_lancedb=compounds_vector_store, start_twosides=raw_twosides
-    )
+    ingest_twosides_to_lancedb_op(start_lancedb=compounds_vector_store, start_twosides=raw_twosides)
     finetuned_model = finetune_llm_op(
         start_a=chembl_finetune_dataset, start_b=drug_interaction_dataset
     )

@@ -32,25 +32,26 @@ def _load_twosides(path: Path) -> pl.DataFrame:
 
     df: pl.DataFrame = (  # ty: ignore[invalid-assignment]
         pl.scan_parquet(path)
-        .with_columns([
-            pl.col("PRR").cast(pl.Float32, strict=False),
-            pl.col("A").cast(pl.Int32, strict=False),
-            pl.col("mean_reporting_frequency").cast(pl.Float32, strict=False),
-        ])
-        .filter(
-            (pl.col("PRR") >= MIN_PRR)
-            & (pl.col("A") >= MIN_CASES)
+        .with_columns(
+            [
+                pl.col("PRR").cast(pl.Float32, strict=False),
+                pl.col("A").cast(pl.Int32, strict=False),
+                pl.col("mean_reporting_frequency").cast(pl.Float32, strict=False),
+            ]
         )
-        .select([
-            pl.col("drug_1_rxnorn_id").cast(pl.Int64, strict=False).alias("drug_1_rxnorm_id"),
-            pl.col("drug_1_concept_name").str.to_titlecase().alias("drug_1_name"),
-            pl.col("drug_2_rxnorm_id").cast(pl.Int64, strict=False),
-            pl.col("drug_2_concept_name").str.to_titlecase().alias("drug_2_name"),
-            pl.col("condition_concept_name").alias("side_effect"),
-            pl.col("PRR").alias("prr"),
-            pl.col("A").alias("cases"),
-            pl.col("mean_reporting_frequency"),
-        ])
+        .filter((pl.col("PRR") >= MIN_PRR) & (pl.col("A") >= MIN_CASES))
+        .select(
+            [
+                pl.col("drug_1_rxnorn_id").cast(pl.Int64, strict=False).alias("drug_1_rxnorm_id"),
+                pl.col("drug_1_concept_name").str.to_titlecase().alias("drug_1_name"),
+                pl.col("drug_2_rxnorm_id").cast(pl.Int64, strict=False),
+                pl.col("drug_2_concept_name").str.to_titlecase().alias("drug_2_name"),
+                pl.col("condition_concept_name").alias("side_effect"),
+                pl.col("PRR").alias("prr"),
+                pl.col("A").alias("cases"),
+                pl.col("mean_reporting_frequency"),
+            ]
+        )
         .collect()
     )
     print(f"  Rows after filtering (PRR >= {MIN_PRR}, cases >= {MIN_CASES}): {len(df):,}")
@@ -58,20 +59,24 @@ def _load_twosides(path: Path) -> pl.DataFrame:
     aggregated = (
         df.sort("prr", descending=True)
         .group_by(["drug_1_rxnorm_id", "drug_1_name", "drug_2_rxnorm_id", "drug_2_name"])
-        .agg([
-            pl.col("side_effect").str.join("; ").alias("side_effects"),
-            pl.col("prr").max().alias("max_prr"),
-            pl.col("prr").mean().round(2).alias("mean_prr"),
-            pl.col("cases").sum().alias("total_cases"),
-            pl.len().alias("n_side_effects"),
-            pl.col("mean_reporting_frequency").mean().round(4).alias("mean_reporting_freq"),
-        ])
+        .agg(
+            [
+                pl.col("side_effect").str.join("; ").alias("side_effects"),
+                pl.col("prr").max().alias("max_prr"),
+                pl.col("prr").mean().round(2).alias("mean_prr"),
+                pl.col("cases").sum().alias("total_cases"),
+                pl.len().alias("n_side_effects"),
+                pl.col("mean_reporting_frequency").mean().round(4).alias("mean_reporting_freq"),
+            ]
+        )
         # Canonical ordering: drug_1 < drug_2 alphabetically eliminates reverse duplicates
-        .with_columns([
-            pl.concat_str(
-                [pl.col("drug_1_name"), pl.lit("|"), pl.col("drug_2_name")]
-            ).alias("pair_key"),
-        ])
+        .with_columns(
+            [
+                pl.concat_str([pl.col("drug_1_name"), pl.lit("|"), pl.col("drug_2_name")]).alias(
+                    "pair_key"
+                ),
+            ]
+        )
         .sort("max_prr", descending=True)
     )
 
@@ -84,8 +89,7 @@ def _resolve_chembl_version(lancedb_dir: Path) -> str:
     dirs = sorted(lancedb_dir.glob("chembl_*"), reverse=True)
     if not dirs:
         raise FileNotFoundError(
-            f"No ChEMBL LanceDB database found in {lancedb_dir}. "
-            "Run ingest_to_lancedb.py first."
+            f"No ChEMBL LanceDB database found in {lancedb_dir}. Run ingest_to_lancedb.py first."
         )
     return dirs[0].name
 

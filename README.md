@@ -1,6 +1,8 @@
 # chem_mlops
 
-An end-to-end MLOps pipeline that fine-tunes a Gemma 3 1B language model on ChEMBL drug-interaction data, builds a 2.85 M-compound vector store for retrieval-augmented generation, and serves both models side-by-side in a streaming web chat — all running locally on Apple Silicon.
+An end-to-end MLOps pipeline that fine-tunes a Gemma 3 1B language model on ChEMBL drug-interaction data, builds a 2.85 M-compound vector store, and serves the model as a **tool-calling agent** in a streaming web chat — all running locally on Apple Silicon.
+
+The model does not have context injected into its prompt. It asks for the lookups it needs, the server runs them against LanceDB, and the results come back into the conversation.
 
 ---
 
@@ -28,10 +30,13 @@ flowchart LR
     FT --> EXP[export_to_ollama\nfuse adapter → GGUF\nollama create]
     EXP --> OLL[(Ollama\nchembl-drug-chat:1b)]
 
-    USR([User query\nSMILES / drug name]) -->|query_compounds\nget_compound| LDB
-    USR -->|query_polypharmacy\nquery_drug_side_effects| LDB2
-    LDB -->|top-n similar\ncompounds + metadata| OLL
-    LDB2 -->|polypharmacy\nside-effect signals| OLL
+    USR([User question]) --> AGT[agent loop\nweb/src/app.ts]
+    AGT <-->|question, then tool result| OLL
+    OLL -.->|emits a JSON tool call| AGT
+    AGT -->|get_compound_by_name\nquery_compounds| LDB
+    AGT -->|query_polypharmacy\nquery_drug_side_effects| LDB2
+    LDB --> AGT
+    LDB2 --> AGT
 ```
 
 The pipeline is orchestrated with **Dagster** and runs entirely locally.
@@ -102,7 +107,7 @@ This executes the full pipeline via Dagster:
    - **Ingest 2.85 M compounds into LanceDB** (vector store behind the agent's tools)
    - **Ingest TWOSIDES polypharmacy pairs into LanceDB**
 4. Fine-tune Gemma 3 1B with LoRA
-5. Evaluate the fine-tuned model (perplexity + golden benchmark) — gates Ollama export
+5. Evaluate the fine-tuned model (perplexity + tool-call benchmark) — gates Ollama export
 6. Fuse the LoRA adapter and register the model with Ollama
 
 ### Build with the full dataset
@@ -146,7 +151,7 @@ Expected disk and time requirements:
 | Ingest to LanceDB | ~15 GB | ~6 min |
 | Download TWOSIDES | ~50 MB Parquet | ~2–3 min |
 | Ingest TWOSIDES to LanceDB | < 100 MB | ~1 min |
-| Fine-tune (1 500 iters) | ~2 GB adapter | ~2–4 hrs |
+| Fine-tune (3 000 iters) | ~2 GB adapter | ~2–4 hrs |
 | Export to Ollama | ~4 GB GGUF | ~5–10 min |
 
 > **Low-RAM machines:** Cap each table at N rows with `--row-limit`:
@@ -180,11 +185,15 @@ The repository includes a Bun chat app (`web/`): a single agentic pane where the
 | Tool | Backed by |
 |------|-----------|
 | `get_compound_by_name` | LanceDB `compounds` |
-| `query_compounds` | Morgan-fingerprint similarity search |
 | `query_polypharmacy` / `query_drug_side_effects` | LanceDB `polypharmacy` (TWOSIDES) |
 | `draw_molecule` | ChEMBL structure → RDKit `Draw.MolToImage` → PNG in the chat |
+| `query_compounds` | Morgan-fingerprint similarity search — callable, but **not advertised to the model** (see below) |
 
-The first four are the existing functions in `app/scripts/flows/vector_store/query_lancedb.py`, reached through the `app.scripts.flows.vector_store.tools` CLI. Ollama refuses its native `tools` field for this model (Gemma 3 has no tool template), so tool calls are prompted as JSON and parsed out of the reply; the current fine-tune is a prose completer and is not yet a reliable caller — see ROADMAP item 3. Each tool call and its result render as their own bubble, so the lookup is visible.
+The first four are the existing functions in `app/scripts/flows/vector_store/query_lancedb.py`, reached through the `app.scripts.flows.vector_store.tools` CLI. Ollama refuses its native `tools` field for this model (Gemma 3 has no tool template), so tool calls are emitted as bare JSON and parsed out of the reply. Each tool call and its result render as their own bubble, so the lookup is visible.
+
+**The model is sent no system prompt.** Its training records are bare `### Question` / `### Answer` pairs with no tool list, so prepending one at inference is out-of-distribution text it copies from rather than reasons over — every "is it safe to take X with Y?" collapsed onto whichever tool example sat last in the list. Removing the system prompt took tool routing from 50% to 100% on held-out drugs. `query_compounds` is excluded for the same reason: it is the one tool with no training records, and advertising it made the model copy its example SMILES verbatim for unrelated questions. Both findings are recorded in ROADMAP item 3.
+
+A near-miss tool name or argument key (`query_compound`, `drug_name` where the tool wants `name`) is mapped onto the real registry by `resolve_tool_call`, mirrored in `web/src/tools.ts` so the served behaviour and the measured behaviour cannot drift.
 
 **Start the dev server (hot reload):**
 
@@ -259,7 +268,7 @@ pairs = query_drug_side_effects("Warfarin", n=20)
 
 ## QA Dataset
 
-`build_drug_interaction_dataset` reads 23 ChEMBL tables plus TWOSIDES and emits 21 categories of training pairs in `### Question / ### Answer` format:
+`build_drug_interaction_dataset` reads 23 ChEMBL tables plus TWOSIDES and emits 22 categories of training pairs in `### Question / ### Answer` format:
 
 | # | Category | Source tables |
 |---|----------|--------------|
@@ -284,6 +293,16 @@ pairs = query_drug_side_effects("Warfarin", n=20)
 | 19 | Pharmacodynamic interactions | `drug_mechanism`, `target_dictionary` (shared receptors) |
 | 20 | P-glycoprotein transport | `activities`, `assays`, `target_dictionary` (ABCB1/MDR1) |
 | 21 | Polypharmacy side effects | TWOSIDES (FDA FAERS · PRR-filtered drug-pair adverse events) |
+| 22 | Tool calls | question → JSON tool call → tool result → answer, over categories 1/8/21 |
+
+Category 22 teaches the agent behaviour: each record carries both turns — the
+call the model should emit, and the prose answer it should give once the result
+comes back — laid out byte-identically to what the server sends at inference.
+
+**Molecules are held out before generation.** 200 ChEMBL IDs are excluded from
+every generator, and `golden.jsonl` is rebuilt from exactly those molecules in
+the same run, so the benchmark and the training set cannot drift into overlap.
+The holdout lands in `data/llm_finetune/holdout.json`.
 
 Output: `data/llm_finetune/train.jsonl` (90%) and `valid.jsonl` (10%).
 
@@ -312,8 +331,8 @@ Fine-tuning runs `mlx-lm` LoRA on **Gemma 3 1B** (`google/gemma-3-1b-pt`), optim
 |-----------|-------|
 | Method | LoRA |
 | Layers | 16 of 18 |
-| Batch size | 4 |
-| Iterations | 1 500 |
+| Batch size | 2 |
+| Iterations | 3 000 |
 | Learning rate | 1e-5 |
 | Max sequence length | 2 048 |
 | Quantisation | 4-bit (q-group 64) |
@@ -327,28 +346,79 @@ artifacts/20260403_220717/
 └── adapters/gemma3-1b-pt-chembl-toon/        # LoRA adapter weights
 ```
 
+### Continuing a run on tool calls
+
+A full run trains ~950 K records, in which the 60 K tool-call examples compete
+with ~900 K prose ones answering the same question shapes from memory.
+`continue_tool_training.py` does the cheap experiment instead: it continues an
+existing adapter on a mix where tool calls are a third of what the model sees,
+writing to a **new** run directory so the source adapter is untouched.
+
+```bash
+uv run python -m app.scripts.flows.finetuning.continue_tool_training
+
+# Build the mix and stop, to inspect it:
+uv run python -m app.scripts.flows.finetuning.continue_tool_training --mix-only
+```
+
+Minutes rather than hours. Measure before exporting — it skips the export step
+deliberately:
+
+```bash
+uv run python -m app.scripts.flows.eval.eval_finetuned_model --run-dir <new run>
+```
+
 ---
 
 ## Model Evaluation
 
-After fine-tuning, an evaluation step runs automatically before Ollama export:
+After fine-tuning, an evaluation step runs automatically before Ollama export.
+Four signals, two of which block the export:
 
-- **Perplexity** on `valid.jsonl`
-- **Golden benchmark** — 20 curated drug-interaction questions with keyword-match scoring
+| Signal | Measures | Gated |
+|--------|----------|-------|
+| **Perplexity** on `valid.jsonl` | Did the fine-tune regress against the base model? | ✓ |
+| **Tool-call benchmark** | Given a question a tool can answer, does it emit a valid call for the right tool? | ✓ parse rate |
+| **Tool-result benchmark** | Handed a tool result, does it read it or echo its shape? | — |
+| **Golden benchmark** | 40 drug questions built from held-out molecules, keyword-scored | — |
+
+**Why golden is recorded but not gated.** Every golden question asks for a fact
+about a molecule deliberately excluded from training, so answering it from
+weights is not something the model can do or is meant to do — post-holdout it is
+a *lookup*. Gating on it blocked every export for a capability the fine-tune was
+never supposed to have. Re-pointing it at the agent loop (model + tools) would
+make it a real gate again; see ROADMAP item 1.
+
+The tool-call benchmark takes its drugs from `golden.jsonl`, so both are scored
+on molecules absent from `train.jsonl` — a test in the suite enforces that, by
+ChEMBL ID rather than by eye.
 
 Results are written to `data/eval/<run>/`:
 
 ```
 data/eval/<run>/
-├── finetuned_eval_metrics.json         # perplexity + exact-match %
-└── finetuned_golden_results.jsonl      # per-question scores
+├── finetuned_eval_metrics.json         # perplexity, every rate, which gates ran
+├── finetuned_golden_results.jsonl      # per-question detail
+├── finetuned_tool_call_results.jsonl   # per-call: named tool, resolved tool, args
+└── finetuned_tool_result_results.jsonl # per-answer: expected marker, grounded, prose
 ```
 
-The Dagster pipeline gates Ollama export on eval passing. To run evaluation standalone:
+`gates_applied` and `ungated_metrics` in the metrics file name what
+`eval_gate_passed` actually covers, so a green flag is never read as "every
+number is good".
+
+To run evaluation standalone:
 
 ```bash
 uv run python -m app.scripts.flows.eval.eval_finetuned_model
+
+# A specific run, and a stricter tool-call gate:
+uv run python -m app.scripts.flows.eval.eval_finetuned_model \
+  --run-dir artifacts/20260403_220717 --tool-call-threshold 0.8
 ```
+
+> **Do not run two evaluations at once.** They both spawn `mlx_lm generate`, and
+> one will exhaust the GPU while the other returns empty completions.
 
 ---
 
@@ -407,10 +477,11 @@ chem_mlops/
 │   │   │   └── download_twosides.py               # Stream-download TWOSIDES → Parquet
 │   │   ├── finetuning/
 │   │   │   ├── finetuning.py              # MLX LoRA fine-tuning
+│   │   │   ├── continue_tool_training.py  # Continue an adapter on a tool-heavy mix
 │   │   │   └── export_to_ollama.py        # Fuse adapter → GGUF → Ollama
 │   │   ├── eval/
-│   │   │   ├── eval_finetuned_model.py    # Perplexity + golden benchmark (gates export)
-│   │   │   └── golden.jsonl               # 20 curated drug-interaction questions
+│   │   │   ├── eval_finetuned_model.py    # Perplexity + tool-call/result + golden benchmarks
+│   │   │   └── golden.jsonl               # 40 questions, built from held-out molecules
 │   │   └── vector_store/
 │   │       ├── ingest_to_lancedb.py       # 2.85 M compounds → Morgan fingerprints → LanceDB
 │   │       ├── ingest_twosides_to_lancedb.py  # TWOSIDES → polypharmacy table
@@ -420,7 +491,7 @@ chem_mlops/
 ├── web/                                   # Bun chat app
 │   ├── src/
 │   │   ├── app.ts                         # Request handler, agent loop, model detection
-│   │   ├── tools.ts                       # Tool specs, system prompt, tool-call parsing
+│   │   ├── tools.ts                       # Tool specs, tool-call parsing, name/arg resolver
 │   │   ├── frontend.ts                    # Single-pane chat UI, tool-call rendering
 │   │   └── frontend-helpers.ts            # renderMarkdown, formatReplyText (no DOM deps, testable)
 │   ├── public/
@@ -434,6 +505,7 @@ chem_mlops/
 │   ├── lancedb/chembl_CHEMBL_37/          # compounds (2,854,996 vectors) + polypharmacy tables
 │   └── twosides/TWOSIDES.parquet          # PRR-filtered FAERS pairs (~50 MB, gitignored)
 ├── deployments/workspace.yaml             # Dagster code-location config
+├── ROADMAP.md                             # Ranked work items, with what was measured
 ├── artifacts/                             # Fine-tuning run outputs (gitignored)
 ├── install.sh                             # One-command installer for Apple Silicon Macs
 └── pyproject.toml

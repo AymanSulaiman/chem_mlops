@@ -91,22 +91,26 @@ def download_twosides(
     if dropped:
         print(f"  Dropped {dropped} embedded header row(s)")
 
-    df = df.with_columns([
-        pl.col("A").cast(pl.Int32, strict=False),
-        pl.col("B").cast(pl.Int32, strict=False),
-        pl.col("C").cast(pl.Int32, strict=False),
-        pl.col("D").cast(pl.Int32, strict=False),
-        pl.col("PRR").cast(pl.Float32, strict=False),
-        pl.col("PRR_error").cast(pl.Float32, strict=False),
-        pl.col("mean_reporting_frequency").cast(pl.Float32, strict=False),
-    ])
+    df = df.with_columns(
+        [
+            pl.col("A").cast(pl.Int32, strict=False),
+            pl.col("B").cast(pl.Int32, strict=False),
+            pl.col("C").cast(pl.Int32, strict=False),
+            pl.col("D").cast(pl.Int32, strict=False),
+            pl.col("PRR").cast(pl.Float32, strict=False),
+            pl.col("PRR_error").cast(pl.Float32, strict=False),
+            pl.col("mean_reporting_frequency").cast(pl.Float32, strict=False),
+        ]
+    )
     print(f"Parsed {len(df):,} rows × {len(df.columns)} columns")
 
     # ── Step 4: write Parquet ─────────────────────────────────────────────────
     print(f"Writing Parquet to {output_path} ...")
     df.write_parquet(output_path, compression="zstd")
     parquet_mb = output_path.stat().st_size / 1e6
-    print(f"Done. {parquet_mb:.1f} MB Parquet (compression ratio: {decompressed_mb / parquet_mb:.1f}×)")
+    print(
+        f"Done. {parquet_mb:.1f} MB Parquet (compression ratio: {decompressed_mb / parquet_mb:.1f}×)"
+    )
 
     return output_path
 

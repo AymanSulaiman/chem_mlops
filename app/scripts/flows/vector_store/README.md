@@ -251,19 +251,10 @@ query_smiles = "CC(=O)Oc1ccccc1C(=O)O"  # aspirin
 mol = Chem.MolFromSmiles(query_smiles)
 query_vector = _FP_GEN.GetFingerprintAsNumPy(mol).astype(np.float32).tolist()
 
-results = (
-    table.search(query_vector)
-         .limit(5)
-         .to_pandas()
-)
+results = table.search(query_vector).limit(5).to_pandas()
 
 # Exact lookup by ChEMBL ID
-results = (
-    table.search(query_vector)
-         .where("chembl_id = 'CHEMBL25'")
-         .limit(1)
-         .to_pandas()
-)
+results = table.search(query_vector).where("chembl_id = 'CHEMBL25'").limit(1).to_pandas()
 ```
 
 ---

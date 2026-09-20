@@ -50,9 +50,9 @@ test("parseToolCall ignores an unterminated object", () => {
   expect(parseToolCall(`{"tool": "draw_molecule", "args": {"smiles": "CCO"`)).toBeNull();
 });
 
-test("every tool in the prompt has an example argument object", () => {
+test("every advertised tool has an example argument object", () => {
   for (const spec of TOOL_SPECS) {
-    expect(TOOL_SYSTEM_PROMPT).toContain(spec.name);
+    if (spec.advertised !== false) expect(TOOL_SYSTEM_PROMPT).toContain(spec.name);
     expect(JSON.parse(spec.args)).toBeInstanceOf(Object);
   }
 });
@@ -143,5 +143,42 @@ test("every tool carries an example a person can click and a name the parser kno
     } else {
       expect(routeDirectToolCall(spec.ask)).toBeNull();
     }
+  }
+});
+
+test("parseToolCall corrects the near-miss names the fine-tune emits", () => {
+  // Measured on the roadmap item 3 benchmark: 11 of 40 calls missed by a name
+  // while the intent was unambiguous. Correcting beats erroring.
+  expect(parseToolCall(`{"tool": "query_compound", "args": {"drug_name": "SIROLIMUS"}}`)).toEqual({
+    tool: "get_compound_by_name",
+    args: { name: "SIROLIMUS" },
+  });
+});
+
+test("parseToolCall rereads a similarity search given a drug name as a lookup", () => {
+  // query_compounds needs a SMILES, so a drug name cannot be what was meant.
+  expect(
+    parseToolCall(`{"tool": "query_compounds", "args": {"drug_name": "SIROLIMUS", "n": 10}}`),
+  ).toEqual({ tool: "get_compound_by_name", args: { n: 10, name: "SIROLIMUS" } });
+
+  // A real similarity search is left alone.
+  expect(parseToolCall(`{"tool": "query_compounds", "args": {"smiles": "CCO"}}`)).toEqual({
+    tool: "query_compounds",
+    args: { smiles: "CCO" },
+  });
+});
+
+test("the untrained tool is callable but not advertised to the model", () => {
+  // query_compounds has no training records, and listing it made the model copy
+  // its example SMILES verbatim for unrelated questions (17/40 calls on run
+  // 20260920_114710_tools). Out of the prompt, still dispatchable.
+  expect(TOOL_SYSTEM_PROMPT).not.toContain("query_compounds");
+  expect(parseToolCall(`{"tool": "query_compounds", "args": {"smiles": "CCO"}}`)).toEqual({
+    tool: "query_compounds",
+    args: { smiles: "CCO" },
+  });
+  // Every other tool is still advertised.
+  for (const spec of TOOL_SPECS.filter(t => t.advertised !== false)) {
+    expect(TOOL_SYSTEM_PROMPT).toContain(spec.name);
   }
 });

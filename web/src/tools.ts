@@ -14,9 +14,72 @@ export type ToolCall = { tool: string; args: Record<string, unknown> };
 export const TOOL_RESULT_HEADER = "### Tool result";
 export type ToolOutcome = { result?: unknown; error?: string };
 
-// draw_smiles was the old name for draw_molecule; a model that learned the old
-// name still gets routed rather than ignored.
-const TOOL_ALIASES: Record<string, string> = { draw_smiles: "draw_molecule" };
+// Near-miss names the fine-tune invents. Measured on the item 3 benchmark:
+// 11 of 40 calls named a tool that does not exist (query_compound, query_drugs)
+// or picked query_compounds — a SMILES similarity search — for a lookup by drug
+// name. The intent was right and the spelling was not, so mapping them recovers
+// the call instead of returning an error the model has to recover from.
+// Mirrored by TOOL_ALIASES in app/scripts/flows/vector_store/tools.py.
+const TOOL_ALIASES: Record<string, string> = {
+  draw_smiles: "draw_molecule", // old name, kept so a stale prompt still works
+  draw: "draw_molecule",
+  query_compound: "get_compound_by_name",
+  query_drug: "get_compound_by_name",
+  query_drugs: "get_compound_by_name",
+  get_compound: "get_compound_by_name",
+  get_drug_by_name: "get_compound_by_name",
+  compound_by_name: "get_compound_by_name",
+  query_compound_by_name: "get_compound_by_name",
+  query_side_effects: "query_drug_side_effects",
+  query_interactions: "query_drug_side_effects",
+  query_drug_interactions: "query_drug_side_effects",
+};
+
+// What each tool calls its primary argument, against the keys a model reaches
+// for instead. Same failure as the names: right intent, wrong spelling.
+// Mirrored by ARG_ALIASES in app/scripts/flows/vector_store/tools.py.
+const ARG_ALIASES: Record<string, Record<string, string>> = {
+  get_compound_by_name: { drug_name: "name", compound_name: "name", compound: "name", drug: "name" },
+  draw_molecule: {
+    drug_name: "name",
+    compound_name: "name",
+    compound: "name",
+    drug: "name",
+    molecule: "name",
+  },
+  query_drug_side_effects: { name: "drug_name", drug: "drug_name", compound: "drug_name" },
+  query_polypharmacy: { drug_a: "drug_1", drug_b: "drug_2", drug1: "drug_1", drug2: "drug_2" },
+  query_compounds: { smiles_string: "smiles", structure: "smiles" },
+};
+
+const NAME_KEYS = ["name", "drug_name", "compound_name", "compound", "drug"];
+
+// Map a near-miss tool name and argument keys onto the real registry. An
+// unknown name that matches nothing comes back untouched, so unknownToolName
+// still reports it. Mirrored by resolve_tool_call in the Python bridge — the
+// serving path and the benchmark have to agree, or the measured rate is not
+// the rate users get.
+export function resolveToolCall(name: string, args: Record<string, unknown>): ToolCall {
+  let tool = TOOL_ALIASES[name] ?? name;
+
+  // A similarity search needs a SMILES string. Handed a drug name instead, the
+  // model meant the by-name lookup: 4 of 40 benchmark calls did this.
+  if (tool === "query_compounds" && !("smiles" in args) && NAME_KEYS.some(k => k in args)) {
+    tool = "get_compound_by_name";
+  }
+
+  const renames = ARG_ALIASES[tool] ?? {};
+  const resolved: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(args)) {
+    if (!(key in renames)) resolved[key] = value;
+  }
+  for (const [key, value] of Object.entries(args)) {
+    // A correctly named key already present wins over the aliased spelling.
+    const renamed = renames[key];
+    if (renamed !== undefined && !(renamed in resolved)) resolved[renamed] = value;
+  }
+  return { tool, args: resolved };
+}
 
 type ToolSpec = {
   readonly name: string;
@@ -24,9 +87,12 @@ type ToolSpec = {
   readonly description: string;
   readonly ask: string;
   readonly help?: string;
+  // Listed in TOOL_SYSTEM_PROMPT? Callable either way — this only decides what
+  // the model is told about. See query_compounds below for why that differs.
+  readonly advertised?: boolean;
 };
 
-export const TOOL_SPECS = [
+export const TOOL_SPECS: readonly ToolSpec[] = [
   {
     name: "get_compound_by_name",
     args: `{"name": "Aspirin"}`,
@@ -50,6 +116,16 @@ export const TOOL_SPECS = [
     args: `{"smiles": "CC(=O)Oc1ccccc1C(=O)O", "n": 5}`,
     description: "Compounds structurally similar to a SMILES string (Morgan fingerprint).",
     ask: "What compounds are similar to CC(=O)Oc1ccccc1C(=O)O?",
+    // Not advertised to the model: it is the one tool with no training records
+    // (generate_tool_call_qa excludes it — a similarity search needs a SMILES
+    // the model does not know), and on run 20260920_114710_tools it absorbed
+    // 17 of 40 tool calls, 10 of them copying the example SMILES above
+    // verbatim — aspirin, emitted for questions about other drugs entirely.
+    // Unsure which tool to use, the model copies the nearest literal example in
+    // the prompt, so an untrained tool in the prompt is a decoy. Still callable
+    // and still in the manual: a person can ask for a similarity search, and a
+    // trained model can be re-advertised by deleting this line.
+    advertised: false,
   },
   {
     name: "draw_molecule",
@@ -62,7 +138,7 @@ export const TOOL_SPECS = [
     // shows a person. Only set it where the two would differ.
     help: "Draws the structure, looked up in ChEMBL by name. You can paste a SMILES instead.",
   },
-] as const satisfies readonly ToolSpec[];
+];
 
 export const TOOL_SYSTEM_PROMPT = [
   "You can look up real pharmacological data with tools. To call one, reply with",
@@ -70,7 +146,9 @@ export const TOOL_SYSTEM_PROMPT = [
   `{"tool": "<name>", "args": {...}}`,
   "",
   "Tools:",
-  ...TOOL_SPECS.map(t => `- ${t.name} ${t.args} — ${t.description}`),
+  ...TOOL_SPECS.filter(t => t.advertised !== false).map(
+    t => `- ${t.name} ${t.args} — ${t.description}`,
+  ),
   "",
   "The tool result comes back as a '### Tool result' message. Then answer the",
   "question in prose using it. Do not invent ChEMBL IDs or side effects: look them",
@@ -150,13 +228,13 @@ export function parseToolCall(text: string): ToolCall | null {
     const call = parsed as { tool?: unknown; name?: unknown; args?: unknown; arguments?: unknown };
     const named = typeof call.tool === "string" ? call.tool : call.name;
     if (typeof named !== "string") continue;
-    const tool = TOOL_ALIASES[named] ?? named;
-    if (!TOOL_SPECS.some(t => t.name === tool)) continue;
-    const args = call.args ?? call.arguments ?? {};
-    return {
-      tool,
-      args: typeof args === "object" && args !== null ? (args as Record<string, unknown>) : {},
-    };
+    const raw = call.args ?? call.arguments ?? {};
+    const resolved = resolveToolCall(
+      named,
+      typeof raw === "object" && raw !== null ? (raw as Record<string, unknown>) : {},
+    );
+    if (!TOOL_SPECS.some(t => t.name === resolved.tool)) continue;
+    return resolved;
   }
   return null;
 }
@@ -174,10 +252,15 @@ export function unknownToolName(text: string): string | null {
     } catch {
       continue;
     }
-    const call = parsed as { tool?: unknown; name?: unknown };
+    const call = parsed as { tool?: unknown; name?: unknown; args?: unknown; arguments?: unknown };
     const named = typeof call.tool === "string" ? call.tool : call.name;
     if (typeof named !== "string") continue;
-    if (TOOL_ALIASES[named] || TOOL_SPECS.some(t => t.name === named)) continue;
+    const raw = call.args ?? call.arguments ?? {};
+    const { tool } = resolveToolCall(
+      named,
+      typeof raw === "object" && raw !== null ? (raw as Record<string, unknown>) : {},
+    );
+    if (TOOL_SPECS.some(t => t.name === tool)) continue;
     return named;
   }
   return null;

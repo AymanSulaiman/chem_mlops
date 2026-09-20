@@ -58,22 +58,34 @@ class TestDownloadTwosides:
         download_twosides(output_path=output)
         assert output.exists()
 
-    def test_parquet_row_count_matches_csv(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_parquet_row_count_matches_csv(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         output = tmp_path / "TWOSIDES.parquet"
         monkeypatch.setattr(httpx, "stream", _mock_stream(_SAMPLE_CSV))
         download_twosides(output_path=output)
         df = pl.read_parquet(output)
         assert len(df) == 2
 
-    def test_parquet_has_expected_columns(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_parquet_has_expected_columns(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         output = tmp_path / "TWOSIDES.parquet"
         monkeypatch.setattr(httpx, "stream", _mock_stream(_SAMPLE_CSV))
         download_twosides(output_path=output)
         df = pl.read_parquet(output)
-        for col in ("drug_1_concept_name", "drug_2_concept_name", "condition_concept_name", "PRR", "A"):
+        for col in (
+            "drug_1_concept_name",
+            "drug_2_concept_name",
+            "condition_concept_name",
+            "PRR",
+            "A",
+        ):
             assert col in df.columns, f"Missing column: {col}"
 
-    def test_numeric_columns_have_correct_types(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_numeric_columns_have_correct_types(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         output = tmp_path / "TWOSIDES.parquet"
         monkeypatch.setattr(httpx, "stream", _mock_stream(_SAMPLE_CSV))
         download_twosides(output_path=output)
@@ -81,7 +93,9 @@ class TestDownloadTwosides:
         assert df["PRR"].dtype in (pl.Float32, pl.Float64)
         assert df["A"].dtype in (pl.Int32, pl.Int64)
 
-    def test_force_overwrites_existing_file(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_force_overwrites_existing_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         output = tmp_path / "TWOSIDES.parquet"
         output.write_bytes(b"stale data")
         monkeypatch.setattr(httpx, "stream", _mock_stream(_SAMPLE_CSV))
@@ -89,7 +103,9 @@ class TestDownloadTwosides:
         df = pl.read_parquet(output)
         assert len(df) == 2  # new data, not stale bytes
 
-    def test_creates_parent_directory_if_missing(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_creates_parent_directory_if_missing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         output = tmp_path / "nested" / "subdir" / "TWOSIDES.parquet"
         monkeypatch.setattr(httpx, "stream", _mock_stream(_SAMPLE_CSV))
         download_twosides(output_path=output)

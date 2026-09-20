@@ -348,7 +348,9 @@ test("an ordinary question does not trigger the bridge", async () => {
 
 test("a call naming a tool we do not have is corrected, not shown to the user", async () => {
   const replies = [
-    `{"tool": "query_compound_by_name", "args": {"name": "Prozac"}}`,  // no such tool
+    // No such tool, and nothing TOOL_ALIASES can map it onto — a near-miss name
+    // like query_compound_by_name is corrected before it ever reaches here.
+    `{"tool": "lookup_the_drug_thing", "args": {"name": "Prozac"}}`,
     `{"tool": "get_compound_by_name", "args": {"name": "Prozac"}}`,
     "Prozac is fluoxetine, CHEMBL1201082.",
   ];
@@ -374,8 +376,41 @@ test("a call naming a tool we do not have is corrected, not shown to the user", 
   const events = await collectEvents(response);
   const answer = answerOf(events);
   expect(answer).toBe("Prozac is fluoxetine, CHEMBL1201082.");
-  expect(answer).not.toContain("query_compound_by_name"); // never leaked as prose
+  expect(answer).not.toContain("lookup_the_drug_thing"); // never leaked as prose
   const errored = events.find(e => e.toolResult?.error);
-  expect(errored?.toolResult?.tool).toBe("query_compound_by_name");
+  expect(errored?.toolResult?.tool).toBe("lookup_the_drug_thing");
   expect(errored?.toolResult?.error).toContain("Unknown tool");
+});
+
+test("the fine-tune is not sent a system prompt", async () => {
+  // Its training records carry none, so the tool list is out-of-distribution
+  // text it copies from: routing was 50% with it and 100% without.
+  let sentRoles: string[] = [];
+  const handler = createChatRequestHandler({
+    publicDir: new URL("../public/", import.meta.url),
+    fetchImpl: async (input, init) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (url.endsWith("/api/tags")) return Response.json({ models: [] });
+      if (url.endsWith("/api/chat")) {
+        const body = JSON.parse(String((init as RequestInit)?.body ?? "{}"));
+        sentRoles = (body.messages ?? []).map((m: { role: string }) => m.role);
+        return reply("Aspirin is a painkiller.");
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    },
+    toolRunner: async () => ({ result: {} }),
+  });
+
+  await collectEvents(
+    await handler(
+      new Request("http://localhost/api/chat", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ messages: [{ role: "user", content: "what is aspirin" }] }),
+      }),
+    ),
+  );
+
+  expect(sentRoles).not.toContain("system");
+  expect(sentRoles).toEqual(["user"]);
 });

@@ -1354,7 +1354,9 @@ def test_twosides_qa_aggregates_side_effects(twosides_parquet: Path) -> None:
 
 
 def test_twosides_qa_respects_max_pairs(twosides_parquet: Path) -> None:
-    pairs = list(generate_twosides_qa(twosides_path=twosides_parquet, min_prr=2.0, min_cases=1, max_pairs=1))
+    pairs = list(
+        generate_twosides_qa(twosides_path=twosides_parquet, min_prr=2.0, min_cases=1, max_pairs=1)
+    )
     # max_pairs=1 → only 1 unique drug pair → 3 template variants (+ maybe 1 reversed)
     assert len(pairs) <= 4
 
@@ -1494,7 +1496,8 @@ def test_draw_examples_pass_a_name_never_a_smiles(tool_call_tables) -> None:
     """The whole point: a model that invents SMILES draws the wrong molecule."""
     mol, props, structures = tool_call_tables
     draws = [
-        r for r in generate_tool_call_qa(mol, props, structures, twosides_path=Path("nope"))
+        r
+        for r in generate_tool_call_qa(mol, props, structures, twosides_path=Path("nope"))
         if "draw_molecule" in r["text"]
     ]
     assert draws
@@ -1533,10 +1536,10 @@ def test_tool_call_works_without_structures(tool_call_tables) -> None:
 
 def test_tool_call_covers_both_polypharmacy_tools(tool_call_tables, twosides_parquet) -> None:
     mol, props, structures = tool_call_tables
-    records = list(
-        generate_tool_call_qa(mol, props, structures, twosides_path=twosides_parquet)
-    )
-    tools = {json.loads(r["text"].split("### Answer\n")[1].split("\n\n")[0])["tool"] for r in records}
+    records = list(generate_tool_call_qa(mol, props, structures, twosides_path=twosides_parquet))
+    tools = {
+        json.loads(r["text"].split("### Answer\n")[1].split("\n\n")[0])["tool"] for r in records
+    }
     assert {"query_polypharmacy", "query_drug_side_effects"} <= tools
 
 

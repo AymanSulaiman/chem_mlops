@@ -110,7 +110,9 @@ def export_to_ollama(
             else "No checkpoints either: the run crashed before the first --save-every. "
             "Check the training log and re-run the fine-tune."
         )
-        raise FileNotFoundError(f"Training did not finish: no adapters.safetensors in {adapter_dir}. {hint}")
+        raise FileNotFoundError(
+            f"Training did not finish: no adapters.safetensors in {adapter_dir}. {hint}"
+        )
 
     print(f"\n{'=' * 60}")
     print(f"Exporting run: {run_dir}")
@@ -184,7 +186,10 @@ def export_to_ollama(
         "PARAMETER top_p 0.9\n"
         "PARAMETER repeat_penalty 1.1\n"
         "PARAMETER repeat_last_n 512\n"
-        "PARAMETER num_ctx 2048\n"
+        # 2048 was fine for prose turns; a tool result (truncated at 2000 chars)
+        # plus the system prompt plus history overflows it and silently drops the
+        # oldest turns — including the tool result the answer depends on.
+        "PARAMETER num_ctx 8192\n"
         "PARAMETER num_predict 512\n"
         'PARAMETER stop "### Question"\n'
     )
