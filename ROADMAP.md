@@ -52,6 +52,102 @@ golden is now **recorded, not gated** (`golden_gated: false`); the tool-call
 parse rate gates the export instead. Re-point golden at the agent loop (model +
 tools) and it becomes a real gate again — that is the remaining work here.
 
+**The lookup route, and what was blocking it (2026-09-20).** Golden is a
+*lookup* benchmark, and the answer was in the vector store the whole time:
+`get_compound_by_name("SIROLIMUS")` returns
+`mechanism_targets: "Peptidyl-prolyl cis-trans isomerase FKBP1A"`, exactly the
+string golden wants. Two things stopped it being used:
+
+1. **The model was trained to recall, not look up.** `generate_mechanism_qa`
+   emitted `"What does {drug} target?"` as *prose* for every drug in ChEMBL,
+   while `generate_tool_call_qa` covered only weight/ID/draw/interaction
+   shapes. Asked about a held-out drug the model answered from memory, wrongly,
+   collapsing onto one frequent training target ("Tumor necrosis factor
+   receptor superfamily member 12") for 5 of 8 sampled. Running golden through
+   the agent loop produced **no tool call at all** on 5 of 5. Fixed by
+   converting both mechanism question shapes to `_tool_call_record` calls
+   against `get_compound_by_name`, using the compounds table's real field
+   names. This is the first concrete instance of item 3's "convert or
+   downsample the competing prose categories".
+
+2. **15 of the 40 golden drugs were not in the vector store.** `ingest_to_lancedb`
+   filtered to `structure_type == "MOL"` and non-null SMILES, which excluded
+   every biologic — `OLENDALIZUMAB`, `CILGAVIMAB`, `PATISIRAN SODIUM`,
+   `ASPARAGINASE` and the rest — capping golden-through-the-agent at 25/40
+   (62.5%), below its own 70% threshold, however well the model routed. The
+   same filter dropped ~22 K `structure_type = 'BOTH'` molecules that *do*
+   carry structures. Both now ingest: structureless rows are kept with a zero
+   vector and `has_structure = False`, and `query_compounds` filters on that
+   flag so similarity search is untouched. **A store built before that column
+   must be re-ingested** — LanceDB errors on an unknown field.
+
+`mechanism_targets` survives the 2 KB serve-time truncation for every golden
+drug present, so the conversion holds in production and not just in training.
+After the re-ingest, **40/40 golden drugs are reachable** (was 25/40); the store
+went 2,854,996 -> 2,955,491 rows, 33,119 of them without a fingerprint.
+
+**Golden now runs through the agent loop (2026-09-20).** One turn to ask for a
+lookup, the tool actually runs, and the answer written from the result is what
+gets scored; a question answered without a tool is scored directly, so nothing
+that needs no lookup breaks. `golden_tool_used_count` is recorded alongside the
+pass rate, because the two failure modes have different fixes: a low pass rate
+with a low lookup count is a routing problem, a low pass rate with a high one is
+a reading or data problem.
+
+**Measured on `20260920_194125_tools`: still 1/40, and looked it up in 0/40.**
+That adapter was trained on the *prose* mechanism records, so it answers from
+memory and the conversion is invisible to it. The number moves only after a
+dataset rebuild and a retrain — and note the prediction for the bare-model path:
+once the model correctly emits a tool call, a scorer that keyword-matches the
+raw reply would read **0%**, because a tool call contains no target name. That is
+the scorer being wrong, not the model, and it is why this change had to land
+before the retrain rather than after.
+
+**Honest agent-loop pass rate: 97.5% (39/40), looked it up in 40/40**
+(`20260921_053213_tools`, 2026-09-21). The route there, because each step moved
+it for a different reason:
+
+| | golden | what changed |
+|---|---|---|
+| bare model | 2.5% | scoring recall on a lookup question |
+| + conversion, retrain, agent loop | 50.0% | the model asks for the lookup, 40/40 |
+| + 13-field projection | 87.5% | the answer stopped being buried |
+| + dropping distractor fields | **97.5%** | wrong fields were being read as the answer |
+
+**The last two were serving bugs, not model problems.**
+`get_compound_by_name` returned all 75 compounds columns, so
+`mechanism_targets` sat at ~1,251 characters behind `molregno`, `max_phase`,
+`therapeutic_flag` and the rest. The model mostly gave up and re-emitted its
+tool call — all 20 failures had that identical shape, not 20 separate causes.
+It also meant training taught a compact result while serving sent a 14 KB blob
+truncated mid-record. `COMPOUND_SUMMARY_FIELDS` now projects nine fields with
+the mechanism first.
+
+Then the fields *included* mattered: `indications`, `max_phase`,
+`first_approval` and `has_structure` each cost answers — asked what UNASNEMAB
+targets the model replied "Spinal Cord Injuries" (its indication), and for
+AMG-517 "the compound does not have a structure assigned" (`has_structure`). A
+field the training records never carry is a distractor, not context. The
+chemistry fields stay because the molecular-weight records use them, verified
+against a weight question so golden was not bought at the tool-call
+benchmark's expense — that stayed at 100% parse / 100% routing.
+
+**Golden gates again (2026-09-21).** The reason it was demoted was that it
+scored recall on a lookup; that is fixed, and 97.5% clears the 70% threshold
+with room. It is the only gate on *answer quality* — perplexity and the
+tool-call rate would both pass a model that routes perfectly then writes
+nonsense from the result it was handed.
+
+A threshold of `0` disables a gate, matching the tool-call convention, and the
+pipeline's base-adapter eval passes `0` for both: that adapter carries tool
+records at ~6% of its mix and is not expected to clear a lookup-dependent bar.
+Gating an intermediate model nobody ships is the original mistake, and
+re-enabling golden without that escape hatch would have recreated it.
+
+Indication lookups want their own converted training records rather than a
+wider tool result — `indications` was tried in the summary and read *as* the
+answer ("UNASNEMAB primarily targets Spinal Cord Injuries").
+
 **Also worth fixing:** `build_golden_benchmark` only ever emits
 `mechanism_of_action` questions, so all 40 golden items test one skill. The
 benchmark is narrower than it reads.
@@ -142,8 +238,7 @@ than predicted.
 
 ## 3. Teach the model to call tools
 
-**Status:** routing/grounding/prose all 100% after dropping the system prompt;
-bridge removal + self-continuation open · **Size:** ~2–3 days · **Depends on:** 2
+**Status:** done (2026-09-20) · **Size:** ~2–3 days · **Depends on:** 2
 
 This is the load-bearing risk in the agentic plan. Item 2 found the caller
 broken outright: Ollama refuses its `tools` field for `chembl-drug-chat:1b`, and
@@ -357,17 +452,13 @@ reports 7 adverse effect(s)", and rendered a planted "tachycardia" as
 whole answer faithful*. Faithfulness of the surrounding prose is unmeasured and
 is the next thing worth a benchmark.
 
-**Still broken after all of the above:**
-- ~~`query_polypharmacy` 0/10 routing~~ — fixed, 10/10.
-- ~~`get_compound_by_name` 1/10 routing~~ — fixed, 10/10.
-- **Self-continuation persists.** The model still writes its own fabricated
-  `### Tool result` after its call, on every tool-call response. Removing the
-  system prompt did not touch this — it is the record shape:
-  `_tool_call_record` puts call + result + answer in one completion, so the
-  model learns to produce the whole transcript. Harmless to scoring and to
-  serving (both take the *first* JSON object and discard the tail) but it is
-  generated text the streaming path has to suppress. Masking the loss after the
-  call turn is the fix, and it is a dataset change.
+**Routing failures, all fixed:**
+- ~~`query_polypharmacy` 0/10~~ — 10/10.
+- ~~`get_compound_by_name` 1/10~~ — 10/10.
+
+**Carried forward to item 6** — neither belongs to this item, and neither is a
+reason to keep it open: self-continuation, and the faithfulness of the prose
+around a correctly-read value.
 
 **A crashed generation used to score as a wrong answer (fixed 2026-09-20).**
 `_generate` ignored the subprocess exit code, so when two evals ran at once and
@@ -398,22 +489,25 @@ harmless against a baseline of ~17.
 plus the system prompt plus history overflowed the old window and silently
 dropped the oldest turns — including the tool result the answer depends on.
 
-**Temporary bridge (2026-09-19):** `routeDirectToolCall` + `describeDrawResult`
-in `web/src/tools.ts` answer an explicit "draw X" deterministically — tool call
-and caption both, with no model turn. It exists because the current fine-tune
-not only fails to call tools, it cannot use a tool result it is handed: given
-one it echoes the JSON shape (`{ CHEMBL1201082 }`, an invented ebi.ac.uk URL).
-Delete it and its call site when this item lands; both are marked TEMPORARY.
-A bogus tool name from the model is now fed back as an error rather than shown
-to the user (`unknownToolName`).
+**Temporary bridge — removed (2026-09-20).** `routeDirectToolCall` +
+`describeDrawResult` answered an explicit "draw X" deterministically, with no
+model turn, because the fine-tune could neither emit a tool call nor read a
+result it was handed. Both premises are now false: draws route 10/10 and the
+model writes its caption from the result. The functions, their call site in
+`app.ts` and their tests are gone; a "draw X" request goes through the ordinary
+agent loop. A bogus tool name is still fed back as an error rather than shown to
+the user (`unknownToolName`).
 
-**Acceptance:** tool-call JSON parses on a stated majority of attempts, measured
-on held-out drugs. **Met: 87.5% parse.** But the acceptance criterion turned out
-to be the wrong bar — it only covers the first half of the loop. The three
-numbers that decide whether the agent is real are routing, grounding and prose.
-On `20260920_114710_tools` with no system prompt, all three are **100%** (40/40),
-every tool 10/10. The agent is real. What remains is faithfulness of the prose
-*around* a correctly-read value, which no benchmark covers yet.
+**Acceptance: met.** The stated bar was "tool-call JSON parses on a stated
+majority of attempts, measured on held-out drugs". It turned out to be the wrong
+bar — it only covers the first half of the loop — so the item is closed against
+four numbers instead: parse, routing, grounding and prose, all **100%** (40/40,
+every tool 10/10).
+
+**Reproduced on an independently trained checkpoint (2026-09-20).** The first
+100% came from `20260920_114710_tools`, whose adapter was subsequently lost.
+`20260920_154208_tools`, trained from scratch through the full sequence, returns
+the same four rates. The result is not an artefact of one checkpoint.
 
 **Files:** `build_drug_interaction_dataset.py`, `finetuning/finetuning.py`,
 `finetuning/continue_tool_training.py`, `eval/eval_finetuned_model.py`,
@@ -466,6 +560,33 @@ local machine in the path.
 
 **Decision gate:** skip this if item 2's loop is working and the GCP framing is
 not needed. It buys deployment convenience, not capability.
+
+---
+
+## 6. Two things item 3 left behind
+
+**Status:** not started · **Size:** ~a day each · **Depends on:** 3
+
+Neither blocked item 3 — the agent routes and reads at 100% with both present —
+but both are real, and burying them in a closed item is how they get lost.
+
+**Self-continuation.** Every tool-call response continues past the call and
+writes its own fabricated `### Tool result`. It is the record shape:
+`_tool_call_record` puts call + result + answer in one completion, so the model
+learns to produce the whole transcript rather than stopping at its call.
+Harmless to scoring and to serving — both take the *first* JSON object and
+discard the tail — but it is generated text the streaming path has to suppress,
+and it wastes tokens on every turn. The fix is masking the loss after the call
+turn, which is a dataset change, not a prompt one.
+
+**Faithfulness is unmeasured.** `grounded_rate` scores whether the model quoted
+the one value planted in the tool result. It does not score the prose around it,
+and that prose invents: handed a result containing a single side effect the
+model answered "TWOSIDES reports 7 adverse effect(s)", and rendered a planted
+"tachycardia" as "tachycardiac arrest". For a drug-interaction tool this is the
+risk that actually matters — a correctly-quoted PRR inside a sentence that
+invents two more effects is worse than a refusal. A benchmark that scores every
+claim in the answer against the result it was given is the missing piece.
 
 ---
 

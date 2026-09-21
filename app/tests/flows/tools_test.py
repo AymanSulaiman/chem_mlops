@@ -146,3 +146,18 @@ def test_alias_tables_match_the_typescript_agent() -> None:
 
     ts_aliases = dict(re.findall(r'(\w+):\s*"([^"]+)"', block.group(1)))
     assert ts_aliases == TOOL_ALIASES
+
+
+def test_draw_molecule_explains_itself_on_a_biologic() -> None:
+    """Biologics are in the compounds table for their mechanism data, not to draw.
+
+    Without this the lookup succeeds, canonical_smiles is None, and RDKit fails
+    on the literal string "None" — an error nobody can act on.
+    """
+    from unittest.mock import patch
+
+    record = {"pref_name": "OLENDALIZUMAB", "chembl_id": "CHEMBL123", "canonical_smiles": None}
+    with patch("app.scripts.flows.vector_store.tools.get_compound_by_name", return_value=record):
+        error = run_tool("draw_molecule", {"name": "OLENDALIZUMAB"})["error"]
+    assert "biologic" in error
+    assert "OLENDALIZUMAB" in error

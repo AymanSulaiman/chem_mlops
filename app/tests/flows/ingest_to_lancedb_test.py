@@ -39,7 +39,7 @@ def parquet_dir(tmp_path: Path) -> str:
             "molregno": [1, 2, 3],
             "pref_name": ["Aspirin", "Caffeine", "Dummy"],
             "chembl_id": ["CHEMBL25", "CHEMBL113", "CHEMBL999"],
-            "structure_type": ["MOL", "MOL", "NONE"],  # row 3 should be filtered out
+            "structure_type": ["MOL", "MOL", "NONE"],  # row 3 is a biologic: kept, no vector
             "molecule_type": ["Small molecule", "Small molecule", "Small molecule"],
             "max_phase": [4, 4, None],
             "therapeutic_flag": [1, 1, 0],
@@ -277,18 +277,23 @@ class TestResolveChemblVersion:
 
 
 class TestBuildFlatDf:
-    def test_filters_to_mol_structure_type(self, parquet_dir: str) -> None:
-        df = _build_flat_df(parquet_dir)
-        # Row with structure_type == "NONE" should be excluded
-        assert "Dummy" not in df["pref_name"].to_list()
+    def test_keeps_every_structure_type(self, parquet_dir: str) -> None:
+        """Biologics have no SMILES but do have mechanisms, targets and names.
 
-    def test_drops_rows_without_smiles(self, parquet_dir: str) -> None:
+        Excluding them meant no tool could answer a question about one — 15 of
+        the 40 golden benchmark drugs were unreachable. 'BOTH' was being dropped
+        too, and those carry structures.
+        """
         df = _build_flat_df(parquet_dir)
-        assert df["canonical_smiles"].null_count() == 0
+        assert "Dummy" in df["pref_name"].to_list()
+
+    def test_keeps_rows_without_smiles(self, parquet_dir: str) -> None:
+        df = _build_flat_df(parquet_dir)
+        assert df["canonical_smiles"].null_count() > 0
 
     def test_contains_expected_compounds(self, parquet_dir: str) -> None:
         df = _build_flat_df(parquet_dir)
-        assert set(df["chembl_id"].to_list()) == {"CHEMBL25", "CHEMBL113"}
+        assert {"CHEMBL25", "CHEMBL113"} <= set(df["chembl_id"].to_list())
 
     def test_has_compound_properties_columns(self, parquet_dir: str) -> None:
         df = _build_flat_df(parquet_dir)
@@ -303,10 +308,10 @@ class TestBuildFlatDf:
         df = _build_flat_df(parquet_dir)
         assert isinstance(df, pl.DataFrame)
 
-    def test_row_count_matches_valid_smiles(self, parquet_dir: str) -> None:
+    def test_row_count_includes_the_structureless(self, parquet_dir: str) -> None:
         df = _build_flat_df(parquet_dir)
-        # 2 rows have valid SMILES (aspirin + caffeine); 1 is NONE structure type, 1 has null SMILES
-        assert len(df) == 2
+        # Aspirin + caffeine, plus the NONE-structure row that has no SMILES.
+        assert len(df) == 3
 
 
 # ── _write_to_lancedb ─────────────────────────────────────────────────────────
@@ -326,11 +331,12 @@ class TestWriteToLancedb:
     def test_writes_valid_rows(self, lancedb_dir: str) -> None:
         db = lancedb.connect(lancedb_dir)
         df = self._make_flat_df()
-        written, skipped = _write_to_lancedb(df, db, cpu_count=1)
-        assert written == 2
-        assert skipped == 1
+        written, structureless = _write_to_lancedb(df, db, cpu_count=1)
+        # All three rows are written; the unparsable one carries a zero vector.
+        assert written == 3
+        assert structureless == 1
 
-    def test_skips_invalid_smiles(self, lancedb_dir: str) -> None:
+    def test_counts_rows_kept_without_a_fingerprint(self, lancedb_dir: str) -> None:
         db = lancedb.connect(lancedb_dir)
         df = self._make_flat_df()
         _, skipped = _write_to_lancedb(df, db, cpu_count=1)
@@ -358,9 +364,10 @@ class TestWriteToLancedb:
                 "standard_inchi_key": ["KEY1"],
             }
         )
-        written, skipped = _write_to_lancedb(df, db, cpu_count=1)
-        assert written == 0
-        assert skipped == 1
+        written, structureless = _write_to_lancedb(df, db, cpu_count=1)
+        # Written and searchable by name, just never by similarity.
+        assert written == 1
+        assert structureless == 1
 
     def test_creates_scalar_indices(self, lancedb_dir: str) -> None:
         db = lancedb.connect(lancedb_dir)
@@ -391,13 +398,13 @@ class TestIngestCompoundsToLancedb:
         db = lancedb.connect(str(Path(lancedb_dir) / "chembl_CHEMBL_36"))
         table = db.open_table(COMPOUNDS_TABLE)
         # Re-running should drop & recreate, so row count stays the same (2 valid SMILES)
-        assert table.count_rows() == 2
+        assert table.count_rows() == 3
 
     def test_correct_row_count(self, parquet_dir: str, lancedb_dir: str) -> None:
         ingest_compounds_to_lancedb(parquet_dir=parquet_dir, lancedb_dir=lancedb_dir)
         db = lancedb.connect(str(Path(lancedb_dir) / "chembl_CHEMBL_36"))
         table = db.open_table(COMPOUNDS_TABLE)
-        assert table.count_rows() == 2
+        assert table.count_rows() == 3
 
     def test_vector_search_returns_results(self, parquet_dir: str, lancedb_dir: str) -> None:
         ingest_compounds_to_lancedb(parquet_dir=parquet_dir, lancedb_dir=lancedb_dir)

@@ -234,22 +234,32 @@ def gemma3_chembl_toon_finetune_flow(
     hf_model_id: str = HF_MODEL_ID,
     data_dir: str = str(DATA_DIR),
     run_name: str | None = None,
-) -> None:
+    export: bool = True,
+) -> Path:
     """
     Finetuning pipeline optimised for Apple Silicon (M1 Pro, 32 GB):
 
     1. Pre-split training sequences > 2048 tokens to eliminate truncation waste.
     2. Convert Gemma 3 HF model -> MLX format (4-bit quantised).
     3. LoRA fine-tuning with gradient checkpointing, log capture.
+    4. Export to Ollama — only when *export* is true.
 
-    When run standalone, also exports the adapter to Ollama (step 4).
-    When run via the Prefect pipeline, Ollama export is handled as a
-    separate task after this flow completes.
+    Pass ``export=False`` when something downstream evaluates this adapter
+    first. The Dagster pipeline does: it continues this run on a tool-heavy
+    mix, evaluates that, and exports only if the gate passes. Exporting here
+    would publish an unevaluated model and leave it served if the gate then
+    failed — which is what this flow used to do unconditionally, despite the
+    docstring claiming otherwise.
 
     Args:
         hf_model_id: HuggingFace model ID
         data_dir: Path to training data directory (must contain train.jsonl)
         run_name: Optional custom run name, defaults to timestamp
+        export: Register the fused adapter with Ollama when finished.
+
+    Returns:
+        The run directory, so a caller can evaluate or continue this run
+        without guessing at "the latest directory in artifacts/".
     """
     if run_name is None:
         run_name = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -275,7 +285,10 @@ def gemma3_chembl_toon_finetune_flow(
     print(f"Training log: {log_file}")
     print(f"{'=' * 60}\n")
 
-    export_to_ollama(run_dir=run_dir, force=True)
+    if export:
+        export_to_ollama(run_dir=run_dir, force=True)
+
+    return run_dir
 
 
 if __name__ == "__main__":

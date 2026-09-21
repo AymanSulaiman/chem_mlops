@@ -166,6 +166,43 @@ def test_mechanism_qa_contains_drug_name(drug_mechanism, molecule_dict, target_d
     assert any("Warfarin" in t for t in texts)
 
 
+def test_target_questions_are_taught_as_lookups_not_recall(
+    drug_mechanism, molecule_dict, target_dict
+) -> None:
+    """"What does X target?" is a fact about one molecule, so it is a tool call.
+
+    As prose it taught the model to answer from memory, which it then did for
+    held-out drugs — wrongly, 39 times out of 40. The answer was always in the
+    vector store; nothing had taught the model to go and get it.
+    """
+    from app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset import (
+        TOOL_RESULT_HEADER,
+    )
+
+    texts = [p["text"] for p in generate_mechanism_qa(drug_mechanism, molecule_dict, target_dict)]
+    target_qs = [t for t in texts if "target?" in t]
+    assert target_qs, "no target questions generated"
+
+    for text in target_qs:
+        assert '{"tool": "get_compound_by_name"' in text, "must ask for the lookup"
+        assert TOOL_RESULT_HEADER in text, "must show the result coming back"
+        # The key the model has to read is the one the real tool returns.
+        assert "mechanism_targets" in text
+
+
+def test_the_mechanism_result_uses_the_compounds_table_field_names(
+    drug_mechanism, molecule_dict, target_dict
+) -> None:
+    """Train-serve mismatch in the field names would make the lookup useless.
+
+    get_compound_by_name returns a LanceDB compounds row; these are its columns.
+    """
+    texts = [p["text"] for p in generate_mechanism_qa(drug_mechanism, molecule_dict, target_dict)]
+    joined = "\n".join(texts)
+    for field in ("chembl_id", "pref_name", "mechanism_targets"):
+        assert f'"{field}"' in joined
+
+
 def test_mechanism_qa_contains_target(drug_mechanism, molecule_dict, target_dict):
     pairs = list(generate_mechanism_qa(drug_mechanism, molecule_dict, target_dict))
     texts = " ".join(p["text"] for p in pairs)

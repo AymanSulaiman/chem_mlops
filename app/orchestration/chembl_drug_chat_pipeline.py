@@ -1,11 +1,10 @@
+from pathlib import Path
+
 from dagster import Config, Definitions, In, Nothing, Out, ScheduleDefinition, graph, op
 
 from app.scripts.flows.eval.eval_finetuned_model import eval_flow
-from app.scripts.flows.finetuning.export_to_ollama import (
-    ARTIFACTS_DIR,
-    export_to_ollama,
-    latest_run_dir,
-)
+from app.scripts.flows.finetuning.continue_tool_training import continue_tool_training
+from app.scripts.flows.finetuning.export_to_ollama import export_to_ollama
 from app.scripts.flows.finetuning.finetuning import gemma3_chembl_toon_finetune_flow
 from app.scripts.flows.initial_data_transformation.collect_data import collect_data
 from app.scripts.flows.initial_data_transformation.transform_data import transform_data
@@ -58,9 +57,12 @@ def build_drug_interaction_dataset_op() -> None:
 
 
 # Both finetune-data ops must complete before finetuning begins (fan-in via Nothing inputs).
-@op(ins={"start_a": In(Nothing), "start_b": In(Nothing)}, out=Out(Nothing))
-def finetune_llm_op() -> None:
-    gemma3_chembl_toon_finetune_flow()
+@op(ins={"start_a": In(Nothing), "start_b": In(Nothing)}, out=Out(str))
+def finetune_llm_op() -> str:
+    # export=False: the model that gets published is the tool-trained one, and
+    # only after the gate. Exporting here would put an unevaluated model in
+    # Ollama and leave it there if the gate later failed.
+    return str(gemma3_chembl_toon_finetune_flow(export=False))
 
 
 @op(ins={"start": In(Nothing)}, out=Out(Nothing))
@@ -74,14 +76,47 @@ def ingest_twosides_to_lancedb_op() -> None:
     ingest_twosides_to_lancedb()
 
 
-@op(ins={"start": In(Nothing)}, out=Out(Nothing))
-def eval_finetuned_model_op() -> None:
-    eval_flow(run_dir=latest_run_dir(ARTIFACTS_DIR))
+# Measured, not shipped. Two reasons to spend ~15 minutes here:
+#   - Attribution. Without it, a bad number after continued training has two
+#     suspects — the base run or the continuation — and no way to tell them
+#     apart once artifacts/ has been cleaned.
+#   - It answers whether continued training earns its place, on every run,
+#     instead of as a special investigation.
+# Both thresholds are 0, which disables those gates: this adapter has tool
+# records at ~6% of its mix and is not expected to clear a tool-call or a
+# lookup-dependent bar, and blocking the pipeline on a model nobody ships is
+# the mistake the golden gate used to make in the first place. The perplexity
+# gate still applies — continuing from a regressed adapter is pointless, and
+# better to find out before spending the continuation.
+@op(out=Out(str))
+def eval_base_model_op(run_dir: str) -> str:
+    eval_flow(run_dir=Path(run_dir), tool_call_threshold=0.0, pass_threshold=0.0)
+    return run_dir
 
 
-@op(ins={"start": In(Nothing)})
-def export_to_ollama_op() -> None:
-    export_to_ollama(run_dir=latest_run_dir(ARTIFACTS_DIR), force=True)
+# Continues the run above on a tool-heavy mix, into its own <stamp>_tools run
+# directory. The full run's 60 K tool-call records compete with ~900 K prose ones
+# answering the same question shapes from memory; this trains on a mix where tool
+# calls are a third of what the model sees, in minutes rather than hours. The
+# model that reaches the export is therefore the tool-trained one.
+@op(out=Out(str))
+def continue_tool_training_op(run_dir: str) -> str:
+    return str(continue_tool_training(from_run=Path(run_dir)))
+
+
+# Both of these take the run directory explicitly rather than calling
+# latest_run_dir(). They used to guess, which meant anything else writing to
+# artifacts/ could silently send the gate and the export at different models —
+# or at a model this pipeline never trained.
+@op(out=Out(str))
+def eval_finetuned_model_op(run_dir: str) -> str:
+    eval_flow(run_dir=Path(run_dir))
+    return run_dir
+
+
+@op
+def export_to_ollama_op(run_dir: str) -> None:
+    export_to_ollama(run_dir=Path(run_dir), force=True)
 
 
 @graph
@@ -100,8 +135,9 @@ def chembl_pipeline_graph() -> None:
     finetuned_model = finetune_llm_op(
         start_a=chembl_finetune_dataset, start_b=drug_interaction_dataset
     )
-    finetuned_model_eval = eval_finetuned_model_op(start=finetuned_model)
-    export_to_ollama_op(start=finetuned_model_eval)
+    base_model_measured = eval_base_model_op(finetuned_model)
+    tool_trained_model = continue_tool_training_op(base_model_measured)
+    export_to_ollama_op(eval_finetuned_model_op(tool_trained_model))
 
 
 chembl_pipeline = chembl_pipeline_graph.to_job(name="chembl_pipeline")

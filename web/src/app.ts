@@ -1,8 +1,6 @@
 import {
-  describeDrawResult,
   formatToolResult,
   parseToolCall,
-  routeDirectToolCall,
   runTool,
   TOOL_RESULT_HEADER,
   unknownToolError,
@@ -218,23 +216,6 @@ export function createChatRequestHandler(options: ChatAppOptions = {}) {
         let steps = 0;
 
         try {
-          // TEMPORARY bridge — see routeDirectToolCall in tools.ts. An explicit
-          // "draw X" runs the tool before the model gets a turn, so the answer
-          // is grounded even though this fine-tune never calls tools itself.
-          const direct = routeDirectToolCall(messages.at(-1)?.content ?? "");
-          if (direct) {
-            steps++;
-            send({ tool: direct });
-            const outcome = await toolRunner(direct);
-            send({ toolResult: { tool: direct.tool, ...outcome } });
-            // The caption is written from the tool result, and the model gets no
-            // turn at all: handed a tool result this fine-tune echoes its JSON
-            // shape rather than reading it. Both halves go when the bridge goes.
-            send({ message: { content: describeDrawResult(outcome) } });
-            send({ done: true });
-            return;
-          }
-
           for (let step = 0; ; step++) {
             let forwarded = 0; // characters of this turn already sent to the client
             let holding = false;

@@ -212,22 +212,40 @@ def generate_mechanism_qa(
 
         action_phrase = f"{action} of {target_name}" if action else f"modulator of {target_name}"
 
-        yield {
-            "text": (
-                f"### Question\nWhat is the mechanism of action of {drug}?\n\n"
-                f"### Answer\n{drug} ({chembl_id}) acts as a {action_phrase}. "
-                f"{moa}"
-            ).strip()
-        }
+        # Both of these ask for a fact about one specific molecule, so they are
+        # taught as lookups rather than as recall. They used to be prose, and the
+        # model learned exactly that: asked what a held-out drug targets it
+        # answered from memory and was wrong 39 times out of 40, collapsing onto
+        # one frequent training target. The answer was in the vector store the
+        # whole time — get_compound_by_name returns mechanism_targets — but the
+        # model never called it, because nothing had taught it that this
+        # question was a lookup. Keys match the compounds table so the model
+        # reads the field names it is actually handed at serve time.
+        result = {"chembl_id": chembl_id, "pref_name": drug.upper()}
+        if target_name != "an unspecified target":
+            result["mechanism_targets"] = target_name
+        if moa:
+            result["mechanisms"] = moa
+        if action:
+            result["action_types"] = action.upper()
+
+        yield _tool_call_record(
+            f"What is the mechanism of action of {drug}?",
+            "get_compound_by_name",
+            {"name": drug},
+            result,
+            f"{drug} ({chembl_id}) acts as a {action_phrase}. {moa}".strip(),
+        )
 
         if target_name != "an unspecified target":
-            yield {
-                "text": (
-                    f"### Question\nWhat does {drug} target?\n\n"
-                    f"### Answer\n{drug} primarily targets {target_name}. "
-                    f"It acts as a {action if action else 'modulator'} at this target."
-                )
-            }
+            yield _tool_call_record(
+                f"What does {drug} target?",
+                "get_compound_by_name",
+                {"name": drug},
+                result,
+                f"{drug} primarily targets {target_name}. "
+                f"It acts as a {action if action else 'modulator'} at this target.",
+            )
 
 
 def generate_indication_qa(

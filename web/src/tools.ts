@@ -155,62 +155,6 @@ export const TOOL_SYSTEM_PROMPT = [
   "up. If no tool is needed, just answer.",
 ].join("\n");
 
-// ── Deterministic bridge ─────────────────────────────────────────────────────
-// TEMPORARY. This is not the model calling a tool: chembl-drug-chat:1b never
-// emits a tool call (roadmap item 3), so an explicit "draw X" is routed straight
-// to draw_molecule. Delete this and its call site in app.ts once a fine-tune
-// trained on the "tool calls" dataset category does the routing itself.
-//
-// Deliberately narrow: only requests that name a molecule to draw. Anything
-// else — interactions, properties, lookups — still needs the model to decide,
-// and keyword-routing those would rebuild the RAG guesswork item 2 removed.
-const DRAW_PATTERNS = [
-  // "show me the molecular structure of prozac", "draw the structure of X"
-  /\b(?:draw|render|display|show|give)\b(?:\s+me)?\s+(?:the\s+|a\s+)?(?:\w+\s+)?structure\s+(?:of|for)\s+(.+)/i,
-  // "draw ibuprofen", "render aspirin"
-  /^\s*(?:draw|render)\s+(?:me\s+)?(?:the\s+|a\s+)?(.+)/i,
-  // "what does ibuprofen look like?"
-  /^\s*what\s+does\s+(.+?)\s+look\s+like/i,
-];
-
-export function routeDirectToolCall(message: string): ToolCall | null {
-  for (const pattern of DRAW_PATTERNS) {
-    const name = pattern.exec(message)?.[1];
-    if (!name) continue;
-    const cleaned = (
-      // "draw ibuprofen and tell me its side effects" names one molecule.
-      name.split(/\s+(?:and|then|plus|also)\s+|[,;]/)[0] ?? ""
-    )
-      .replace(/\b(?:molecule|compound|structure|please)\b/gi, "")
-      .replace(/['"“”]/g, "")
-      .replace(/[.?!,;:]+\s*$/, "")
-      .trim();
-    // A bare verb ("draw it", "render this") names nothing to look up.
-    if (!cleaned || /^(?:it|this|that|one)$/i.test(cleaned) || cleaned.length > 60) continue;
-    return { tool: "draw_molecule", args: { name: cleaned } };
-  }
-  return null;
-}
-
-// Caption for a bridged draw, written from the tool result rather than by the
-// model. Part of the same temporary bridge: this fine-tune, handed a tool
-// result, mimics its JSON shape instead of reading it — real captures include
-// "{ CHEMBL1201082 }" and an invented ebi.ac.uk image URL. Deterministic text
-// beats a hallucinated caption until the model is trained to use tool output.
-export function describeDrawResult(outcome: ToolOutcome): string {
-  if (outcome.error) return `Could not draw that: ${outcome.error}`;
-  const r = (outcome.result ?? {}) as Record<string, string>;
-  if (!r.smiles) return "Structure drawn.";
-  if (r.source !== "ChEMBL") return `Structure drawn from the SMILES you supplied: ${r.smiles}`;
-
-  const facts = [r.full_molformula, r.mw_freebase ? `MW ${r.mw_freebase}` : ""].filter(Boolean);
-  return (
-    `${r.pref_name} (${r.chembl_id})` +
-    (facts.length ? ` — ${facts.join(", ")}` : "") +
-    `. SMILES: ${r.smiles}`
-  );
-}
-
 // Find the first balanced {...} in the text and read it as a tool call.
 // The fine-tuned model is a prose completer (see roadmap item 3), so the JSON
 // usually arrives wrapped in chatter or a ``` fence — a plain JSON.parse of the

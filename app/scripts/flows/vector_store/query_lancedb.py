@@ -90,6 +90,12 @@ def query_compounds(
         lancedb_dir: Root directory that contains the ``chembl_CHEMBL_*``
             subdirectory (default ``data/lancedb``).
 
+    Molecules with no parsable structure — biologics, mostly — are stored with a
+    zero vector so the name-lookup tools can reach their mechanism and target
+    data. They are filtered out here: a zero vector sits at a fixed distance
+    from every query and would otherwise surface as a spurious "similar"
+    compound to an antibody.
+
     Returns:
         List of compound dicts ordered by descending similarity, each
         containing all metadata columns plus a ``_distance`` field.
@@ -100,7 +106,9 @@ def query_compounds(
     """
     query_vector: list[float] = _smiles_to_query_vector(smiles)
     table: Table = _open_table(lancedb_dir, COMPOUNDS_TABLE)
-    results: list[dict[str, Any]] = table.search(query_vector).limit(n).to_list()
+    results: list[dict[str, Any]] = (
+        table.search(query_vector).where("has_structure = true").limit(n).to_list()
+    )
     # Drop the raw vector column — callers need metadata, not the 2048-float blob
     for row in results:
         row.pop("vector", None)
@@ -121,7 +129,9 @@ def get_compound(
             subdirectory (default ``data/lancedb``).
 
     Returns:
-        A single compound dict, or ``None`` if no matching row is found.
+        A compact compound dict — the fields in COMPOUND_SUMMARY_FIELDS that
+        are present — or ``None`` if no matching row is found. Use
+        :func:`get_compound` for the whole row.
 
     Raises:
         FileNotFoundError: If the LanceDB table does not exist.
@@ -133,8 +143,40 @@ def get_compound(
     if not rows:
         return None
     row = rows[0]
-    row.pop("vector", None)
-    return row
+    # Projected, not the full 75-column row — see COMPOUND_SUMMARY_FIELDS.
+    return {k: row[k] for k in COMPOUND_SUMMARY_FIELDS if row.get(k) is not None}
+
+
+# What a name lookup returns. The compounds table has 75 columns; a model asked
+# "what does X target?" had to read past molregno, max_phase, therapeutic_flag
+# and twenty more before reaching mechanism_targets, and mostly did not — it
+# re-emitted its tool call instead of answering, failing 20 of 40 golden
+# questions. Handed these fields alone it answered every one. The training
+# records use this shape too, so projecting here also closes a train-serve gap:
+# the model is taught on a compact result and was being served a 14 KB blob
+# truncated mid-record.
+#
+# Ordered deliberately: identity, then what the drug does, then what it is.
+# get_compound() still returns the whole row for programmatic callers.
+#
+# Fields are omitted as carefully as they are included. `indications`,
+# `max_phase`, `first_approval` and `has_structure` were in an earlier version
+# and each one cost answers: asked what UNASNEMAB targets the model replied
+# "Spinal Cord Injuries" (its indication), and asked about AMG-517 it replied
+# "the compound does not have a structure assigned" (has_structure). A field the
+# training records never carry is a distractor, not context. Indication lookups
+# want their own converted training records, not a wider result here.
+COMPOUND_SUMMARY_FIELDS: tuple[str, ...] = (
+    "chembl_id",
+    "pref_name",
+    "mechanism_targets",
+    "mechanisms",
+    "action_types",
+    "mw_freebase",
+    "full_molformula",
+    "alogp",
+    "canonical_smiles",
+)
 
 
 def get_compound_by_name(
@@ -154,7 +196,9 @@ def get_compound_by_name(
             subdirectory (default ``data/lancedb``).
 
     Returns:
-        A single compound dict, or ``None`` if no matching row is found.
+        A compact compound dict — the fields in COMPOUND_SUMMARY_FIELDS that
+        are present — or ``None`` if no matching row is found. Use
+        :func:`get_compound` for the whole row.
 
     Raises:
         FileNotFoundError: If the LanceDB table does not exist.
@@ -169,8 +213,8 @@ def get_compound_by_name(
     if not rows:
         return None
     row = rows[0]
-    row.pop("vector", None)
-    return row
+    # Projected, not the full 75-column row — see COMPOUND_SUMMARY_FIELDS.
+    return {k: row[k] for k in COMPOUND_SUMMARY_FIELDS if row.get(k) is not None}
 
 
 def _search_synonyms(table: Table, safe_name: str) -> list[dict[str, Any]]:

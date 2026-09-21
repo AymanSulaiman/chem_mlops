@@ -24,10 +24,13 @@ flowchart LR
     DLT --> ING2[ingest_twosides_to_lancedb\nPRR-filtered pairs\n→ polypharmacy table]
     ING2 --> LDB2[(LanceDB\nchembl_CHEMBL_37\npolypharmacy table)]
 
-    DDI --> FT[finetune_lora\nMLX LoRA on Gemma 3 1B-PT\n~1500 iters · Apple Silicon]
+    DDI --> FT[finetune_lora\nMLX LoRA on Gemma 3 1B-PT\n3000 iters · Apple Silicon]
     FDS --> FT
 
-    FT --> EXP[export_to_ollama\nfuse adapter → GGUF\nollama create]
+    FT --> EVB[eval base adapter\nperplexity gates\ntool rates recorded]
+    EVB --> CTT[continue_tool_training\ntool calls 6% → 33% of the mix\n600 iters · minutes]
+    CTT --> EVL[eval_finetuned_model\nperplexity + tool-call gate]
+    EVL --> EXP[export_to_ollama\nfuse adapter → GGUF\nollama create]
     EXP --> OLL[(Ollama\nchembl-drug-chat:1b)]
 
     USR([User question]) --> AGT[agent loop\nweb/src/app.ts]
@@ -107,8 +110,29 @@ This executes the full pipeline via Dagster:
    - **Ingest 2.85 M compounds into LanceDB** (vector store behind the agent's tools)
    - **Ingest TWOSIDES polypharmacy pairs into LanceDB**
 4. Fine-tune Gemma 3 1B with LoRA
-5. Evaluate the fine-tuned model (perplexity + tool-call benchmark) — gates Ollama export
-6. Fuse the LoRA adapter and register the model with Ollama
+5. **Evaluate the base adapter** — perplexity gates; golden and tool rates recorded only
+6. **Continue that adapter on a tool-heavy mix** — minutes, into its own `<stamp>_tools` run
+7. Evaluate the tool-trained model (perplexity + golden + tool-call) — gates Ollama export
+8. Fuse the LoRA adapter and register the model with Ollama
+
+Steps 4–8 pass the run directory explicitly between the ops. They used to each
+look up "the latest run in `artifacts/`", which meant anything else writing
+there could gate on one model and ship another.
+
+**Why the base adapter is evaluated too** (step 5): without it, a bad number at
+step 7 has two suspects — the base run or the continuation — and no way to tell
+them apart once the run directory is gone. It also answers whether continued
+training is earning its place, on every run rather than as a special
+investigation. Its golden and tool-call gates are both disabled (thresholds of `0`):
+that adapter carries tool records at ~6% of its mix and is not expected to clear
+a tool-call or a lookup-dependent bar, and stopping the pipeline on a model
+nobody ships is the mistake the golden gate used to make. Perplexity still gates there — continuing from a
+regressed adapter is pointless, and it is better to find out before spending the
+continuation.
+
+**Nothing reaches Ollama before the gate.** `gemma3_chembl_toon_finetune_flow`
+exports when run standalone, and the pipeline passes `export=False` so the only
+model published is the tool-trained one, after step 7 passes.
 
 ### Build with the full dataset
 
@@ -134,11 +158,33 @@ uv run python -m app.scripts.flows.llm_finetuning_data.download_twosides
 # Step 3e — Ingest TWOSIDES into the polypharmacy LanceDB table (run after 3c and 3d)
 uv run python -m app.scripts.flows.vector_store.ingest_twosides_to_lancedb
 
-# Step 4 — Fine-tune Gemma 3 1B (~2–4 hrs on M1 Pro)
-uv run app/scripts/flows/finetuning/finetuning.py
+# Step 4 — Fine-tune Gemma 3 1B (~2–4 hrs on M1 Pro).
+# Run standalone this also exports to Ollama when it finishes. The Dagster
+# pipeline passes export=False so nothing is published before the gate.
+uv run python -m app.scripts.flows.finetuning.finetuning
 
-# Step 5 — Fuse adapter, export to GGUF, and register with Ollama
-uv run python -m app.scripts.flows.finetuning.export_to_ollama
+# Step 4b — Measure the base adapter before continuing, so a bad number later
+# has one suspect rather than two. Thresholds of 0 record without gating.
+uv run python -m app.scripts.flows.eval.eval_finetuned_model \
+  --run-dir artifacts/<stamp> --tool-call-threshold 0 --pass-threshold 0
+
+# Step 5 — Continue that adapter on a tool-heavy mix (~minutes). The quantised
+# base model is symlinked, not copied, so this costs megabytes not gigabytes.
+# The full run's 60 K tool-call records compete with ~900 K prose ones answering
+# the same questions from memory; this retrains on a mix where tool calls are a
+# third of what the model sees. Writes a new artifacts/<stamp>_tools run and
+# leaves the adapter it started from untouched.
+uv run python -m app.scripts.flows.finetuning.continue_tool_training
+
+# Step 6 — Evaluate the tool-trained run. This is the gate: it blocks the export
+# on a perplexity regression or a tool-call parse rate below threshold.
+uv run python -m app.scripts.flows.eval.eval_finetuned_model \
+  --run-dir artifacts/<stamp>_tools
+
+# Step 7 — Fuse adapter, export to GGUF, and register with Ollama.
+# Pass the run you evaluated — otherwise this exports whichever run sorts last.
+uv run python -m app.scripts.flows.finetuning.export_to_ollama \
+  --run-dir artifacts/<stamp>_tools
 ```
 
 Expected disk and time requirements:
@@ -152,6 +198,9 @@ Expected disk and time requirements:
 | Download TWOSIDES | ~50 MB Parquet | ~2–3 min |
 | Ingest TWOSIDES to LanceDB | < 100 MB | ~1 min |
 | Fine-tune (3 000 iters) | ~2 GB adapter | ~2–4 hrs |
+| Evaluate base adapter | < 1 MB | ~10–15 min |
+| Continue on tool mix (600 iters) | ~141 MB mix + 6 × ~10 MB checkpoints | ~5–15 min |
+| Evaluate tool-trained adapter | < 1 MB | ~10–15 min |
 | Export to Ollama | ~4 GB GGUF | ~5–10 min |
 
 > **Low-RAM machines:** Cap each table at N rows with `--row-limit`:
@@ -224,7 +273,20 @@ A `web/.env` file with working defaults is committed — Bun loads it automatica
 
 ## Vector Store
 
-The pipeline builds a **LanceDB vector store** alongside fine-tuning — 2,854,996 compounds from ChEMBL, each represented as a 2048-bit Morgan fingerprint (ECFP4, radius 2).
+The pipeline builds a **LanceDB vector store** alongside fine-tuning — every molecule in ChEMBL, each small molecule represented as a 2048-bit Morgan fingerprint (ECFP4, radius 2).
+
+**Biologics are in the table too, without a fingerprint.** Antibodies,
+oligonucleotides and cell therapies have no SMILES, so they cannot be
+fingerprinted — but they are real drugs with mechanisms, targets and
+indications, and the name-lookup tools need to reach them. They are stored with
+a zero vector and `has_structure = False`; `query_compounds` filters on that
+flag, so a structureless row can never surface as a spurious "similar compound".
+`draw_molecule` says so plainly rather than failing on a missing structure.
+
+Excluding them used to mean no tool could answer a question about one — 15 of
+the 40 drugs in the golden benchmark were simply unreachable. The old filter
+also dropped ~22 K `structure_type = 'BOTH'` molecules, which *do* carry
+structures and belong in similarity search.
 
 **Why a vector store alongside fine-tuning?** Fine-tuning teaches the model to sound like a domain expert. It cannot guarantee factual accuracy for specific compounds. The store is what the agent's tools read, grounding answers in real ChEMBL records — mechanisms, indications, warnings, metabolic enzymes — that the model only needs to format.
 
@@ -236,6 +298,11 @@ uv run python -m app.scripts.flows.vector_store.ingest_to_lancedb
 ```
 
 Re-runs are safe — the table is always overwritten. Output: `data/lancedb/chembl_CHEMBL_37/`.
+
+> **A store built before the `has_structure` column needs re-ingesting.**
+> `query_compounds` filters on that column, and LanceDB errors on an unknown
+> field rather than ignoring it, so similarity search fails against an older
+> table until this runs. Name lookups are unaffected.
 
 ### Query — compounds
 
@@ -368,6 +435,50 @@ deliberately:
 uv run python -m app.scripts.flows.eval.eval_finetuned_model --run-dir <new run>
 ```
 
+### Rebuilding the agent end to end
+
+The Dagster pipeline runs all of this (steps 4–7 above). Do it by hand when you
+already have the dataset and only the adapters are missing — `artifacts/` is
+gitignored, so a fresh clone or a lost run directory needs the sequence without
+re-downloading ChEMBL. `data/llm_finetune/` is the expensive input and is reused.
+
+```bash
+# 1. Full LoRA run (~2-4 hrs). Skip if you still have an adapter to continue from.
+uv run python -m app.scripts.flows.finetuning.finetuning
+
+# 2. Continue it on the tool-heavy mix (minutes). Writes artifacts/<stamp>_tools.
+uv run python -m app.scripts.flows.finetuning.continue_tool_training
+
+# 3. Measure. One at a time — see the warning under Model Evaluation.
+uv run python -m app.scripts.flows.eval.eval_finetuned_model \
+  --run-dir artifacts/<stamp>_tools
+
+# 4. Export the adapter you measured, so the served model is the measured model.
+uv run python -m app.scripts.flows.finetuning.export_to_ollama \
+  --run-dir artifacts/<stamp>_tools
+```
+
+**What step 3 should print.** On the last run of this pipeline, all four tool
+rates came back at 100% over 40 calls on held-out drugs:
+
+```
+Running tool-call benchmark (10 held-out drugs) ...
+  Parsed 100.0% · known tool 100.0% · right tool 100.0% of 40
+
+Running tool-result benchmark (10 held-out drugs) ...
+  Used the result 100.0% · answered in prose 100.0% of 40
+```
+
+`build_tool_mix` samples with a fixed seed, so step 2 trains on the same mix
+each time and these numbers should reproduce. **Routing — "right tool" — is the
+one to watch.** If it comes back near 50% rather than 100%, a system prompt has
+found its way back into the inference path; that single change was the
+difference between the two figures. Golden staying at ~2–5% is expected and is
+not a regression — see Model Evaluation below for why it is not gated.
+
+Step 4 is what makes the served model the one you measured. Until it runs,
+`ollama run chembl-drug-chat:1b` is whatever was exported last.
+
 ---
 
 ## Model Evaluation
@@ -378,16 +489,23 @@ Four signals, two of which block the export:
 | Signal | Measures | Gated |
 |--------|----------|-------|
 | **Perplexity** on `valid.jsonl` | Did the fine-tune regress against the base model? | ✓ |
+| **Golden benchmark** | 40 questions on held-out molecules, answered through the agent loop | ✓ pass rate |
 | **Tool-call benchmark** | Given a question a tool can answer, does it emit a valid call for the right tool? | ✓ parse rate |
 | **Tool-result benchmark** | Handed a tool result, does it read it or echo its shape? | — |
-| **Golden benchmark** | 40 drug questions built from held-out molecules, keyword-scored | — |
 
-**Why golden is recorded but not gated.** Every golden question asks for a fact
-about a molecule deliberately excluded from training, so answering it from
-weights is not something the model can do or is meant to do — post-holdout it is
-a *lookup*. Gating on it blocked every export for a capability the fine-tune was
-never supposed to have. Re-pointing it at the agent loop (model + tools) would
-make it a real gate again; see ROADMAP item 1.
+**Golden runs through the agent loop.** Every question asks for a fact about a
+molecule deliberately excluded from training, so it cannot be answered from
+weights — it is a *lookup*, and the model's job is to go and get it. One turn to
+ask, the tool actually runs, and the answer written from the result is scored.
+`golden_tool_used_count` records how often it asked: a low pass rate with a low
+count is a routing problem, a low pass rate with a high count is a reading or
+data problem.
+
+It is also **the only gate on answer quality** — perplexity and the tool-call
+rate would both pass a model that routes perfectly and then writes nonsense from
+the result it was handed. A threshold of `0` disables a gate, which is how the
+pipeline measures the intermediate base adapter without blocking on a model
+nobody ships.
 
 The tool-call benchmark takes its drugs from `golden.jsonl`, so both are scored
 on molecules absent from `train.jsonl` — a test in the suite enforces that, by
@@ -418,7 +536,10 @@ uv run python -m app.scripts.flows.eval.eval_finetuned_model \
 ```
 
 > **Do not run two evaluations at once.** They both spawn `mlx_lm generate`, and
-> one will exhaust the GPU while the other returns empty completions.
+> one will exhaust the GPU while the other returns empty completions. `_generate`
+> raises on an empty completion rather than scoring it as a wrong answer — before
+> that, a starved run reported "0.0% routing", which is indistinguishable from a
+> real regression. You still lose the run, you just find out immediately.
 
 ---
 
@@ -502,7 +623,7 @@ chem_mlops/
 ├── data/
 │   ├── chembl_transform/                  # Parquet files (one per ChEMBL table)
 │   ├── llm_finetune/                      # train.jsonl / valid.jsonl
-│   ├── lancedb/chembl_CHEMBL_37/          # compounds (2,854,996 vectors) + polypharmacy tables
+│   ├── lancedb/chembl_CHEMBL_37/          # compounds (small molecules + biologics) + polypharmacy
 │   └── twosides/TWOSIDES.parquet          # PRR-filtered FAERS pairs (~50 MB, gitignored)
 ├── deployments/workspace.yaml             # Dagster code-location config
 ├── ROADMAP.md                             # Ranked work items, with what was measured

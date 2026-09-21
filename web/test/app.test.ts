@@ -180,8 +180,6 @@ test("the tool loop stops at maxToolSteps", async () => {
     new Request("http://localhost/api/chat", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      // Not a "draw X" phrasing: this test is about the model's own loop, and
-      // routeDirectToolCall would otherwise add a call of its own.
       body: JSON.stringify({ messages: [{ role: "user", content: "tell me about ethanol" }] }),
     }),
   );
@@ -268,18 +266,22 @@ test("a brace in prose is released, not swallowed", async () => {
   expect(answerOf(await collectEvents(response))).toBe("Formula {C9H8O4} is aspirin.");
 });
 
-test("an explicit draw request is answered from the tool result, not by the model", async () => {
+test("a draw request is routed by the model, not by a keyword bridge", async () => {
+  // This used to be intercepted before the model got a turn, because the
+  // fine-tune could neither emit a tool call nor read a result. It now does
+  // both at 100% on held-out drugs (roadmap item 3), so the bridge is gone and
+  // the request goes through the ordinary agent loop.
   const calls: { tool: string; args: Record<string, unknown> }[] = [];
-  let modelTurns = 0;
+  const replies = [
+    `{"tool": "draw_molecule", "args": {"name": "prozac"}}`,
+    "FLUOXETINE HYDROCHLORIDE (CHEMBL1201082), C17H19ClF3NO.",
+  ];
   const handler = createChatRequestHandler({
     publicDir: new URL("../public/", import.meta.url),
     fetchImpl: async (input) => {
       const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
       if (url.endsWith("/api/tags")) return Response.json({ models: [] });
-      if (url.endsWith("/api/chat")) {
-        modelTurns += 1;
-        return reply("CHEMBL999999 is paracetamol, probably.");
-      }
+      if (url.endsWith("/api/chat")) return reply(replies.shift() ?? "done");
       throw new Error(`Unexpected request: ${url}`);
     },
     toolRunner: async (call) => {
@@ -292,7 +294,6 @@ test("an explicit draw request is answered from the tool result, not by the mode
           chembl_id: "CHEMBL1201082",
           pref_name: "FLUOXETINE HYDROCHLORIDE",
           full_molformula: "C17H19ClF3NO",
-          mw_freebase: "309.33",
         },
       };
     },
@@ -312,13 +313,8 @@ test("an explicit draw request is answered from the tool result, not by the mode
   expect(calls).toEqual([{ tool: "draw_molecule", args: { name: "prozac" } }]);
   expect(events[0]?.tool).toEqual({ tool: "draw_molecule", args: { name: "prozac" } });
   expect(events[1]?.toolResult?.tool).toBe("draw_molecule");
-  // Caption comes from the tool result; the model gets no turn, so it cannot
-  // contribute the hallucinated ChEMBL ID it would otherwise volunteer.
-  expect(answerOf(events)).toBe(
-    "FLUOXETINE HYDROCHLORIDE (CHEMBL1201082) — C17H19ClF3NO, MW 309.33. " +
-      "SMILES: CNCCC(Oc1ccc(C(F)(F)F)cc1)c1ccccc1.Cl",
-  );
-  expect(modelTurns).toBe(0);
+  // The caption is the model's, written from the result it was handed.
+  expect(answerOf(events)).toBe("FLUOXETINE HYDROCHLORIDE (CHEMBL1201082), C17H19ClF3NO.");
   expect(events.at(-1)?.done).toBe(true);
 });
 

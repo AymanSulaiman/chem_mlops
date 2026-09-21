@@ -45,6 +45,20 @@ def _make_record(
         "canonical_smiles": smiles,
         "synonyms": synonyms,
         "vector": fp.tolist(),
+        "has_structure": True,
+    }
+
+
+def _make_biologic(chembl_id: str, pref_name: str) -> dict[str, Any]:
+    """A drug with no structure — reachable by name, never by similarity."""
+    return {
+        "chembl_id": chembl_id,
+        "pref_name": pref_name,
+        "mw_freebase": None,
+        "canonical_smiles": None,
+        "synonyms": "",
+        "vector": [0.0] * 2048,
+        "has_structure": False,
     }
 
 
@@ -56,6 +70,7 @@ def lancedb_dir(tmp_path: Path) -> str:
     records = [
         _make_record(ASPIRIN_SMILES, "CHEMBL25", "Aspirin", 180.16),
         _make_record(CAFFEINE_SMILES, "CHEMBL113", "Caffeine", 194.19),
+        _make_biologic("CHEMBL999", "Olendalizumab"),
         _make_record(
             IBUPROFEN_SMILES,
             "CHEMBL521",
@@ -365,3 +380,24 @@ class TestGetCompoundByName:
 
     def test_returns_none_for_an_unknown_name(self, lancedb_dir: str) -> None:
         assert get_compound_by_name("Notadrug", lancedb_dir=lancedb_dir) is None
+
+
+def test_a_biologic_is_findable_by_name_but_never_by_similarity(lancedb_dir: str) -> None:
+    """The whole point of keeping structureless molecules in the table.
+
+    They carry mechanism, target and indication data the name-lookup tools
+    read; they have no fingerprint, so a zero vector stands in. That vector
+    sits at a fixed distance from every query and would surface as a spurious
+    "similar compound" to an antibody if the search did not filter it out.
+    """
+    found = get_compound_by_name("Olendalizumab", lancedb_dir=lancedb_dir)
+    assert found is not None
+    assert found["chembl_id"] == "CHEMBL999"
+    # has_structure is an internal flag, not part of the summary a model reads.
+    assert "canonical_smiles" not in found
+
+    # Ask for more hits than there are real compounds; the biologic must not
+    # be among them even when the search runs out of genuine matches.
+    hits = query_compounds(ASPIRIN_SMILES, n=10, lancedb_dir=lancedb_dir)
+    assert "CHEMBL999" not in {h["chembl_id"] for h in hits}
+    assert all(h["has_structure"] for h in hits)

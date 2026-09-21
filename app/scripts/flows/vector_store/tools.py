@@ -71,6 +71,15 @@ def draw_molecule(
         if record is None:
             raise ValueError(f"Invalid SMILES — could not parse: '{smiles}'")
 
+    # Biologics are now in the compounds table — reachable by name for their
+    # mechanism and target data, but there is no structure to draw. Say so,
+    # rather than failing on the string "None".
+    if record is not None and not record.get("canonical_smiles"):
+        raise ValueError(
+            f"{record.get('pref_name') or name} has no small-molecule structure "
+            "(it is a biologic), so there is nothing to draw."
+        )
+
     drawn = str(record["canonical_smiles"]) if record else (smiles or "")
     mol = Chem.MolFromSmiles(drawn)
     if mol is None:

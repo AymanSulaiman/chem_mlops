@@ -1,7 +1,7 @@
 """
 Model evaluation for the ChEMBL fine-tuning pipeline.
 
-Four signals, two of which block the export:
+Four signals, three of which block the export:
 
   1. Perplexity on the held-out validation set (computed via mlx_lm Python API
      on valid.jsonl).  Lower is better.  GATE: a fine-tuned model worse than
@@ -61,6 +61,12 @@ except ImportError:  # non-Apple-Silicon environments (CI)
 GOLDEN_BENCHMARK_PATH = Path(__file__).parent / "golden.jsonl"
 EVAL_PASS_THRESHOLD = 0.7  # golden pass rate that would clear the gate — see eval_flow
 TOOL_CALL_PARSE_THRESHOLD = 0.5  # roadmap item 3 acceptance: a stated majority parses
+
+# Mirrored from build_drug_interaction_dataset: the model is trained on this
+# exact header and this truncation, and the server sends both. A benchmark that
+# drifts from them measures a prompt the model never sees.
+TOOL_RESULT_HEADER = "### Tool result"
+TOOL_RESULT_LIMIT = 2_000
 
 # ── Tool-call benchmark ───────────────────────────────────────────────────────
 # Roadmap item 3's acceptance criterion: does the model emit a *valid* tool call
@@ -319,9 +325,11 @@ def run_tool_call_benchmark(
 # ── Tool-result benchmark ─────────────────────────────────────────────────────
 # The other half of the agent loop. The tool-call benchmark asks "does it ask
 # for the right lookup"; this asks "having been handed the answer, can it read
-# it". That question is what keeps routeDirectToolCall alive in web/src/tools.ts
-# — the bridge exists because the model, given a tool result, echoed the JSON
-# shape back instead of using it. Until this number is good, the bridge stays.
+# it". It was written to decide whether a deterministic bridge in web/src/tools.ts
+# could be removed — that bridge existed because the model, handed a tool result,
+# echoed the JSON shape back instead of using it. This number reached 100% and
+# the bridge is gone; the benchmark stays, because it is what would catch the
+# behaviour coming back.
 #
 # Every expected value below is invented. A real molecular weight could be
 # recalled from training; 481.27 cannot, so an answer containing it is proof the
@@ -412,7 +420,7 @@ def run_tool_result_benchmark(
                 f"{_preamble(system_prompt)}"
                 f"### Question\n{question}\n\n"
                 f"### Answer\n{call}\n\n"
-                f"### Question\n### Tool result ({tool})\n{body}\n\n"
+                f"### Question\n{TOOL_RESULT_HEADER} ({tool})\n{body}\n\n"
                 f"### Answer\n"
             )
             response = _generate(mlx_model_dir, adapter_dir, prompt, max_tokens)
@@ -449,13 +457,24 @@ def run_golden_benchmark(
     golden_path: Path = GOLDEN_BENCHMARK_PATH,
     max_tokens: int = 300,
     model_label: str = "chembl-drug-chat (MLX LoRA)",
+    use_tools: bool = True,
 ) -> dict[str, Any]:
     """
-    Run the golden benchmark: generate a response per question and check that
-    every keyword in must_contain appears in the (lowercased) response.
+    Run the golden benchmark through the agent loop and keyword-score the answer.
+
+    **Golden is a lookup benchmark.** Every question asks for a fact about a
+    molecule item 1 deliberately withheld from training, so the answer cannot be
+    in the weights — it is in the vector store, and the model's job is to go and
+    get it. Scoring the bare model here measured whether it would *guess* a
+    protein, which it did, wrongly, 39 times out of 40.
+
+    So: one turn to let the model ask for a lookup, the tool actually runs, the
+    result comes back, and the answer it then writes is what gets scored. A
+    model that answers without asking is scored on that answer directly, so a
+    question needing no tool still works.
 
     Scoring: keyword_match — a question passes if every word in must_contain
-    appears anywhere in the response (case-insensitive).
+    appears anywhere in the final answer (case-insensitive).
 
     Args:
         mlx_model_dir: Path to the MLX base model directory.
@@ -463,22 +482,51 @@ def run_golden_benchmark(
         golden_path:   Path to golden.jsonl benchmark file.
         max_tokens:    Maximum tokens to generate per question.
         model_label:   Human-readable model identifier written into each result.
+        use_tools:     Run the agent loop. False scores the bare model, which is
+                       only meaningful for questions the weights should answer.
 
     Returns:
-        Dict with keys: pass_count, total, pass_rate, results (per-question list).
+        Dict with keys: pass_count, total, pass_rate, tool_used_count,
+        results (per-question list).
     """
+    from app.scripts.flows.vector_store.tools import resolve_tool_call, run_tool
+
     questions = [json.loads(line) for line in golden_path.read_text().splitlines() if line.strip()]
 
     passed = 0
+    tool_used = 0
     results: list[dict[str, Any]] = []
 
     for item in questions:
         question: str = item["question"]
         must_contain = [kw.lower() for kw in item["must_contain"]]
 
-        response = _generate(
+        first = _generate(
             mlx_model_dir, adapter_dir, f"### Question\n{question}\n\n### Answer\n", max_tokens
         )
+
+        response = first
+        tool_name: str | None = None
+        call = _first_json_object(first) if use_tools else None
+        named = (call.get("tool") or call.get("name")) if call else None
+        if call is not None and isinstance(named, str):
+            args = call.get("args") or call.get("arguments") or {}
+            tool_name, resolved_args = resolve_tool_call(
+                named, args if isinstance(args, dict) else {}
+            )
+            outcome = run_tool(tool_name, resolved_args)
+            body = json.dumps(outcome.get("result", outcome), default=str)[:TOOL_RESULT_LIMIT]
+            # Same layout the server sends and the dataset trains on.
+            response = _generate(
+                mlx_model_dir,
+                adapter_dir,
+                f"### Question\n{question}\n\n"
+                f"### Answer\n{json.dumps({'tool': tool_name, 'args': resolved_args})}\n\n"
+                f"### Question\n{TOOL_RESULT_HEADER} ({tool_name})\n{body}\n\n"
+                f"### Answer\n",
+                max_tokens,
+            )
+            tool_used += 1
 
         hit = all(kw in response.lower() for kw in must_contain)
         if hit:
@@ -491,6 +539,7 @@ def run_golden_benchmark(
                 "category": item.get("category", ""),
                 "must_contain": item["must_contain"],
                 "keyword_match_passed": hit,
+                "tool_called": tool_name,
                 "response": response.strip(),
             }
         )
@@ -500,6 +549,7 @@ def run_golden_benchmark(
         "pass_count": passed,
         "total": total,
         "pass_rate": passed / total if total > 0 else 0.0,
+        "tool_used_count": tool_used,
         "results": results,
     }
 
@@ -522,27 +572,27 @@ def eval_flow(
 
     Writes metrics.json and golden_results.jsonl to eval_output_dir
     (default: data/eval/<run_name>/).
-    Raises RuntimeError if the fine-tuned model regresses on perplexity or if
-    the tool-call parse rate falls below tool_call_threshold — blocking the
-    downstream Ollama export. The golden pass rate is reported, not gated.
+    Raises RuntimeError if the fine-tuned model regresses on perplexity, or if
+    the golden pass rate or tool-call parse rate falls below its threshold —
+    blocking the downstream Ollama export. A threshold of 0 disables that gate,
+    which is how an intermediate adapter is measured without blocking on it.
 
     Args:
         run_dir:          Fine-tuning artifact directory (e.g. artifacts/20260615_120000).
         data_dir:         Directory containing train/valid JSONL splits.
         golden_path:      Path to golden.jsonl benchmark file.
-        pass_threshold:   Golden pass rate to report against [0, 1]. Not gated.
+        pass_threshold:   Minimum golden pass rate [0, 1]; 0 disables the gate.
         num_batches:      Batches to use for perplexity evaluation (-1 for all).
         eval_output_dir:  Where to write metrics/results. Defaults to
                           data/eval/<run_dir.name>/.
         tool_call_drugs:  Held-out molecules to test tool calls against.
-        tool_call_threshold: Minimum tool-call parse rate [0, 1]. Gated.
+        tool_call_threshold: Minimum tool-call parse rate [0, 1]; 0 disables it.
 
     Returns:
         Metrics dict (same content as metrics.json).
 
     Raises:
-        RuntimeError: If perplexity regresses or the tool-call parse rate is
-            too low.
+        RuntimeError: If perplexity regresses, or a gated rate is too low.
     """
     mlx_model_dir = run_dir / DEFAULT_MLX_SUBDIR
     adapter_dir = run_dir / DEFAULT_ADAPTER_SUBDIR
@@ -568,7 +618,10 @@ def eval_flow(
     model_label = f"chembl-drug-chat (MLX LoRA, run={run_dir.name})"
     print(f"\nRunning golden benchmark ({golden_path}) ...")
     golden = run_golden_benchmark(mlx_model_dir, adapter_dir, golden_path, model_label=model_label)
-    print(f"  Pass rate: {golden['pass_count']}/{golden['total']} ({golden['pass_rate']:.1%})")
+    print(
+        f"  Pass rate: {golden['pass_count']}/{golden['total']} ({golden['pass_rate']:.1%})"
+        f" · looked it up in {golden.get('tool_used_count', 0)}/{golden['total']}"
+    )
 
     # ── 3. Tool calls (the gate) ──────────────────────────────────
     print(f"\nRunning tool-call benchmark ({tool_call_drugs} held-out drugs) ...")
@@ -608,6 +661,10 @@ def eval_flow(
         "golden_pass_count": golden["pass_count"],
         "golden_total": golden["total"],
         "golden_pass_rate": round(golden["pass_rate"], 4),
+        # How often the model asked for a lookup instead of answering from
+        # memory. A low pass rate with a low count here is a routing problem;
+        # a low pass rate with a high count is a reading or data problem.
+        "golden_tool_used_count": golden.get("tool_used_count", 0),
         "pass_threshold": pass_threshold,
         "tool_call_total": tools["total"],
         "tool_call_parse_rate": round(tools["parse_rate"], 3),
@@ -617,17 +674,26 @@ def eval_flow(
         "tool_result_grounded_rate": round(tool_results["grounded_rate"], 3),
         "tool_result_prose_rate": round(tool_results["prose_rate"], 3),
         "tool_call_parse_threshold": tool_call_threshold,
-        "tool_call_gated": True,
-        "golden_gated": False,
+        # A threshold of 0 cannot fire, so the run is measured and not gated —
+        # which is how an intermediate adapter is evaluated. Record that
+        # honestly rather than claiming a gate that could never fail.
+        "tool_call_gated": tool_call_threshold > 0,
+        # 0 cannot fire, so the run is measured and not gated — how an
+        # intermediate adapter is evaluated. Same convention as the tool-call
+        # threshold above.
+        "golden_gated": pass_threshold > 0,
         # Named so "eval_gate_passed" cannot be read as "every number is good".
         # It means these gates passed, and nothing more.
-        "gates_applied": ["perplexity", "tool_call_parse_rate"],
+        "gates_applied": ["perplexity"]
+        + (["golden_pass_rate"] if pass_threshold > 0 else [])
+        + (["tool_call_parse_rate"] if tool_call_threshold > 0 else []),
         "ungated_metrics": [
-            "golden_pass_rate",
             "tool_call_correct_rate",
             "tool_result_grounded_rate",
             "tool_result_prose_rate",
-        ],
+        ]
+        + ([] if tool_call_threshold > 0 else ["tool_call_parse_rate"])
+        + ([] if pass_threshold > 0 else ["golden_pass_rate"]),
         "eval_gate_passed": True,
     }
 
@@ -649,21 +715,21 @@ def eval_flow(
             f"Perplexity regression: fine-tuned {finetuned_ppl:.3f} > baseline {baseline_ppl:.3f}"
         )
 
-    # The golden benchmark is recorded, not gated. Every question in it is
-    # "What does {drug} target?" about a molecule item 1 deliberately removed
-    # from training, so answering from weights is a thing this model cannot do
-    # and is not supposed to do — it guesses a plausible protein instead
-    # (SIROLIMUS -> "Insulin receptor substrate 1"). Post-holdout that question
-    # is a lookup, and belongs to the agent loop rather than the bare model.
-    # Gating on it blocked every export for a missing capability that was never
-    # the fine-tune's job. Re-point this at the agent (model + tools) and it
-    # becomes a real gate again — until then the tool-call rate is the gate,
-    # because it measures the thing the product actually depends on.
+    # Golden gates again. It was demoted when it scored the *bare model* on
+    # "What does {drug} target?" about molecules item 1 deliberately removed
+    # from training — an unpassable bar that blocked every export for a
+    # capability the fine-tune was never meant to have. It now runs through the
+    # agent loop, where that question is an ordinary lookup, and clears the
+    # threshold with room (97.5% on 20260921_053213_tools).
+    #
+    # It is the only gate on *answer quality*. Perplexity and the tool-call rate
+    # would both pass a model that routes perfectly and then writes nonsense
+    # from the result it was handed.
     if golden["pass_rate"] < pass_threshold:
-        print(
-            f"\n  note: golden benchmark {golden['pass_rate']:.1%} (would-be threshold "
-            f"{pass_threshold:.1%}). Recalling held-out targets from weights is a lookup, "
-            "not a fine-tuning result — not gated. See roadmap item 1."
+        failures.append(
+            f"Golden benchmark {golden['pass_rate']:.1%} is below threshold "
+            f"{pass_threshold:.1%} (looked it up in "
+            f"{golden.get('tool_used_count', 0)}/{golden['total']})"
         )
 
     if tools["parse_rate"] < tool_call_threshold:
@@ -683,10 +749,15 @@ def eval_flow(
     # Deliberately not "✓ Eval passed": the gates are a floor, not a verdict on
     # answer quality, and golden at 5% under a bare "passed" reads as a green
     # light on a model that answers 2 of 40 benchmark questions correctly.
+    gated = ", ".join(
+        ["perplexity"]
+        + (["golden"] if pass_threshold > 0 else [])
+        + (["tool-call parse"] if tool_call_threshold > 0 else [])
+    )
     print(
-        f"\n✓ Gates passed (perplexity, tool-call parse {tools['parse_rate']:.1%}) — "
-        f"golden {golden['pass_rate']:.1%} and tool-call routing "
-        f"{tools['correct_rate']:.1%} recorded, NOT gated"
+        f"\n✓ Gates passed ({gated}) — tool-call parse {tools['parse_rate']:.1%}, "
+        f"routing {tools['correct_rate']:.1%}, golden {golden['pass_rate']:.1%}"
+        f"{'' if tool_call_threshold > 0 else ' — all recorded, NOT gated'}"
     )
     print(f"  Metrics written to {metrics_path}")
     return metrics

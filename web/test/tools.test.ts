@@ -1,10 +1,8 @@
 import { expect, test } from "bun:test";
 
 import {
-  describeDrawResult,
   formatToolResult,
   parseToolCall,
-  routeDirectToolCall,
   TOOL_SPECS,
   TOOL_SYSTEM_PROMPT,
 } from "../src/tools";
@@ -80,69 +78,12 @@ test("the tool-result header matches what the fine-tune is trained on", () => {
   expect(long.length).toBeLessThanOrEqual("### Tool result (query_compounds)\n".length + 2000);
 });
 
-// ── Deterministic bridge (temporary; see routeDirectToolCall) ────────────────
-
-test("routeDirectToolCall catches explicit structure requests", () => {
-  const cases: [string, string][] = [
-    ["Show me the molecular structure of prozac", "prozac"],
-    ["show me the structure of Ibuprofen", "Ibuprofen"],
-    ["Draw the structure of aspirin.", "aspirin"],
-    ["Draw ibuprofen", "ibuprofen"],
-    ["draw paracetamol please", "paracetamol"],
-    ["Render caffeine", "caffeine"],
-    ["What does warfarin look like?", "warfarin"],
-    ["Draw the acetylsalicylic acid molecule", "acetylsalicylic acid"],
-  ];
-  for (const [message, name] of cases) {
-    expect(routeDirectToolCall(message)).toEqual({ tool: "draw_molecule", args: { name } });
-  }
-});
-
-test("routeDirectToolCall leaves every other question to the model", () => {
-  const untouched = [
-    "What is the molecular weight of Aspirin?",
-    "Is it safe to take warfarin with aspirin?",
-    "Which drugs interact with Warfarin?",
-    "What is a CYP3A4 inhibitor?",
-    "hi",
-    "Draw it",          // names nothing to look up
-    "render this",
-  ];
-  for (const message of untouched) {
-    expect(routeDirectToolCall(message)).toBeNull();
-  }
-});
-
-test("describeDrawResult writes the caption from the tool result", () => {
-  expect(
-    describeDrawResult({
-      result: {
-        source: "ChEMBL",
-        pref_name: "IBUPROFEN",
-        chembl_id: "CHEMBL521",
-        full_molformula: "C13H18O2",
-        mw_freebase: "206.28",
-        smiles: "CC(C)Cc1ccc(C(C)C(=O)O)cc1",
-      },
-    }),
-  ).toBe("IBUPROFEN (CHEMBL521) — C13H18O2, MW 206.28. SMILES: CC(C)Cc1ccc(C(C)C(=O)O)cc1");
-
-  expect(describeDrawResult({ result: { source: "supplied by the user", smiles: "CCO" } })).toBe(
-    "Structure drawn from the SMILES you supplied: CCO",
-  );
-  expect(describeDrawResult({ error: "No ChEMBL compound named 'xyz'" })).toContain("Could not draw");
-});
-
 test("every tool carries an example a person can click and a name the parser knows", () => {
   for (const spec of TOOL_SPECS) {
     expect(spec.ask.length).toBeGreaterThan(0);
-    // The manual's examples must actually reach the tool they advertise:
-    // draw phrasings via the bridge, the rest by the model deciding.
-    if (spec.name === "draw_molecule") {
-      expect(routeDirectToolCall(spec.ask)?.tool).toBe("draw_molecule");
-    } else {
-      expect(routeDirectToolCall(spec.ask)).toBeNull();
-    }
+    // Which tool an example reaches is now the model's decision, measured by
+    // the tool-call benchmark rather than asserted here.
+    expect(parseToolCall(`{"tool": "${spec.name}", "args": ${spec.args}}`)?.tool).toBe(spec.name);
   }
 });
 
