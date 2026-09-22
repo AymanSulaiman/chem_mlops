@@ -78,25 +78,21 @@ def _build_flat_df(parquet_dir: str) -> pl.DataFrame:
     query_compounds filters on that flag so similarity search is unaffected.
     """
     # ── Base + 1:1 joins ──────────────────────────────────────────────────
-    base: pl.DataFrame = (
+    base: pl.DataFrame = (  # ty: ignore[invalid-assignment]
         pl.scan_parquet(f"{parquet_dir}/molecule_dictionary.parquet")
-        .filter(  # ty: ignore[invalid-assignment]
-            pl.col("structure_type").is_in(["MOL", "BOTH", "SEQ", "NONE"])
-        )
+        .filter(pl.col("structure_type").is_in(["MOL", "BOTH", "SEQ", "NONE"]))
         .collect()
     )
 
-    cs: pl.DataFrame = (
+    cs: pl.DataFrame = (  # ty: ignore[invalid-assignment]
         pl.scan_parquet(f"{parquet_dir}/compound_structures.parquet")
-        .select(  # ty: ignore[invalid-assignment]
-            ["molregno", "canonical_smiles", "standard_inchi_key"]
-        )
+        .select(["molregno", "canonical_smiles", "standard_inchi_key"])
         .collect()
     )
 
-    cp: pl.DataFrame = (
+    cp: pl.DataFrame = (  # ty: ignore[invalid-assignment]
         pl.scan_parquet(f"{parquet_dir}/compound_properties.parquet")
-        .select(  # ty: ignore[invalid-assignment]
+        .select(
             [
                 "molregno",
                 "mw_freebase",
@@ -113,17 +109,15 @@ def _build_flat_df(parquet_dir: str) -> pl.DataFrame:
         .collect()
     )
 
-    mh: pl.DataFrame = (
+    mh: pl.DataFrame = (  # ty: ignore[invalid-assignment]
         pl.scan_parquet(f"{parquet_dir}/molecule_hierarchy.parquet")
-        .select(  # ty: ignore[invalid-assignment]
-            ["molregno", "parent_molregno", "active_molregno"]
-        )
+        .select(["molregno", "parent_molregno", "active_molregno"])
         .collect()
     )
 
-    usan: pl.DataFrame = (
+    usan: pl.DataFrame = (  # ty: ignore[invalid-assignment]
         pl.scan_parquet(f"{parquet_dir}/usan_stems.parquet")
-        .select(  # ty: ignore[invalid-assignment]
+        .select(
             [
                 "stem",
                 pl.col("annotation").alias("usan_stem_annotation"),

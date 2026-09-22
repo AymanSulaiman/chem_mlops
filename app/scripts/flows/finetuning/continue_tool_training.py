@@ -161,7 +161,7 @@ def continue_tool_training(
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    parser = argparse.ArgumentParser(description=(__doc__ or "").split("\n")[0])
     parser.add_argument(
         "--from-run", type=Path, default=None, help="Run to continue (default: latest)"
     )

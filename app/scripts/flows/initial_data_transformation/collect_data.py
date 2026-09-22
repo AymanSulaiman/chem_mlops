@@ -8,7 +8,7 @@ from tqdm import tqdm
 _DOWNLOAD_TIMEOUT = httpx.Timeout(10.0, read=300.0)
 
 
-def collect_data(chembl_version: str = "36") -> None:
+def collect_data(chembl_version: str = "37") -> None:
     Path("data").mkdir(exist_ok=True)
     url = f"https://ftp.ebi.ac.uk/pub/databases/chembl/ChEMBLdb/latest/chembl_{chembl_version}_sqlite.tar.gz"
     archive_path = Path("data") / f"chembl_{chembl_version}_sqlite.tar.gz"
@@ -35,3 +35,6 @@ def collect_data(chembl_version: str = "36") -> None:
             archive_path.unlink()
 
     print("Done.")
+
+if __name__ == "__main__":
+    collect_data()
