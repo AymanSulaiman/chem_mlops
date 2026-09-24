@@ -55,8 +55,7 @@ def _open_table(lancedb_dir: str, table_name: str) -> Table:
     db: DBConnection = lancedb.connect(uri)
     if table_name not in db.list_tables().tables:
         raise FileNotFoundError(
-            f"Table '{table_name}' not found in '{uri}'. "
-            "Run the appropriate ingest step first."
+            f"Table '{table_name}' not found in '{uri}'. Run the appropriate ingest step first."
         )
     return db.open_table(table_name)
 
@@ -91,6 +90,12 @@ def query_compounds(
         lancedb_dir: Root directory that contains the ``chembl_CHEMBL_*``
             subdirectory (default ``data/lancedb``).
 
+    Molecules with no parsable structure — biologics, mostly — are stored with a
+    zero vector so the name-lookup tools can reach their mechanism and target
+    data. They are filtered out here: a zero vector sits at a fixed distance
+    from every query and would otherwise surface as a spurious "similar"
+    compound to an antibody.
+
     Returns:
         List of compound dicts ordered by descending similarity, each
         containing all metadata columns plus a ``_distance`` field.
@@ -101,7 +106,9 @@ def query_compounds(
     """
     query_vector: list[float] = _smiles_to_query_vector(smiles)
     table: Table = _open_table(lancedb_dir, COMPOUNDS_TABLE)
-    results: list[dict[str, Any]] = table.search(query_vector).limit(n).to_list()
+    results: list[dict[str, Any]] = (
+        table.search(query_vector).where("has_structure = true").limit(n).to_list()
+    )
     # Drop the raw vector column — callers need metadata, not the 2048-float blob
     for row in results:
         row.pop("vector", None)
@@ -122,7 +129,9 @@ def get_compound(
             subdirectory (default ``data/lancedb``).
 
     Returns:
-        A single compound dict, or ``None`` if no matching row is found.
+        A compact compound dict — the fields in COMPOUND_SUMMARY_FIELDS that
+        are present — or ``None`` if no matching row is found. Use
+        :func:`get_compound` for the whole row.
 
     Raises:
         FileNotFoundError: If the LanceDB table does not exist.
@@ -134,25 +143,62 @@ def get_compound(
     if not rows:
         return None
     row = rows[0]
-    row.pop("vector", None)
-    return row
+    # Projected, not the full 75-column row — see COMPOUND_SUMMARY_FIELDS.
+    return {k: row[k] for k in COMPOUND_SUMMARY_FIELDS if row.get(k) is not None}
+
+
+# What a name lookup returns. The compounds table has 75 columns; a model asked
+# "what does X target?" had to read past molregno, max_phase, therapeutic_flag
+# and twenty more before reaching mechanism_targets, and mostly did not — it
+# re-emitted its tool call instead of answering, failing 20 of 40 golden
+# questions. Handed these fields alone it answered every one. The training
+# records use this shape too, so projecting here also closes a train-serve gap:
+# the model is taught on a compact result and was being served a 14 KB blob
+# truncated mid-record.
+#
+# Ordered deliberately: identity, then what the drug does, then what it is.
+# get_compound() still returns the whole row for programmatic callers.
+#
+# Fields are omitted as carefully as they are included. `indications`,
+# `max_phase`, `first_approval` and `has_structure` were in an earlier version
+# and each one cost answers: asked what UNASNEMAB targets the model replied
+# "Spinal Cord Injuries" (its indication), and asked about AMG-517 it replied
+# "the compound does not have a structure assigned" (has_structure). A field the
+# training records never carry is a distractor, not context. Indication lookups
+# want their own converted training records, not a wider result here.
+COMPOUND_SUMMARY_FIELDS: tuple[str, ...] = (
+    "chembl_id",
+    "pref_name",
+    "mechanism_targets",
+    "mechanisms",
+    "action_types",
+    "mw_freebase",
+    "full_molformula",
+    "alogp",
+    "canonical_smiles",
+)
 
 
 def get_compound_by_name(
     name: str,
     lancedb_dir: str = LANCEDB_DIR,
 ) -> dict[str, Any] | None:
-    """Exact lookup by preferred name (case-insensitive).
+    """Lookup by preferred name, falling back to trade names and synonyms.
 
-    Uses a scalar filter on ``pref_name`` for a fast filtered search.
+    ChEMBL's ``pref_name`` is not always the name people use: paracetamol is
+    stored as ACETAMINOPHEN, and Tylenol only appears in ``synonyms``. The
+    fallback scans that column and accepts a row only when the query matches a
+    whole synonym, so "Codeine" cannot match "Codeine component of ...".
 
     Args:
-        name: Drug preferred name, e.g. ``"Aspirin"``.
+        name: Drug name, e.g. ``"Aspirin"``, ``"Paracetamol"``, ``"Tylenol"``.
         lancedb_dir: Root directory that contains the ``chembl_CHEMBL_*``
             subdirectory (default ``data/lancedb``).
 
     Returns:
-        A single compound dict, or ``None`` if no matching row is found.
+        A compact compound dict — the fields in COMPOUND_SUMMARY_FIELDS that
+        are present — or ``None`` if no matching row is found. Use
+        :func:`get_compound` for the whole row.
 
     Raises:
         FileNotFoundError: If the LanceDB table does not exist.
@@ -163,10 +209,28 @@ def get_compound_by_name(
         table.search().where(f"LOWER(pref_name) = '{safe.lower()}'").limit(1).to_list()
     )
     if not rows:
+        rows = _search_synonyms(table, safe)
+    if not rows:
         return None
     row = rows[0]
-    row.pop("vector", None)
-    return row
+    # Projected, not the full 75-column row — see COMPOUND_SUMMARY_FIELDS.
+    return {k: row[k] for k in COMPOUND_SUMMARY_FIELDS if row.get(k) is not None}
+
+
+def _search_synonyms(table: Table, safe_name: str) -> list[dict[str, Any]]:
+    """Rows whose ``synonyms`` list contains *safe_name* as a whole entry."""
+    wanted = safe_name.lower()
+    # LIKE narrows 2.8M rows to a handful (~0.1s); the exact check happens here,
+    # because LIKE '%codeine%' also hits "Codeine component of ..." entries.
+    like = wanted.replace("%", "").replace("_", "")
+    candidates: list[dict[str, Any]] = (
+        table.search().where(f"LOWER(synonyms) LIKE '%{like}%'").limit(25).to_list()
+    )
+    return [
+        row
+        for row in candidates
+        if wanted in {s.strip().lower() for s in (row.get("synonyms") or "").split(";")}
+    ]
 
 
 def query_polypharmacy(
@@ -231,10 +295,7 @@ def query_drug_side_effects(
     table: Table = _open_table(lancedb_dir, POLYPHARMACY_TABLE)
     name = drug_name.strip().title()
     rows: list[dict[str, Any]] = (
-        table.search()
-        .where(f"drug_1_name = '{name}' OR drug_2_name = '{name}'")
-        .limit(n)
-        .to_list()
+        table.search().where(f"drug_1_name = '{name}' OR drug_2_name = '{name}'").limit(n).to_list()
     )
     return sorted(rows, key=lambda r: r.get("max_prr", 0), reverse=True)
 
@@ -305,7 +366,11 @@ def _run_sanity_check(lancedb_dir: str = LANCEDB_DIR) -> None:
         print(f"    Found {len(pairs)} pair(s) involving Warfarin")
         if pairs:
             top = pairs[0]
-            partner = top.get("drug_2_name") if top.get("drug_1_name", "").title() == "Warfarin" else top.get("drug_1_name")
+            partner = (
+                top.get("drug_2_name")
+                if top.get("drug_1_name", "").title() == "Warfarin"
+                else top.get("drug_1_name")
+            )
             print(f"    Strongest signal: Warfarin + {partner}  max_prr={top.get('max_prr')}")
             print("    ✓ Drug side-effect query succeeded")
     except FileNotFoundError:

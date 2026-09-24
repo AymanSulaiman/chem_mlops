@@ -19,6 +19,7 @@ from app.scripts.flows.vector_store.query_lancedb import (
     _run_sanity_check,
     _smiles_to_query_vector,
     get_compound,
+    get_compound_by_name,
     query_compounds,
     query_drug_side_effects,
     query_polypharmacy,
@@ -33,14 +34,31 @@ INVALID_SMILES = "not_a_smiles"
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
 
-def _make_record(smiles: str, chembl_id: str, pref_name: str, mw: float) -> dict[str, Any]:
+def _make_record(
+    smiles: str, chembl_id: str, pref_name: str, mw: float, synonyms: str = ""
+) -> dict[str, Any]:
     fp = _FP_GEN.GetFingerprintAsNumPy(Chem.MolFromSmiles(smiles)).astype(np.float32)
     return {
         "chembl_id": chembl_id,
         "pref_name": pref_name,
         "mw_freebase": mw,
         "canonical_smiles": smiles,
+        "synonyms": synonyms,
         "vector": fp.tolist(),
+        "has_structure": True,
+    }
+
+
+def _make_biologic(chembl_id: str, pref_name: str) -> dict[str, Any]:
+    """A drug with no structure — reachable by name, never by similarity."""
+    return {
+        "chembl_id": chembl_id,
+        "pref_name": pref_name,
+        "mw_freebase": None,
+        "canonical_smiles": None,
+        "synonyms": "",
+        "vector": [0.0] * 2048,
+        "has_structure": False,
     }
 
 
@@ -52,7 +70,14 @@ def lancedb_dir(tmp_path: Path) -> str:
     records = [
         _make_record(ASPIRIN_SMILES, "CHEMBL25", "Aspirin", 180.16),
         _make_record(CAFFEINE_SMILES, "CHEMBL113", "Caffeine", 194.19),
-        _make_record(IBUPROFEN_SMILES, "CHEMBL521", "Ibuprofen", 206.29),
+        _make_biologic("CHEMBL999", "Olendalizumab"),
+        _make_record(
+            IBUPROFEN_SMILES,
+            "CHEMBL521",
+            "Ibuprofen",
+            206.29,
+            synonyms="Nurofen; Advil; Ibuprofen component of combogesic",
+        ),
     ]
     db.create_table(COMPOUNDS_TABLE, data=records, mode="overwrite")
     return str(tmp_path)
@@ -332,3 +357,47 @@ class TestQueryDrugSideEffects:
     def test_raises_if_table_missing(self, lancedb_dir: str) -> None:
         with pytest.raises(FileNotFoundError):
             query_drug_side_effects("Warfarin", lancedb_dir=lancedb_dir)
+
+
+# ── get_compound_by_name ──────────────────────────────────────────────────────
+
+
+class TestGetCompoundByName:
+    def test_matches_pref_name_case_insensitively(self, lancedb_dir: str) -> None:
+        record = get_compound_by_name("ASPIRIN", lancedb_dir=lancedb_dir)
+        assert record is not None
+        assert record["chembl_id"] == "CHEMBL25"
+
+    def test_falls_back_to_a_trade_name(self, lancedb_dir: str) -> None:
+        """ChEMBL stores paracetamol as ACETAMINOPHEN; brands live in synonyms."""
+        record = get_compound_by_name("Nurofen", lancedb_dir=lancedb_dir)
+        assert record is not None
+        assert record["pref_name"] == "Ibuprofen"
+
+    def test_synonym_match_is_a_whole_entry_not_a_substring(self, lancedb_dir: str) -> None:
+        # "Ibuprofen component of combogesic" must not make "combogesic" resolve.
+        assert get_compound_by_name("combogesic", lancedb_dir=lancedb_dir) is None
+
+    def test_returns_none_for_an_unknown_name(self, lancedb_dir: str) -> None:
+        assert get_compound_by_name("Notadrug", lancedb_dir=lancedb_dir) is None
+
+
+def test_a_biologic_is_findable_by_name_but_never_by_similarity(lancedb_dir: str) -> None:
+    """The whole point of keeping structureless molecules in the table.
+
+    They carry mechanism, target and indication data the name-lookup tools
+    read; they have no fingerprint, so a zero vector stands in. That vector
+    sits at a fixed distance from every query and would surface as a spurious
+    "similar compound" to an antibody if the search did not filter it out.
+    """
+    found = get_compound_by_name("Olendalizumab", lancedb_dir=lancedb_dir)
+    assert found is not None
+    assert found["chembl_id"] == "CHEMBL999"
+    # has_structure is an internal flag, not part of the summary a model reads.
+    assert "canonical_smiles" not in found
+
+    # Ask for more hits than there are real compounds; the biologic must not
+    # be among them even when the search runs out of genuine matches.
+    hits = query_compounds(ASPIRIN_SMILES, n=10, lancedb_dir=lancedb_dir)
+    assert "CHEMBL999" not in {h["chembl_id"] for h in hits}
+    assert all(h["has_structure"] for h in hits)

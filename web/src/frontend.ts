@@ -1,6 +1,7 @@
 /// <reference lib="dom" />
 import { formatReplyText, renderMarkdown, type ChatResult, type ModelInfo } from "./frontend-helpers";
 import type { ChatMessage } from "./app";
+import { TOOL_SPECS } from "./tools";
 
 function el<T extends HTMLElement>(id: string): T {
   const e = document.getElementById(id);
@@ -12,27 +13,62 @@ const form = el<HTMLFormElement>("chat-form");
 const input = el<HTMLTextAreaElement>("input");
 const btn = el<HTMLButtonElement>("btn");
 const modelLabel = el<HTMLElement>("model-label");
+const messages = el<HTMLElement>("messages");
 
-const containers = {
-  finetuned: el<HTMLElement>("messages-finetuned"),
-  rag: el<HTMLElement>("messages-rag"),
-};
+const history: ChatMessage[] = [];
 
-const histories: Record<"finetuned" | "rag", ChatMessage[]> = { finetuned: [], rag: [] };
+// In-app manual, built from TOOL_SPECS so it cannot drift from the tools that
+// are actually wired up. Each example fills the input, so it is usable as well
+// as readable.
+function renderManual() {
+  const body = el<HTMLElement>("manual-body");
+
+  const intro = document.createElement("p");
+  intro.className = "manual__intro";
+  intro.textContent =
+    "Answers come from the ChEMBL and TWOSIDES databases through tools. " +
+    "When a tool runs you'll see a dashed bubble with the call and what it returned. " +
+    "Structure requests always run a tool; the rest depend on the model choosing to call one.";
+  body.appendChild(intro);
+
+  for (const spec of TOOL_SPECS) {
+    const row = document.createElement("div");
+    row.className = "manual__row";
+
+    const example = document.createElement("button");
+    example.type = "button";
+    example.className = "manual__ask";
+    example.textContent = spec.ask;
+    example.addEventListener("click", () => {
+      input.value = spec.ask;
+      resizeInput();
+      input.focus();
+    });
+
+    const detail = document.createElement("p");
+    detail.className = "manual__detail";
+    detail.textContent = spec.help ?? spec.description;
+
+    const name = document.createElement("code");
+    name.className = "manual__name";
+    name.textContent = spec.name;
+
+    row.append(example, detail, name);
+    body.appendChild(row);
+  }
+}
 
 async function loadModel() {
   try {
     const res = await fetch("/api/model");
     const data = (await res.json()) as ModelInfo;
-    modelLabel.textContent = data.source;
-    el<HTMLElement>("header-finetuned").textContent = `Finetuned — ${data.model}`;
-    el<HTMLElement>("header-rag").textContent = `RAG — ${data.ragModel}`;
+    modelLabel.textContent = `${data.model} · ${data.source}`;
   } catch {
     modelLabel.textContent = "model unavailable";
   }
 }
 
-function addBubble(container: HTMLElement, role: ChatMessage["role"], text?: string) {
+function addBubble(role: "user" | "assistant" | "tool", text?: string) {
   const bubble = document.createElement("div");
   bubble.className = `msg ${role}`;
   if (text) {
@@ -42,17 +78,41 @@ function addBubble(container: HTMLElement, role: ChatMessage["role"], text?: str
   } else {
     bubble.classList.add("thinking");
   }
-  container.appendChild(bubble);
-  container.scrollTop = container.scrollHeight;
+  messages.appendChild(bubble);
+  messages.scrollTop = messages.scrollHeight;
   return bubble;
 }
 
-async function streamInto(
-  res: Response,
-  bubble: HTMLElement,
-  container: HTMLElement,
-  history: ChatMessage[],
-) {
+// A tool call and its result, shown as its own bubble so the lookup is visible.
+function addToolBubble(call: { tool: string; args: unknown }) {
+  const bubble = addBubble("tool", `${call.tool}(${JSON.stringify(call.args)})`);
+  bubble.classList.add("thinking");
+  return bubble;
+}
+
+function fillToolResult(bubble: HTMLElement, payload: { error?: string; result?: unknown }) {
+  bubble.classList.remove("thinking");
+  const image =
+    typeof payload.result === "object" && payload.result !== null
+      ? (payload.result as { image?: string }).image
+      : undefined;
+  const summary = payload.error ?? (image ? "" : JSON.stringify(payload.result));
+  if (summary) {
+    const pre = document.createElement("pre");
+    pre.textContent = summary.length > 600 ? `${summary.slice(0, 600)}…` : summary;
+    bubble.appendChild(pre);
+  }
+  if (image) {
+    const img = document.createElement("img");
+    img.src = image;
+    img.alt = "Rendered molecule";
+    bubble.appendChild(img);
+  }
+  messages.scrollTop = messages.scrollHeight;
+}
+
+// Read the server's NDJSON event stream: tool calls, tool results, final answer.
+async function readEvents(res: Response, bubble: HTMLElement) {
   if (!res.ok) {
     const data = (await res.json()) as ChatResult;
     bubble.classList.remove("thinking");
@@ -60,11 +120,11 @@ async function streamInto(
     return;
   }
 
-  bubble.classList.remove("thinking");
-  let accumulated = "";
   const reader = res.body!.getReader();
   const decoder = new TextDecoder();
   let partial = "";
+  let toolBubble: HTMLElement | null = null;
+  let answer = "";
 
   while (true) {
     const { value, done } = await reader.read();
@@ -74,20 +134,45 @@ async function streamInto(
     partial = lines.pop() ?? "";
     for (const line of lines) {
       if (!line.trim()) continue;
+      let event: {
+        tool?: { tool: string; args: unknown };
+        toolResult?: { tool: string; error?: string; result?: unknown };
+        message?: { content?: string };
+        error?: string;
+      };
       try {
-        const chunk = JSON.parse(line) as { done?: boolean; message?: { content?: string } };
-        if (!chunk.done && chunk.message?.content) {
-          accumulated += chunk.message.content;
-          bubble.textContent = accumulated;
-          container.scrollTop = container.scrollHeight;
-        }
-      } catch {}
+        event = JSON.parse(line);
+      } catch {
+        continue;
+      }
+
+      if (event.tool) {
+        toolBubble = addToolBubble(event.tool);
+      } else if (event.toolResult && toolBubble) {
+        fillToolResult(toolBubble, event.toolResult);
+        toolBubble = null;
+      } else if (event.message?.content !== undefined) {
+        // The answer bubble is created before the tool calls are known, so move
+        // it below them the moment real text starts arriving.
+        if (!answer) messages.appendChild(bubble);
+        // Deltas: plain text while streaming, markdown once the turn is done.
+        answer += event.message.content;
+        bubble.classList.remove("thinking");
+        bubble.textContent = answer;
+      } else if (event.error) {
+        bubble.classList.remove("thinking");
+        bubble.textContent = event.error;
+      }
+      messages.scrollTop = messages.scrollHeight;
     }
   }
 
-  bubble.innerHTML = renderMarkdown(formatReplyText(accumulated));
-  history.push({ role: "assistant", content: accumulated });
-  container.scrollTop = container.scrollHeight;
+  bubble.classList.remove("thinking");
+  if (answer) {
+    bubble.innerHTML = renderMarkdown(formatReplyText(answer));
+    history.push({ role: "assistant", content: answer });
+    messages.scrollTop = messages.scrollHeight;
+  }
 }
 
 function resizeInput() {
@@ -100,36 +185,24 @@ form.addEventListener("submit", async (event: SubmitEvent) => {
   const text = input.value.trim();
   if (!text) return;
 
-  for (const mode of ["finetuned", "rag"] as const) {
-    histories[mode].push({ role: "user", content: text });
-    addBubble(containers[mode], "user", text);
-  }
-
+  history.push({ role: "user", content: text });
+  addBubble("user", text);
   input.value = "";
+  resizeInput();
   btn.disabled = true;
 
-  const bubbles = {
-    finetuned: addBubble(containers.finetuned, "assistant"),
-    rag: addBubble(containers.rag, "assistant"),
-  };
-
-  const [finRes, ragRes] = await Promise.all([
-    fetch("/api/chat", {
+  const bubble = addBubble("assistant");
+  try {
+    const res = await fetch("/api/chat", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ messages: histories.finetuned, mode: "finetuned" }),
-    }),
-    fetch("/api/chat", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ messages: histories.rag, mode: "rag" }),
-    }),
-  ]).catch(err => { throw err; });
-
-  await Promise.allSettled([
-    streamInto(finRes, bubbles.finetuned, containers.finetuned, histories.finetuned),
-    streamInto(ragRes, bubbles.rag, containers.rag, histories.rag),
-  ]);
+      body: JSON.stringify({ messages: history }),
+    });
+    await readEvents(res, bubble);
+  } catch (error) {
+    bubble.classList.remove("thinking");
+    bubble.textContent = error instanceof Error ? error.message : "Chat request failed.";
+  }
 
   btn.disabled = false;
   input.focus();
@@ -143,4 +216,5 @@ input.addEventListener("keydown", (event: KeyboardEvent) => {
 
 input.addEventListener("input", resizeInput);
 resizeInput();
+renderManual();
 loadModel();

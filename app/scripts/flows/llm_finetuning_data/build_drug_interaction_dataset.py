@@ -21,8 +21,14 @@ Pulls ChEMBL tables and emits seventeen categories of training pairs:
   16. Biotherapeutics          — biologics, peptides, and their descriptions
   17. Target relations         — target hierarchy (subset/superset/overlap)
 
+Molecules in the eval holdout (see select_holdout) are excluded from every
+generator, and golden.jsonl is rebuilt from those molecules only — otherwise the
+benchmark just measures memorisation of the training templates.
+
 Output: data/llm_finetune/train.jsonl  (90 %)
         data/llm_finetune/valid.jsonl  (10 %)
+        data/llm_finetune/holdout.json (ChEMBL IDs withheld from both)
+        app/scripts/flows/eval/golden.jsonl (benchmark, holdout molecules only)
 """
 
 import functools
@@ -32,6 +38,7 @@ import random
 from collections.abc import Iterator
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from pathlib import Path
+from typing import Any
 
 import polars as pl
 
@@ -40,12 +47,22 @@ OUTPUT_DIR = Path("data/llm_finetune")
 
 TRAIN_RATIO = 0.9
 RANDOM_SEED = 42
+HOLDOUT_SIZE = 200  # molecules withheld from train/valid so the golden eval is honest
+GOLDEN_SIZE = 40  # golden questions to emit; each one costs an mlx generate call at eval
+HOLDOUT_FILENAME = "holdout.json"
+GOLDEN_PATH = Path(__file__).resolve().parents[1] / "eval" / "golden.jsonl"
 MAX_DDI_PAIRS = 50_000  # raised from 5 K — DDI pairs are the primary focus
 MAX_ASSAY_PAIRS = 5_000  # cap assay-context questions; they dominated the old dataset
 MAX_CYP_INHIBITION_PAIRS = 10_000
 MAX_PD_PAIRS = 20_000
 MAX_PGP_PAIRS = 5_000
 MAX_TWOSIDES_PAIRS = 50_000
+MAX_TOOL_CALL_PAIRS = 15_000  # per tool; see generate_tool_call_qa on the ratio that matters
+# Must match web/src/tools.ts: the header the server puts on a tool result, and
+# the length it truncates results to. Training text and serve-time prompt have
+# to be byte-identical in shape or the fine-tune learns a format it never sees.
+TOOL_RESULT_HEADER = "### Tool result"
+TOOL_RESULT_LIMIT = 2_000
 
 TWOSIDES_PATH = Path("data/twosides/TWOSIDES.parquet")
 # Minimum signal thresholds — PRR >= 3 and at least 5 co-reported cases
@@ -76,6 +93,13 @@ _REQUIRED_TABLES = {
     "protein_classification",
     "biotherapeutics",
     "target_relations",
+    "compound_structures",
+}
+
+# compound_structures.parquet is 2 GB because of the molfile column; the two
+# columns we need are 185 MB. Loading is column-scoped for exactly this reason.
+_TABLE_COLUMNS: dict[str, list[str]] = {
+    "compound_structures": ["molregno", "canonical_smiles"],
 }
 
 
@@ -127,7 +151,7 @@ def load_tables(
         path = data_dir / f"{name}.parquet"
         if not path.exists():
             return name, None
-        return name, pl.read_parquet(path, n_rows=row_limit)
+        return name, pl.read_parquet(path, n_rows=row_limit, columns=_TABLE_COLUMNS.get(name))
 
     tables: dict[str, pl.DataFrame] = {}
     missing: list[str] = []
@@ -188,22 +212,40 @@ def generate_mechanism_qa(
 
         action_phrase = f"{action} of {target_name}" if action else f"modulator of {target_name}"
 
-        yield {
-            "text": (
-                f"### Question\nWhat is the mechanism of action of {drug}?\n\n"
-                f"### Answer\n{drug} ({chembl_id}) acts as a {action_phrase}. "
-                f"{moa}"
-            ).strip()
-        }
+        # Both of these ask for a fact about one specific molecule, so they are
+        # taught as lookups rather than as recall. They used to be prose, and the
+        # model learned exactly that: asked what a held-out drug targets it
+        # answered from memory and was wrong 39 times out of 40, collapsing onto
+        # one frequent training target. The answer was in the vector store the
+        # whole time — get_compound_by_name returns mechanism_targets — but the
+        # model never called it, because nothing had taught it that this
+        # question was a lookup. Keys match the compounds table so the model
+        # reads the field names it is actually handed at serve time.
+        result = {"chembl_id": chembl_id, "pref_name": drug.upper()}
+        if target_name != "an unspecified target":
+            result["mechanism_targets"] = target_name
+        if moa:
+            result["mechanisms"] = moa
+        if action:
+            result["action_types"] = action.upper()
+
+        yield _tool_call_record(
+            f"What is the mechanism of action of {drug}?",
+            "get_compound_by_name",
+            {"name": drug},
+            result,
+            f"{drug} ({chembl_id}) acts as a {action_phrase}. {moa}".strip(),
+        )
 
         if target_name != "an unspecified target":
-            yield {
-                "text": (
-                    f"### Question\nWhat does {drug} target?\n\n"
-                    f"### Answer\n{drug} primarily targets {target_name}. "
-                    f"It acts as a {action if action else 'modulator'} at this target."
-                )
-            }
+            yield _tool_call_record(
+                f"What does {drug} target?",
+                "get_compound_by_name",
+                {"name": drug},
+                result,
+                f"{drug} primarily targets {target_name}. "
+                f"It acts as a {action if action else 'modulator'} at this target.",
+            )
 
 
 def generate_indication_qa(
@@ -1548,11 +1590,78 @@ def generate_pgp_interaction_qa(
 # ---------------------------------------------------------------------------
 
 
+def _twosides_pairs(
+    twosides_path: Path = TWOSIDES_PATH,
+    min_prr: float = TWOSIDES_MIN_PRR,
+    min_cases: int = TWOSIDES_MIN_CASES,
+    max_pairs: int = MAX_TWOSIDES_PAIRS,
+    exclude_names: frozenset[str] = frozenset(),
+) -> pl.DataFrame | None:
+    """Drug pairs with aggregated side effects, strongest PRR signal first.
+
+    Returns ``None`` when TWOSIDES has not been downloaded yet. Shared by the
+    prose generator and the tool-call generator so the two cannot drift apart.
+    """
+    if not twosides_path.exists():
+        return None
+
+    # Read and filter in one pass using Polars lazy evaluation over Parquet.
+    # Explicit casts guard against Parquet files written with all-String schemas
+    # (which Polars infers when schema_overrides was not applied at download time).
+    df = (
+        pl.scan_parquet(twosides_path)
+        .with_columns(
+            [
+                pl.col("PRR").cast(pl.Float32, strict=False),
+                pl.col("A").cast(pl.Int32, strict=False),
+            ]
+        )
+        .filter((pl.col("PRR") >= min_prr) & (pl.col("A") >= min_cases))
+        .select(
+            [
+                pl.col("drug_1_concept_name").str.to_titlecase().alias("drug_1"),
+                pl.col("drug_2_concept_name").str.to_titlecase().alias("drug_2"),
+                pl.col("condition_concept_name").alias("side_effect"),
+                pl.col("PRR"),
+                pl.col("A").alias("cases"),
+            ]
+        )
+        .collect()
+    )
+    assert isinstance(df, pl.DataFrame)
+
+    if exclude_names:
+        # TWOSIDES has no ChEMBL IDs, so the holdout is filtered by name here.
+        names = list(exclude_names)
+        df = df.filter(
+            ~pl.col("drug_1").str.to_lowercase().is_in(names)
+            & ~pl.col("drug_2").str.to_lowercase().is_in(names)
+        )
+
+    # Group by drug pair, aggregate side effects ordered by PRR (strongest first)
+    pairs = (
+        df.sort("PRR", descending=True)
+        .group_by(["drug_1", "drug_2"])
+        .agg(
+            [
+                pl.col("side_effect").str.join("; ").alias("side_effects"),
+                pl.col("PRR").max().alias("max_prr"),
+                pl.col("cases").sum().alias("total_cases"),
+                pl.len().alias("n_effects"),
+            ]
+        )
+        .sort("max_prr", descending=True)
+        .head(max_pairs)
+    )
+    return pairs
+
+
 def generate_twosides_qa(
     twosides_path: Path = TWOSIDES_PATH,
     min_prr: float = TWOSIDES_MIN_PRR,
     min_cases: int = TWOSIDES_MIN_CASES,
     max_pairs: int = MAX_TWOSIDES_PAIRS,
+    exclude_names: frozenset[str] = frozenset(),
 ) -> Iterator[dict]:
     """QA pairs from the TWOSIDES polypharmacy side-effect database.
 
@@ -1564,47 +1673,9 @@ def generate_twosides_qa(
     Yields nothing if TWOSIDES has not been downloaded yet — run
     `python -m app.scripts.flows.llm_finetuning_data.download_twosides` first.
     """
-
-    if not twosides_path.exists():
+    pairs = _twosides_pairs(twosides_path, min_prr, min_cases, max_pairs, exclude_names)
+    if pairs is None:
         return
-
-    # Read and filter in one pass using Polars lazy evaluation over Parquet.
-    # Explicit casts guard against Parquet files written with all-String schemas
-    # (which Polars infers when schema_overrides was not applied at download time).
-    df = (
-        pl.scan_parquet(twosides_path)
-        .with_columns([
-            pl.col("PRR").cast(pl.Float32, strict=False),
-            pl.col("A").cast(pl.Int32, strict=False),
-        ])
-        .filter(
-            (pl.col("PRR") >= min_prr)
-            & (pl.col("A") >= min_cases)
-        )
-        .select([
-            pl.col("drug_1_concept_name").str.to_titlecase().alias("drug_1"),
-            pl.col("drug_2_concept_name").str.to_titlecase().alias("drug_2"),
-            pl.col("condition_concept_name").alias("side_effect"),
-            pl.col("PRR"),
-            pl.col("A").alias("cases"),
-        ])
-        .collect()
-    )
-    assert isinstance(df, pl.DataFrame)
-
-    # Group by drug pair, aggregate side effects ordered by PRR (strongest first)
-    pairs = (
-        df.sort("PRR", descending=True)
-        .group_by(["drug_1", "drug_2"])
-        .agg([
-            pl.col("side_effect").str.join("; ").alias("side_effects"),
-            pl.col("PRR").max().alias("max_prr"),
-            pl.col("cases").sum().alias("total_cases"),
-            pl.len().alias("n_effects"),
-        ])
-        .sort("max_prr", descending=True)
-        .head(max_pairs)
-    )
 
     templates = [
         lambda d1, d2, se, prr, n: (
@@ -1613,21 +1684,21 @@ def generate_twosides_qa(
             f"together has been associated with a disproportionate reporting of {n} adverse effect(s): "
             f"{se}. The strongest signal has a Proportional Reporting Ratio (PRR) of {prr:.1f}, "
             f"indicating these effects occur more frequently with this drug combination than with "
-            f"either drug alone."
+            f"either drug alone.",
         ),
         lambda d1, d2, se, prr, n: (
             f"What adverse effects are associated with combining {d1} and {d2}?",
             f"Post-marketing pharmacovigilance data (TWOSIDES/FAERS) shows that the combination "
             f"of {d1} and {d2} is associated with the following adverse effects: {se}. "
             f"These signals are based on disproportionate co-reporting in the FDA adverse event "
-            f"database (max PRR: {prr:.1f})."
+            f"database (max PRR: {prr:.1f}).",
         ),
         lambda d1, d2, se, prr, n: (
             f"What does FDA adverse event data show about taking {d1} with {d2}?",
             f"FDA FAERS data analysed in the TWOSIDES database shows a disproportionate reporting "
             f"of {n} adverse effect(s) when {d1} and {d2} are co-administered: {se}. "
             f"A PRR of {prr:.1f} for the strongest signal suggests this combination warrants "
-            f"clinical attention."
+            f"clinical attention.",
         ),
     ]
 
@@ -1649,6 +1720,187 @@ def generate_twosides_qa(
             yield {"text": f"### Question\n{question}\n\n### Answer\n{answer}"}
 
 
+def _tool_call_record(
+    question: str,
+    tool: str,
+    args: dict[str, Any],
+    result: Any,
+    answer: str,
+) -> dict:
+    """One record covering both turns of a tool call: the call, then the answer.
+
+    The layout is exactly what the model sees at inference. Ollama's Modelfile
+    template wraps every user message in ``### Question`` / ``### Answer``, and
+    the server sends the tool result as a user message that starts with
+    ``### Tool result (<tool>)`` — so the result block appears *inside* a
+    question block. Odd to read, but copying it verbatim is the whole point:
+    train-serve mismatch is why prompted tool calling fails on this model.
+    """
+    call = json.dumps({"tool": tool, "args": args})
+    body = json.dumps(result, default=str)[:TOOL_RESULT_LIMIT]
+    return {
+        "text": (
+            f"### Question\n{question}\n\n"
+            f"### Answer\n{call}\n\n"
+            f"### Question\n{TOOL_RESULT_HEADER} ({tool})\n{body}\n\n"
+            f"### Answer\n{answer}"
+        )
+    }
+
+
+def generate_tool_call_qa(
+    molecule_dict: pl.DataFrame,
+    compound_properties: pl.DataFrame,
+    compound_structures: pl.DataFrame | None = None,
+    twosides_path: Path = TWOSIDES_PATH,
+    max_pairs: int = MAX_TOOL_CALL_PAIRS,
+    exclude_names: frozenset[str] = frozenset(),
+) -> Iterator[dict]:
+    """Teach the model to call the web app's tools instead of answering from memory.
+
+    Covers four of the five tools in `app/scripts/flows/vector_store/tools.py`.
+    `query_compounds` is left out on purpose: a similarity search needs a SMILES
+    the model does not know, so a truthful example would be a two-hop chain whose
+    second tool result cannot be produced without querying the vector store.
+
+    **The ratio is what decides whether this works.** Every other generator maps
+    "What is the molecular weight of X?" to prose, and there are ~900 K of those.
+    These examples map the same question shape to a tool call. If the fine-tune
+    still answers from memory after a run, the fix is not more tool examples but
+    fewer competing prose ones — convert or downsample the compound-fact and
+    polypharmacy categories rather than raising `max_pairs` alone.
+    """
+    props = {
+        row["molregno"]: row
+        for row in compound_properties.select(
+            ["molregno", "full_mwt", "full_molformula", "alogp"]
+        ).to_dicts()
+    }
+    smiles_by_molregno: dict[int, str] = {}
+    if compound_structures is not None:
+        smiles_by_molregno = {
+            row["molregno"]: row["canonical_smiles"]
+            for row in compound_structures.select(["molregno", "canonical_smiles"]).to_dicts()
+            if row.get("canonical_smiles")
+        }
+
+    lookup_questions = [
+        "What is the molecular weight of {drug}?",
+        "Look up {drug} in ChEMBL.",
+        "What is the ChEMBL ID for {drug}?",
+    ]
+    draw_questions = [
+        "Draw {drug}.",
+        "Show me the structure of {drug}.",
+        "What does {drug} look like?",
+    ]
+
+    emitted_lookup = 0
+    emitted_draw = 0
+    for mol in _mol_lookup(molecule_dict).values():
+        if emitted_lookup >= max_pairs and emitted_draw >= max_pairs:
+            break
+
+        drug = _drug_name(mol)
+        chembl_id = mol.get("chembl_id") or ""
+        # _drug_name falls back to the ChEMBL ID; asking to look up an ID by name
+        # teaches a lookup that fails at inference.
+        if not chembl_id or drug == chembl_id or drug.lower() in exclude_names:
+            continue
+
+        prop = props.get(mol["molregno"], {})
+        mw = prop.get("full_mwt")
+        formula = prop.get("full_molformula")
+
+        if mw is not None and emitted_lookup < max_pairs:
+            result = {"chembl_id": chembl_id, "pref_name": drug.upper(), "mw_freebase": mw}
+            if formula:
+                result["full_molformula"] = formula
+            if prop.get("alogp") is not None:
+                result["alogp"] = prop["alogp"]
+            answer = f"{drug} is {chembl_id} in ChEMBL, with a molecular weight of {mw:.2f}." + (
+                f" Its molecular formula is {formula}." if formula else ""
+            )
+            question = lookup_questions[emitted_lookup % len(lookup_questions)]
+            yield _tool_call_record(
+                question.format(drug=drug),
+                "get_compound_by_name",
+                {"name": drug},
+                result,
+                answer,
+            )
+            emitted_lookup += 1
+
+        smiles = smiles_by_molregno.get(mol["molregno"])
+        if smiles and emitted_draw < max_pairs:
+            # The name is the argument, never the SMILES: a model that invents
+            # SMILES draws a molecule that parses and is wrong.
+            result = {
+                "smiles": smiles,
+                "source": "ChEMBL",
+                "chembl_id": chembl_id,
+                "pref_name": drug.upper(),
+                "image": "the picture is already displayed to the user",
+            }
+            # The answer below quotes the formula, so the tool result has to
+            # contain it — an answer citing a fact the result lacks is a worked
+            # example of hallucination.
+            if formula:
+                result["full_molformula"] = formula
+            answer = (
+                f"The structure of {drug} ({chembl_id}) is shown above. "
+                f"Its canonical SMILES is {smiles}."
+                + (f" Molecular formula: {formula}." if formula else "")
+            )
+            question = draw_questions[emitted_draw % len(draw_questions)]
+            yield _tool_call_record(
+                question.format(drug=drug),
+                "draw_molecule",
+                {"name": drug},
+                result,
+                answer,
+            )
+            emitted_draw += 1
+
+    pairs = _twosides_pairs(twosides_path, max_pairs=max_pairs, exclude_names=exclude_names)
+    if pairs is None:
+        return
+
+    for row in pairs.iter_rows(named=True):
+        d1, d2 = row["drug_1"], row["drug_2"]
+        effects = row["side_effects"]
+        prr = row["max_prr"]
+        top = effects.split(";")[0].strip()
+
+        pair_result = {
+            "drug_1_name": d1,
+            "drug_2_name": d2,
+            "side_effects": effects,
+            "max_prr": prr,
+            "total_cases": row["total_cases"],
+            "n_side_effects": row["n_effects"],
+        }
+        yield _tool_call_record(
+            f"Is it safe to take {d1} with {d2}?",
+            "query_polypharmacy",
+            {"drug_1": d1, "drug_2": d2},
+            pair_result,
+            f"TWOSIDES reports {row['n_effects']} adverse effect(s) for {d1} with {d2}, "
+            f"the strongest being {top} (PRR {prr:.1f}, {row['total_cases']} cases). "
+            f"Full list: {effects}.",
+        )
+
+        # One drug, many partners — the other polypharmacy tool.
+        yield _tool_call_record(
+            f"Which drugs interact with {d1}?",
+            "query_drug_side_effects",
+            {"drug_name": d1, "n": 10},
+            [pair_result],
+            f"The strongest reported interaction for {d1} in TWOSIDES is with {d2}: "
+            f"{top} (PRR {prr:.1f}).",
+        )
+
+
 def generate_canonical_drug_facts_qa() -> Iterator[dict]:
     """Curated high-precision QA for well-known drugs, repeated to counter noisy ChEMBL data.
 
@@ -1657,10 +1909,10 @@ def generate_canonical_drug_facts_qa() -> Iterator[dict]:
     FDA labeling / pharmacology text as the ground truth and are repeated CANONICAL_REPEAT
     times so they constitute a meaningful fraction of the training corpus.
 
-    Each failing golden benchmark question has 10+ unique phrasings here so the model sees
-    the correct answer in many syntactic contexts.
+    Each drug has 10+ unique phrasings here so the model sees the correct answer in many
+    syntactic contexts. These drugs are never held out for eval (see select_holdout) —
+    curating their answers is training, and scoring the model on them would be circular.
     """
-    # Each answer block is written to always contain the golden-benchmark keyword(s).
     _ASPIRIN = (
         "Aspirin (acetylsalicylic acid) irreversibly inhibits cyclooxygenase enzymes — "
         "COX-1 (cyclooxygenase-1) and COX-2 (cyclooxygenase-2). "
@@ -2063,6 +2315,93 @@ def write_jsonl_splits(
 
 
 # ---------------------------------------------------------------------------
+# Eval holdout — keeps golden.jsonl out of the training set
+# ---------------------------------------------------------------------------
+
+
+def select_holdout(
+    molecule_dict: pl.DataFrame,
+    drug_mechanism: pl.DataFrame | None,
+    size: int = HOLDOUT_SIZE,
+    seed: int = RANDOM_SEED,
+) -> list[str]:
+    """Pick ChEMBL IDs to withhold from train/valid so the golden benchmark is honest.
+
+    A candidate needs a real preferred name and a mechanism-of-action row (otherwise
+    there is nothing to ask it about), and must not be one of the drugs hardcoded in
+    generate_canonical_drug_facts_qa — those are deliberate training data.
+    """
+    if drug_mechanism is None or drug_mechanism.is_empty():
+        return []
+
+    with_moa = {int(m) for m in drug_mechanism["molregno"].to_list() if m is not None}
+    # The 20 repeats collapse to the unique pairs, so this blob stays small.
+    canonical = "\n".join({r["text"] for r in generate_canonical_drug_facts_qa()}).lower()
+
+    candidates = sorted(  # sorted first: parquet row order must not change the split
+        mol["chembl_id"]
+        for mol in _mol_lookup(molecule_dict).values()
+        if mol["molregno"] in with_moa
+        and mol.get("chembl_id")
+        and _drug_name(mol) != mol["chembl_id"]
+        and _drug_name(mol).lower() not in canonical
+    )
+    random.Random(seed).shuffle(candidates)
+    return candidates[:size]
+
+
+def exclude_holdout(molecule_dict: pl.DataFrame, holdout_ids: list[str]) -> pl.DataFrame:
+    """Drop holdout molecules from the lookup every molregno-keyed generator builds on."""
+    if not holdout_ids:
+        return molecule_dict
+    return molecule_dict.filter(~pl.col("chembl_id").is_in(holdout_ids))
+
+
+def build_golden_benchmark(
+    molecule_dict: pl.DataFrame,
+    drug_mechanism: pl.DataFrame,
+    target_dict: pl.DataFrame,
+    holdout_ids: list[str],
+    golden_path: Path = GOLDEN_PATH,
+    limit: int = GOLDEN_SIZE,
+) -> int:
+    """Rebuild golden.jsonl from holdout molecules only; returns the question count."""
+    targets = {int(r["tid"]): r for r in target_dict.to_dicts() if r.get("tid") is not None}
+    moa: dict[int, dict] = {}
+    for row in drug_mechanism.to_dicts():
+        molregno = row.get("molregno")
+        if molregno is not None:
+            moa.setdefault(int(molregno), row)
+
+    by_chembl = {m["chembl_id"]: m for m in _mol_lookup(molecule_dict).values()}
+    items: list[dict] = []
+
+    for chembl_id in holdout_ids:
+        mol = by_chembl.get(chembl_id)
+        row = moa.get(int(mol["molregno"])) if mol else None
+        tid = row.get("tid") if row else None
+        target_name = (targets.get(int(tid)) or {}).get("pref_name") if tid is not None else None
+        if not mol or not target_name:
+            continue
+        items.append(
+            {
+                "question": f"What does {_drug_name(mol)} target?",
+                "must_contain": [target_name.lower()],
+                "category": "mechanism_of_action",
+                "chembl_id": chembl_id,
+                # The tool-call benchmark composes its own questions from this name.
+                "drug": _drug_name(mol),
+            }
+        )
+        if len(items) >= limit:
+            break
+
+    golden_path.parent.mkdir(parents=True, exist_ok=True)
+    golden_path.write_text("\n".join(json.dumps(i) for i in items) + "\n")
+    return len(items)
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -2072,6 +2411,8 @@ def build_drug_interaction_dataset(
     output_dir: Path = OUTPUT_DIR,
     row_limit: int | None = None,
     workers: int = os.cpu_count() or 1,
+    golden_path: Path = GOLDEN_PATH,
+    holdout_size: int = HOLDOUT_SIZE,
 ) -> None:
     """
     Build QA-formatted JSONL training data for a drug-interaction chatbot.
@@ -2086,6 +2427,8 @@ def build_drug_interaction_dataset(
         row_limit:  Cap every table at this many rows on load.
         workers:    Number of parallel generator processes (default: all CPUs).
                     Pass 1 to disable multiprocessing (useful for debugging).
+        golden_path:  Where to write the rebuilt golden benchmark.
+        holdout_size: Molecules to withhold from train/valid (0 disables the holdout).
     """
     print("Loading ChEMBL tables...")
     tables = load_tables(data_dir, row_limit=row_limit)
@@ -2093,6 +2436,16 @@ def build_drug_interaction_dataset(
     mol = tables.get("molecule_dictionary")
     if mol is None:
         raise RuntimeError("molecule_dictionary table is required but not found")
+
+    holdout_ids = select_holdout(mol, tables.get("drug_mechanism"), size=holdout_size)
+    holdout_names = frozenset(
+        _drug_name(m).lower()
+        for m in _mol_lookup(mol).values()
+        if m["chembl_id"] in set(holdout_ids)
+    )
+    print(f"Eval holdout: {len(holdout_ids)} molecules withheld from train/valid")
+    mol_all = mol
+    mol = exclude_holdout(mol, holdout_ids)
 
     compound_records = tables.get("compound_records")
     _cr: pl.DataFrame = compound_records if compound_records is not None else pl.DataFrame()
@@ -2108,6 +2461,19 @@ def build_drug_interaction_dataset(
             "greetings & capabilities",
             functools.partial(generate_greeting_qa),
             True,
+        ),
+        (
+            "tool calls",
+            functools.partial(
+                generate_tool_call_qa,
+                mol,
+                tables["compound_properties"],
+                tables.get("compound_structures"),
+                exclude_names=holdout_names,
+            )
+            if "compound_properties" in tables
+            else functools.partial(generate_greeting_qa),
+            "compound_properties" in tables,
         ),
         (
             "mechanism-of-action",
@@ -2306,7 +2672,7 @@ def build_drug_interaction_dataset(
         ),
         (
             "polypharmacy side effects (TWOSIDES)",
-            functools.partial(generate_twosides_qa),
+            functools.partial(generate_twosides_qa, exclude_names=holdout_names),
             TWOSIDES_PATH.exists(),
         ),
     ]
@@ -2342,6 +2708,19 @@ def build_drug_interaction_dataset(
     print(f"  train.jsonl : {n_train:,} records")
     print(f"  valid.jsonl : {n_valid:,} records")
 
+    (output_dir / HOLDOUT_FILENAME).write_text(json.dumps(holdout_ids, indent=2) + "\n")
+    print(f"  {HOLDOUT_FILENAME} : {len(holdout_ids):,} ChEMBL IDs")
+
+    if holdout_ids and "drug_mechanism" in tables and "target_dictionary" in tables:
+        n_golden = build_golden_benchmark(
+            mol_all,
+            tables["drug_mechanism"],
+            tables["target_dictionary"],
+            holdout_ids,
+            golden_path=golden_path,
+        )
+        print(f"  {golden_path} : {n_golden:,} golden questions")
+
 
 if __name__ == "__main__":
     import argparse
@@ -2376,10 +2755,25 @@ if __name__ == "__main__":
         metavar="N",
         help="Number of parallel generator processes (default: %(default)s). Use 1 to disable.",
     )
+    parser.add_argument(
+        "--golden-path",
+        type=Path,
+        default=GOLDEN_PATH,
+        help="Where to write the rebuilt golden benchmark (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--holdout-size",
+        type=int,
+        default=HOLDOUT_SIZE,
+        metavar="N",
+        help="Molecules withheld from train/valid, 0 to disable (default: %(default)s)",
+    )
     args = parser.parse_args()
     build_drug_interaction_dataset(
         data_dir=args.data_dir,
         output_dir=args.output_dir,
         row_limit=args.row_limit,
         workers=args.workers,
+        golden_path=args.golden_path,
+        holdout_size=args.holdout_size,
     )

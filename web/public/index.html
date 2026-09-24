@@ -13,21 +13,19 @@
         <p id="model-label">Loading model...</p>
       </header>
 
-      <div class="chat-grid">
-        <div class="pane">
-          <div class="pane__header" id="header-finetuned">Finetuned</div>
-          <section id="messages-finetuned" class="messages" aria-live="polite" aria-label="Finetuned chat messages"></section>
-        </div>
-        <div class="pane">
-          <div class="pane__header" id="header-rag">RAG</div>
-          <section id="messages-rag" class="messages" aria-live="polite" aria-label="RAG chat messages"></section>
-        </div>
+      <details class="manual">
+        <summary>What can I ask?</summary>
+        <div class="manual__body" id="manual-body"></div>
+      </details>
+
+      <div class="pane">
+        <section id="messages" class="messages" aria-live="polite" aria-label="Chat messages"></section>
       </div>
 
       <form id="chat-form" class="input-row">
         <textarea
           id="input"
-          placeholder="Message both models..."
+          placeholder="Ask about a drug, an interaction, or a structure..."
           rows="2"
           aria-label="Chat message"
         ></textarea>

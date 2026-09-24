@@ -75,7 +75,9 @@ class TestIngestTwosidesSuccess:
         db = lancedb.connect(str(lancedb_dir / "chembl_CHEMBL_36"))
         assert POLYPHARMACY_TABLE in db.list_tables().tables
 
-    def test_aggregates_side_effects_per_pair(self, twosides_parquet: Path, lancedb_dir: Path) -> None:
+    def test_aggregates_side_effects_per_pair(
+        self, twosides_parquet: Path, lancedb_dir: Path
+    ) -> None:
         ingest_twosides_to_lancedb(twosides_path=twosides_parquet, lancedb_dir=lancedb_dir)
         db = lancedb.connect(str(lancedb_dir / "chembl_CHEMBL_36"))
         rows = db.open_table(POLYPHARMACY_TABLE).search().to_list()

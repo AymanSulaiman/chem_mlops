@@ -1,5 +1,4 @@
 import { createChatRequestHandler } from "./src/app";
-import { DEFAULT_LANCEDB_DIR } from "./src/rag";
 
 const PORT = Number(Bun.env.PORT ?? 3000);
 const FRONTEND_ENTRY = "./src/frontend.ts";
@@ -14,10 +13,10 @@ await Bun.build({
 // Serve the web app, the compiled frontend bundle, and the Ollama-backed API.
 Bun.serve({
   port: PORT,
-  fetch: createChatRequestHandler({
-    ragModelName: Bun.env.RAG_MODEL_NAME ?? "gemma3:1b",
-    ragLancedbDir: Bun.env.LANCEDB_DIR ?? DEFAULT_LANCEDB_DIR,
-  }),
+  // A tool loop makes several model calls before the answer; the 10s default
+  // cuts the response off mid-stream. 255s is Bun's maximum.
+  idleTimeout: 255,
+  fetch: createChatRequestHandler(),
 });
 
 console.log(`Server running at http://localhost:${PORT}`);

@@ -2,7 +2,10 @@
 
 import json
 import math
+import re
+import types
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -28,6 +31,7 @@ def _gen_output(text: str) -> MagicMock:
     m = MagicMock()
     m.stdout = text
     m.stderr = ""
+    m.returncode = 0  # a MagicMock here reads as a crash to _generate
     return m
 
 
@@ -204,6 +208,28 @@ class TestEvalFlow:
         _write_golden(golden, [{"question": "Q?", "must_contain": ["x"], "category": "test"}])
         return golden
 
+    @pytest.fixture(autouse=True)
+    def _stub_tool_results(self) -> Any:
+        """The tool-result benchmark is not what these tests measure."""
+        with patch(
+            f"{_EVAL_PATCH}.run_tool_result_benchmark",
+            return_value={"total": 4, "grounded_rate": 1.0, "prose_rate": 1.0, "results": []},
+        ) as stub:
+            yield stub
+
+    def _tools(self, parse_rate: float = 1.0) -> Any:
+        """Stub the tool-call benchmark — it is the gate, so it must be explicit."""
+        return patch(
+            f"{_EVAL_PATCH}.run_tool_call_benchmark",
+            return_value={
+                "total": 4,
+                "parse_rate": parse_rate,
+                "known_rate": parse_rate,
+                "correct_rate": parse_rate,
+                "results": [],
+            },
+        )
+
     def test_writes_metrics_json_on_success(self, tmp_path: Path) -> None:
         run_dir = self._make_run_dir(tmp_path)
         golden = self._make_golden(tmp_path)
@@ -215,6 +241,7 @@ class TestEvalFlow:
                 f"{_EVAL_PATCH}.run_golden_benchmark",
                 return_value={"pass_count": 1, "total": 1, "pass_rate": 1.0, "results": []},
             ),
+            self._tools(),
         ):
             eval_flow(run_dir, golden_path=golden, eval_output_dir=eval_out)
 
@@ -234,6 +261,7 @@ class TestEvalFlow:
                 f"{_EVAL_PATCH}.run_golden_benchmark",
                 return_value={"pass_count": 1, "total": 1, "pass_rate": 1.0, "results": []},
             ),
+            self._tools(),
         ):
             metrics = eval_flow(run_dir, golden_path=golden, eval_output_dir=tmp_path / "eval")
 
@@ -250,11 +278,19 @@ class TestEvalFlow:
                 f"{_EVAL_PATCH}.run_golden_benchmark",
                 return_value={"pass_count": 1, "total": 1, "pass_rate": 1.0, "results": []},
             ),
+            self._tools(),
         ):
             with pytest.raises(RuntimeError, match="Perplexity regression"):
                 eval_flow(run_dir, golden_path=golden, eval_output_dir=tmp_path / "eval")
 
-    def test_raises_on_low_golden_pass_rate(self, tmp_path: Path) -> None:
+    def test_low_golden_pass_rate_blocks_the_export(self, tmp_path: Path) -> None:
+        """Golden gates again, now that it runs through the agent loop.
+
+        It was demoted when it scored the bare model on a lookup question, an
+        unpassable bar. Through the agent that question is ordinary, and this is
+        the only gate on answer quality: perplexity and the tool-call rate would
+        both pass a model that routes perfectly then writes nonsense.
+        """
         run_dir = self._make_run_dir(tmp_path)
         golden = self._make_golden(tmp_path)
 
@@ -265,14 +301,65 @@ class TestEvalFlow:
                 return_value={
                     "pass_count": 5,
                     "total": 20,
-                    "pass_rate": 0.25,  # below 0.70 threshold
+                    "pass_rate": 0.25,  # far below the reported 0.70
                     "results": [],
                 },
             ),
+            self._tools(),
         ):
-            with pytest.raises(RuntimeError, match="below threshold"):
-                eval_flow(run_dir, golden_path=golden, pass_threshold=0.70,
-                          eval_output_dir=tmp_path / "eval")
+            with pytest.raises(RuntimeError, match="Golden benchmark"):
+                eval_flow(
+                    run_dir,
+                    golden_path=golden,
+                    pass_threshold=0.70,
+                    eval_output_dir=tmp_path / "eval",
+                )
+
+    def test_golden_can_be_measured_without_gating(self, tmp_path: Path) -> None:
+        """A threshold of 0 cannot fire — how an intermediate adapter is scored.
+
+        The pipeline evaluates the base run this way: it carries tool records at
+        ~6% of its mix and is not expected to clear a lookup-dependent bar, and
+        blocking on a model nobody ships is the original mistake.
+        """
+        run_dir = self._make_run_dir(tmp_path)
+        golden = self._make_golden(tmp_path)
+
+        with (
+            patch(f"{_EVAL_PATCH}.run_perplexity_eval", side_effect=[6.0, 4.0]),
+            patch(
+                f"{_EVAL_PATCH}.run_golden_benchmark",
+                return_value={"pass_count": 5, "total": 20, "pass_rate": 0.25, "results": []},
+            ),
+            self._tools(),
+        ):
+            metrics = eval_flow(
+                run_dir,
+                golden_path=golden,
+                pass_threshold=0.0,
+                eval_output_dir=tmp_path / "eval",
+            )
+
+        assert metrics["eval_gate_passed"] is True
+        assert metrics["golden_pass_rate"] == 0.25
+        assert metrics["golden_gated"] is False
+        assert "golden_pass_rate" in metrics["ungated_metrics"]
+
+    def test_raises_on_low_tool_call_parse_rate(self, tmp_path: Path) -> None:
+        """A model that cannot emit a usable tool call cannot answer a lookup."""
+        run_dir = self._make_run_dir(tmp_path)
+        golden = self._make_golden(tmp_path)
+
+        with (
+            patch(f"{_EVAL_PATCH}.run_perplexity_eval", side_effect=[6.0, 4.0]),
+            patch(
+                f"{_EVAL_PATCH}.run_golden_benchmark",
+                return_value={"pass_count": 1, "total": 1, "pass_rate": 1.0, "results": []},
+            ),
+            self._tools(parse_rate=0.1),
+        ):
+            with pytest.raises(RuntimeError, match="Tool-call parse rate"):
+                eval_flow(run_dir, golden_path=golden, eval_output_dir=tmp_path / "eval")
 
     def test_metrics_json_written_even_on_failure(self, tmp_path: Path) -> None:
         run_dir = self._make_run_dir(tmp_path)
@@ -285,6 +372,7 @@ class TestEvalFlow:
                 f"{_EVAL_PATCH}.run_golden_benchmark",
                 return_value={"pass_count": 0, "total": 1, "pass_rate": 0.0, "results": []},
             ),
+            self._tools(),
         ):
             with pytest.raises(RuntimeError):
                 eval_flow(run_dir, golden_path=golden, eval_output_dir=eval_out)
@@ -311,6 +399,7 @@ class TestEvalFlow:
                     "results": fake_results,
                 },
             ),
+            self._tools(),
         ):
             eval_flow(run_dir, golden_path=golden, eval_output_dir=eval_out)
 
@@ -330,9 +419,11 @@ class TestEvalFlow:
                 f"{_EVAL_PATCH}.run_golden_benchmark",
                 return_value={"pass_count": 6, "total": 10, "pass_rate": 0.60, "results": []},
             ),
+            self._tools(),
         ):
-            metrics = eval_flow(run_dir, golden_path=golden, pass_threshold=0.50,
-                                eval_output_dir=tmp_path / "eval")
+            metrics = eval_flow(
+                run_dir, golden_path=golden, pass_threshold=0.50, eval_output_dir=tmp_path / "eval"
+            )
 
         assert metrics["eval_gate_passed"] is True
 
@@ -364,3 +455,310 @@ class TestGoldenJsonl:
     def test_golden_file_has_at_least_20_questions(self) -> None:
         lines = [ln for ln in GOLDEN_BENCHMARK_PATH.read_text().splitlines() if ln.strip()]
         assert len(lines) >= 20
+
+
+TRAIN_PATH = Path("data/llm_finetune/train.jsonl")
+
+
+@pytest.mark.skipif(not TRAIN_PATH.exists(), reason="train.jsonl not built in this checkout")
+def test_no_golden_molecule_appears_in_train() -> None:
+    """Acceptance criterion for the eval holdout: golden.jsonl must be unseen data.
+
+    Skipped where the dataset has not been built. Rebuild both together with
+    `python -m app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset`.
+    """
+    # Whole IDs only: a substring check reports CHEMBL413 as leaked because
+    # CHEMBL413552 — a different molecule — appears in the training text.
+    train_ids = set(re.findall(r"CHEMBL\d+", TRAIN_PATH.read_text()))
+    items = [json.loads(ln) for ln in GOLDEN_BENCHMARK_PATH.read_text().splitlines() if ln.strip()]
+    for item in items:
+        chembl_id = item.get("chembl_id")
+        assert chembl_id, (
+            f"golden entry {item['question']!r} has no chembl_id — rebuild golden.jsonl"
+        )
+        assert chembl_id not in train_ids, (
+            f"{chembl_id} ({item['question']!r}) leaked into train.jsonl"
+        )
+
+
+# ── Tool-call benchmark ───────────────────────────────────────────────────────
+
+
+class TestToolCallBenchmark:
+    @staticmethod
+    def _golden(tmp_path: Path, drugs: list[str]) -> Path:
+        path = tmp_path / "golden.jsonl"
+        path.write_text(
+            "\n".join(
+                json.dumps(
+                    {
+                        "question": f"What does {d} target?",
+                        "must_contain": ["x"],
+                        "category": "mechanism_of_action",
+                        "chembl_id": f"CHEMBL{i}",
+                        "drug": d,
+                    }
+                )
+                for i, d in enumerate(drugs)
+            )
+            + "\n"
+        )
+        return path
+
+    def test_first_json_object_digs_the_call_out_of_prose(self) -> None:
+        from app.scripts.flows.eval.eval_finetuned_model import _first_json_object
+
+        assert _first_json_object(
+            'Sure! {"tool": "draw_molecule", "args": {"name": "X"}} done'
+        ) == {
+            "tool": "draw_molecule",
+            "args": {"name": "X"},
+        }
+        assert _first_json_object('```json\n{"tool": "a"}\n```') == {"tool": "a"}
+        assert _first_json_object("no json here") is None
+        assert _first_json_object('{"unterminated": ') is None
+
+    def test_holdout_drugs_reads_new_and_old_golden_files(self, tmp_path: Path) -> None:
+        from app.scripts.flows.eval.eval_finetuned_model import _holdout_drugs
+
+        assert _holdout_drugs(self._golden(tmp_path, ["SIROLIMUS", "BRECANAVIR"]), 10) == [
+            "SIROLIMUS",
+            "BRECANAVIR",
+        ]
+
+        # A golden.jsonl written before the "drug" field existed.
+        old = tmp_path / "old.jsonl"
+        old.write_text(json.dumps({"question": "What does ASPIRIN target?"}) + "\n")
+        assert _holdout_drugs(old, 10) == ["ASPIRIN"]
+
+    def test_rates_separate_parsing_naming_and_routing(self, tmp_path: Path) -> None:
+        """The three rates fail independently — that is the point of having three."""
+        from app.scripts.flows.eval.eval_finetuned_model import TOOL_CASES, run_tool_call_benchmark
+
+        replies = [
+            '{"tool": "get_compound_by_name", "args": {"name": "SIROLIMUS"}}',  # correct
+            '{"tool": "draw_it_now", "args": {"name": "SIROLIMUS"}}',  # parses, unknown tool
+            '{"tool": "get_compound_by_name", "args": {"name": "SIROLIMUS"}}',  # known, wrong tool
+            "Sirolimus interacts with many drugs.",  # no JSON at all
+        ]
+        assert len(replies) == len(TOOL_CASES)
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.side_effect = [
+                types.SimpleNamespace(stdout=r, stderr="", returncode=0) for r in replies
+            ]
+            report = run_tool_call_benchmark(
+                Path("mlx"), Path("adapter"), self._golden(tmp_path, ["SIROLIMUS"]), drugs=1
+            )
+
+        assert report["total"] == 4
+        assert report["parse_rate"] == 0.75  # three replies contained JSON
+        assert report["known_rate"] == 0.5  # one named a tool that does not exist
+        assert report["correct_rate"] == 0.25  # only the first was the right tool
+        assert report["results"][1]["called_tool"] == "draw_it_now"
+
+    def test_prompt_advertises_every_tool_except_the_untrained_one(self) -> None:
+        """Guard against drift from web/src/tools.ts and the tool registry.
+
+        query_compounds is callable but not advertised: it has no training
+        records, and listing it made the model copy its example SMILES verbatim
+        for unrelated questions. Keep it out of the prompt until it is trained.
+        """
+        from app.scripts.flows.eval.eval_finetuned_model import TOOL_SYSTEM_PROMPT
+        from app.scripts.flows.vector_store.tools import TOOLS
+
+        advertised = {
+            line.split()[1] for line in TOOL_SYSTEM_PROMPT.splitlines() if line.startswith("- ")
+        }
+        assert advertised == set(TOOLS) - {"query_compounds"}
+        assert "query_compounds" in TOOLS  # still dispatchable
+
+
+def test_metrics_name_what_was_gated(tmp_path: Path) -> None:
+    """eval_gate_passed must not read as "every number is good".
+
+    Some numbers gate and some are only recorded, so a bare pass flag with
+    nothing naming which is which would misrepresent the run to anyone skimming.
+    """
+    run_dir = tmp_path / "20260615_120000"
+    (run_dir / DEFAULT_MLX_SUBDIR).mkdir(parents=True)
+    (run_dir / DEFAULT_ADAPTER_SUBDIR).mkdir(parents=True)
+    golden = tmp_path / "golden.jsonl"
+    _write_golden(golden, [{"question": "Q?", "must_contain": ["x"], "category": "test"}])
+
+    with (
+        patch(f"{_EVAL_PATCH}.run_perplexity_eval", side_effect=[6.0, 4.0]),
+        patch(
+            f"{_EVAL_PATCH}.run_golden_benchmark",
+            return_value={"pass_count": 19, "total": 20, "pass_rate": 0.95, "results": []},
+        ),
+        patch(
+            f"{_EVAL_PATCH}.run_tool_call_benchmark",
+            return_value={
+                "total": 4,
+                "parse_rate": 0.9,
+                "known_rate": 0.9,
+                "correct_rate": 0.5,
+                "results": [],
+            },
+        ),
+        patch(
+            f"{_EVAL_PATCH}.run_tool_result_benchmark",
+            return_value={"total": 4, "grounded_rate": 0.5, "prose_rate": 0.5, "results": []},
+        ),
+    ):
+        metrics = eval_flow(run_dir, golden_path=golden, eval_output_dir=tmp_path / "eval")
+
+    assert metrics["eval_gate_passed"] is True
+    assert metrics["gates_applied"] == [
+        "perplexity",
+        "golden_pass_rate",
+        "tool_call_parse_rate",
+    ]
+    # The ungated numbers stay in the file and stay labelled as such.
+    assert "tool_call_correct_rate" in metrics["ungated_metrics"]
+
+
+class TestToolResultBenchmark:
+    """The other half of the loop: can the model read a result it is handed?"""
+
+    def _golden(self, tmp_path: Path, drugs: list[str]) -> Path:
+        golden = tmp_path / "golden.jsonl"
+        _write_golden(
+            golden,
+            [{"question": f"What does {d} target?", "must_contain": ["x"], "drug": d}
+             for d in drugs],
+        )
+        return golden
+
+    def test_scores_grounding_and_prose_separately(self, tmp_path: Path) -> None:
+        from app.scripts.flows.eval.eval_finetuned_model import run_tool_result_benchmark
+
+        replies = [
+            "SIROLIMUS has a molecular weight of 481.27.",  # grounded, prose
+            '{"tool": "draw_molecule", "args": {"name": "SIROLIMUS"}}',  # echoed the shape
+            "It interacts with several drugs.",  # prose, but not grounded
+            "The pair shows photosensitivity at 7.43.",  # grounded, prose
+        ]
+        with patch(f"{_EVAL_PATCH}._generate", side_effect=replies):
+            report = run_tool_result_benchmark(
+                Path("mlx"), Path("adapter"), self._golden(tmp_path, ["SIROLIMUS"]), drugs=1
+            )
+
+        assert report["total"] == 4
+        assert report["grounded_rate"] == 0.5  # first and last quoted the result
+        assert report["prose_rate"] == 0.75  # only the second echoed JSON
+
+    def test_expected_values_cannot_be_recalled_from_training(self) -> None:
+        """The whole design rests on this: a memorised answer must not score.
+
+        If an expected value were a real property of a real drug, a model
+        answering from weights would pass without reading the tool result.
+        """
+        from app.scripts.flows.eval.eval_finetuned_model import TOOL_RESULT_CASES
+
+        expected = [case[-1] for case in TOOL_RESULT_CASES]
+        assert len(set(expected)) == len(expected), "each case needs its own marker"
+        # Every marker must actually appear in that case's fabricated result.
+        for *_, result_shape, marker in TOOL_RESULT_CASES:
+            assert marker in json.dumps(result_shape), f"{marker} is not in the tool result"
+
+    def test_prompt_matches_the_training_record_layout(self, tmp_path: Path) -> None:
+        """Train-serve mismatch is the failure this item is about."""
+        from app.scripts.flows.eval.eval_finetuned_model import run_tool_result_benchmark
+
+        seen: list[str] = []
+
+        def capture(_model: Path, _adapter: Path, prompt: str, _max_tokens: int) -> str:
+            seen.append(prompt)
+            return "ok"
+
+        with patch(f"{_EVAL_PATCH}._generate", side_effect=capture):
+            run_tool_result_benchmark(
+                Path("mlx"), Path("adapter"), self._golden(tmp_path, ["SIROLIMUS"]), drugs=1
+            )
+
+        prompt = seen[0]
+        # The result arrives inside a ### Question block, exactly as
+        # _tool_call_record lays it out and as the server sends it.
+        assert "### Question\n### Tool result (get_compound_by_name)\n" in prompt
+        assert prompt.endswith("### Answer\n")
+        assert prompt.count("### Answer") == 2  # the model's call, then its answer
+
+
+def test_generate_raises_instead_of_scoring_a_crashed_subprocess() -> None:
+    """A missing completion is a broken run, not a wrong answer.
+
+    Scoring it as wrong manufactures findings: two concurrent evals once
+    produced 40 empty completions, reported as "0.0% routing".
+    """
+    from app.scripts.flows.eval.eval_finetuned_model import _generate
+
+    crashed = types.SimpleNamespace(returncode=1, stdout="", stderr="Metal out of memory")
+    with patch(f"{_EVAL_PATCH}.subprocess.run", return_value=crashed):
+        with pytest.raises(RuntimeError, match="mlx_lm generate failed"):
+            _generate(Path("m"), Path("a"), "prompt", 10)
+
+    # Exit 0 but nothing on stdout is equally broken.
+    empty = types.SimpleNamespace(returncode=0, stdout="   \n", stderr="")
+    with patch(f"{_EVAL_PATCH}.subprocess.run", return_value=empty):
+        with pytest.raises(RuntimeError, match="mlx_lm generate failed"):
+            _generate(Path("m"), Path("a"), "prompt", 10)
+
+
+def test_eval_mirrors_the_dataset_builders_tool_result_contract() -> None:
+    """A drifted header or truncation limit measures a prompt the model never sees."""
+    from app.scripts.flows.eval.eval_finetuned_model import TOOL_RESULT_HEADER, TOOL_RESULT_LIMIT
+    from app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset import (
+        TOOL_RESULT_HEADER as BUILDER_HEADER,
+    )
+    from app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset import (
+        TOOL_RESULT_LIMIT as BUILDER_LIMIT,
+    )
+
+    assert TOOL_RESULT_HEADER == BUILDER_HEADER
+    assert TOOL_RESULT_LIMIT == BUILDER_LIMIT
+
+
+class TestGoldenUsesTheAgentLoop:
+    """Golden asks for facts held out of training, so it must be a lookup."""
+
+    def _golden(self, tmp_path: Path) -> Path:
+        path = tmp_path / "golden.jsonl"
+        _write_golden(
+            path,
+            [{"question": "What does SIROLIMUS target?", "must_contain": ["fkbp1a"], "drug": "S"}],
+        )
+        return path
+
+    def test_a_tool_call_is_run_and_the_result_answered_from(self, tmp_path: Path) -> None:
+        from app.scripts.flows.eval.eval_finetuned_model import run_golden_benchmark
+
+        replies = [
+            '{"tool": "get_compound_by_name", "args": {"name": "SIROLIMUS"}}',
+            "SIROLIMUS targets peptidyl-prolyl cis-trans isomerase FKBP1A.",
+        ]
+        with (
+            patch(f"{_EVAL_PATCH}._generate", side_effect=replies),
+            patch(
+                "app.scripts.flows.vector_store.tools.run_tool",
+                return_value={"result": {"mechanism_targets": "FKBP1A"}},
+            ) as tool,
+        ):
+            report = run_golden_benchmark(Path("m"), Path("a"), self._golden(tmp_path))
+
+        assert tool.called, "the tool must actually run, not be simulated"
+        assert report["pass_rate"] == 1.0
+        assert report["tool_used_count"] == 1
+        assert report["results"][0]["tool_called"] == "get_compound_by_name"
+
+    def test_an_answer_without_a_tool_call_is_still_scored(self, tmp_path: Path) -> None:
+        """A question the weights should answer does not need a lookup."""
+        from app.scripts.flows.eval.eval_finetuned_model import run_golden_benchmark
+
+        with patch(f"{_EVAL_PATCH}._generate", side_effect=["It targets FKBP1A."]):
+            report = run_golden_benchmark(Path("m"), Path("a"), self._golden(tmp_path))
+
+        assert report["pass_rate"] == 1.0
+        assert report["tool_used_count"] == 0
+        assert report["results"][0]["tool_called"] is None

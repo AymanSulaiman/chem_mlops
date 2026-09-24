@@ -66,7 +66,7 @@ class TestCollectData:
         mock_tarfile.return_value.__enter__.return_value.extractall = MagicMock()
         mock_tqdm.return_value.__enter__.return_value.update = MagicMock()
 
-        collect_data()
+        collect_data("36")  # pinned: the default version moves, these assertions do not
 
         expected_url = (
             "https://ftp.ebi.ac.uk/pub/databases/chembl/ChEMBLdb/latest/chembl_36_sqlite.tar.gz"
@@ -244,7 +244,7 @@ class TestCollectData:
         mock_tar = MagicMock()
         mock_tarfile.return_value.__enter__.return_value = mock_tar
 
-        collect_data()
+        collect_data("36")
 
         mock_tarfile.assert_called_once_with(archive_path, "r:gz")
         mock_tar.extractall.assert_called_once_with(path="data", filter="data")

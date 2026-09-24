@@ -1,4 +1,4 @@
-# ChEMBL → LanceDB RAG Vector Store
+# ChEMBL → LanceDB Vector Store
 # Ingests all ChEMBL compound data into a single flat LanceDB table.
 # Each row = one compound with a Morgan fingerprint `vector` column for
 # similarity search, plus all metadata columns for scalar filtering.
@@ -30,6 +30,10 @@ BATCH_SIZE: int = 10_000
 # numpy array directly, skipping an extra conversion step.
 _FP_GEN = rdFingerprintGenerator.GetMorganGenerator(radius=MORGAN_RADIUS, fpSize=MORGAN_BITS)
 
+# Stand-in vector for molecules with no parsable structure. Never searched —
+# query_compounds filters them out — but LanceDB needs a fixed-width column.
+_ZERO_VECTOR: list[float] = [0.0] * MORGAN_BITS
+
 
 # ── Private helpers ───────────────────────────────────────────────────────────
 
@@ -60,51 +64,74 @@ def _resolve_chembl_version(parquet_dir: str) -> str:
 def _build_flat_df(parquet_dir: str) -> pl.DataFrame:
     """Join all relevant ChEMBL tables into one flat compound DataFrame.
 
-    Anchor: molecule_dictionary filtered to structure_type == 'MOL'.
-    Rows with no canonical SMILES are dropped (no fingerprint possible).
+    Anchor: molecule_dictionary, every structure_type.
+
+    It used to keep only ``structure_type == 'MOL'`` and rows with a SMILES,
+    which dropped two different things: 22 K 'BOTH' molecules that *do* carry a
+    structure and belong in similarity search, and every biologic — antibodies,
+    oligonucleotides, cell therapies — which have no SMILES and so cannot be
+    fingerprinted. The biologics are still real drugs with mechanisms and
+    targets, and excluding them meant no tool could answer a question about
+    one: 15 of the 40 golden benchmark drugs were simply unreachable.
+
+    Structureless rows are kept with a zero vector and ``has_structure=False``;
+    query_compounds filters on that flag so similarity search is unaffected.
     """
     # ── Base + 1:1 joins ──────────────────────────────────────────────────
-    base: pl.DataFrame = pl.scan_parquet(f"{parquet_dir}/molecule_dictionary.parquet").filter(  # ty: ignore[invalid-assignment]
-        pl.col("structure_type") == "MOL"
-    ).collect()
+    base: pl.DataFrame = (  # ty: ignore[invalid-assignment]
+        pl.scan_parquet(f"{parquet_dir}/molecule_dictionary.parquet")
+        .filter(pl.col("structure_type").is_in(["MOL", "BOTH", "SEQ", "NONE"]))
+        .collect()
+    )
 
-    cs: pl.DataFrame = pl.scan_parquet(f"{parquet_dir}/compound_structures.parquet").select(  # ty: ignore[invalid-assignment]
-        ["molregno", "canonical_smiles", "standard_inchi_key"]
-    ).collect()
+    cs: pl.DataFrame = (  # ty: ignore[invalid-assignment]
+        pl.scan_parquet(f"{parquet_dir}/compound_structures.parquet")
+        .select(["molregno", "canonical_smiles", "standard_inchi_key"])
+        .collect()
+    )
 
-    cp: pl.DataFrame = pl.scan_parquet(f"{parquet_dir}/compound_properties.parquet").select(  # ty: ignore[invalid-assignment]
-        [
-            "molregno",
-            "mw_freebase",
-            "alogp",
-            "hba",
-            "hbd",
-            "psa",
-            "qed_weighted",
-            "full_molformula",
-            "num_ro5_violations",
-            "heavy_atoms",
-        ]
-    ).collect()
+    cp: pl.DataFrame = (  # ty: ignore[invalid-assignment]
+        pl.scan_parquet(f"{parquet_dir}/compound_properties.parquet")
+        .select(
+            [
+                "molregno",
+                "mw_freebase",
+                "alogp",
+                "hba",
+                "hbd",
+                "psa",
+                "qed_weighted",
+                "full_molformula",
+                "num_ro5_violations",
+                "heavy_atoms",
+            ]
+        )
+        .collect()
+    )
 
-    mh: pl.DataFrame = pl.scan_parquet(f"{parquet_dir}/molecule_hierarchy.parquet").select(  # ty: ignore[invalid-assignment]
-        ["molregno", "parent_molregno", "active_molregno"]
-    ).collect()
+    mh: pl.DataFrame = (  # ty: ignore[invalid-assignment]
+        pl.scan_parquet(f"{parquet_dir}/molecule_hierarchy.parquet")
+        .select(["molregno", "parent_molregno", "active_molregno"])
+        .collect()
+    )
 
-    usan: pl.DataFrame = pl.scan_parquet(f"{parquet_dir}/usan_stems.parquet").select(  # ty: ignore[invalid-assignment]
-        [
-            "stem",
-            pl.col("annotation").alias("usan_stem_annotation"),
-            pl.col("stem_class").alias("usan_stem_class"),
-        ]
-    ).collect()
+    usan: pl.DataFrame = (  # ty: ignore[invalid-assignment]
+        pl.scan_parquet(f"{parquet_dir}/usan_stems.parquet")
+        .select(
+            [
+                "stem",
+                pl.col("annotation").alias("usan_stem_annotation"),
+                pl.col("stem_class").alias("usan_stem_class"),
+            ]
+        )
+        .collect()
+    )
 
     base = (
         base.join(cs, on="molregno", how="left")
         .join(cp, on="molregno", how="left")
         .join(mh, on="molregno", how="left")
         .join(usan, left_on="usan_stem", right_on="stem", how="left")
-        .filter(pl.col("canonical_smiles").is_not_null())
     )
 
     # ── 1:many aggregation joins ──────────────────────────────────────────
@@ -319,9 +346,7 @@ def _build_flat_df(parquet_dir: str) -> pl.DataFrame:
         .collect()
     )
 
-    _assays = pl.scan_parquet(f"{parquet_dir}/assays.parquet").select(
-        ["assay_id", "tid"]
-    )
+    _assays = pl.scan_parquet(f"{parquet_dir}/assays.parquet").select(["assay_id", "tid"])
     _act_targets = pl.scan_parquet(f"{parquet_dir}/target_dictionary.parquet").select(
         ["tid", pl.col("pref_name").alias("target_name")]
     )
@@ -385,12 +410,12 @@ def _write_to_lancedb(
         overwrite: If True, replace the table on first batch (idempotent re-runs).
 
     Returns:
-        Tuple of (rows written, rows skipped due to invalid SMILES).
+        Tuple of (rows written, rows kept without a fingerprint).
     """
     total_batches: int = math.ceil(len(base) / BATCH_SIZE)
     table: Table | None = None
     written: int = 0
-    skipped: int = 0
+    structureless: int = 0
 
     with ThreadPoolExecutor(max_workers=1) as write_exec:
         # pending_write holds the in-flight LanceDB write for the previous batch.
@@ -405,14 +430,22 @@ def _write_to_lancedb(
         )
         for slice_df in batch_iter:
             # ── Step 1: fingerprint current batch ────────────────────────────
+            # A molecule with no parsable SMILES — every biologic, plus the odd
+            # malformed structure — is kept with a zero vector and flagged, not
+            # dropped. It still carries the mechanism, target and indication data
+            # the name-lookup tools read. query_compounds filters on the flag, so
+            # nothing unfingerprintable can surface in a similarity search.
             smiles: list[str | None] = slice_df["canonical_smiles"].to_list()
             fps: list[np.ndarray | None] = list(map(_smiles_to_fp, smiles))
             batch_records: list[dict[str, Any]] = [
-                {**row, "vector": fp.tolist()}
+                {
+                    **row,
+                    "vector": fp.tolist() if fp is not None else _ZERO_VECTOR,
+                    "has_structure": fp is not None,
+                }
                 for row, fp in zip(slice_df.to_dicts(), fps)
-                if fp is not None
             ]
-            skipped += slice_df.height - len(batch_records)
+            structureless += sum(1 for fp in fps if fp is None)
 
             # ── Step 2: wait for previous batch's write to finish ─────────────
             if pending_write is not None:
@@ -420,7 +453,7 @@ def _write_to_lancedb(
                 written += pending_count
                 pending_write = None
                 pending_count = 0
-                batch_iter.set_postfix(written=f"{written:,}", skipped=skipped)
+                batch_iter.set_postfix(written=f"{written:,}", no_fp=structureless)
 
             if not batch_records:
                 continue
@@ -430,7 +463,7 @@ def _write_to_lancedb(
                 mode = "overwrite" if overwrite else "create"
                 table = db.create_table(COMPOUNDS_TABLE, data=batch_records, mode=mode)
                 written += len(batch_records)
-                batch_iter.set_postfix(written=f"{written:,}", skipped=skipped)
+                batch_iter.set_postfix(written=f"{written:,}", no_fp=structureless)
             else:
                 pending_count = len(batch_records)
                 pending_write = write_exec.submit(table.add, batch_records)
@@ -444,7 +477,7 @@ def _write_to_lancedb(
         table.create_scalar_index("chembl_id")
         table.create_scalar_index("standard_inchi_key")
 
-    return written, skipped
+    return written, structureless
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -470,13 +503,17 @@ def ingest_compounds_to_lancedb(
     if COMPOUNDS_TABLE in db.list_tables().tables:
         print(f"[ingest] '{COMPOUNDS_TABLE}' table exists — overwriting")
 
-    written, skipped = _write_to_lancedb(base, db, overwrite=True)
+    written, structureless = _write_to_lancedb(base, db, overwrite=True)
 
     if written == 0:
         print("[ingest] Warning: no rows were written — check your parquet data.")
         return
 
-    print(f"[ingest] Done. {written:,} compounds written ({skipped} skipped — invalid SMILES).")
+    print(
+        f"[ingest] Done. {written:,} compounds written "
+        f"({structureless:,} without a fingerprint — biologics and unparsable SMILES; "
+        "searchable by name, excluded from similarity search)."
+    )
 
 
 if __name__ == "__main__":

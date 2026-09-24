@@ -1,20 +1,40 @@
-{"question": "What does Aspirin target?", "must_contain": ["cyclooxygenase"], "category": "mechanism_of_action"}
-{"question": "What does Sildenafil inhibit?", "must_contain": ["phosphodiesterase"], "category": "mechanism_of_action"}
-{"question": "What enzyme does Methotrexate inhibit?", "must_contain": ["dihydrofolate"], "category": "mechanism_of_action"}
-{"question": "How does Fluoxetine work?", "must_contain": ["serotonin"], "category": "mechanism_of_action"}
-{"question": "What does Imatinib target?", "must_contain": ["tyrosine-protein kinase"], "category": "mechanism_of_action"}
-{"question": "What enzyme metabolises Warfarin?", "must_contain": ["cyp2c9"], "category": "metabolism"}
-{"question": "What CYP enzyme metabolises Omeprazole?", "must_contain": ["cyp2c19"], "category": "metabolism"}
-{"question": "What enzyme metabolises Codeine?", "must_contain": ["cyp2d6"], "category": "metabolism"}
-{"question": "What CYP enzyme metabolises Atorvastatin?", "must_contain": ["cyp3a4"], "category": "metabolism"}
-{"question": "What is the mechanism of Warfarin's anticoagulant effect?", "must_contain": ["vitamin k"], "category": "mechanism_of_action"}
-{"question": "Which drugs share the CYP2C9 metabolic pathway with Warfarin?", "must_contain": ["cyp2c9"], "category": "drug_drug_interaction"}
-{"question": "What is the DDI risk when combining two CYP3A4 substrates?", "must_contain": ["cyp3a4"], "category": "drug_drug_interaction"}
-{"question": "What interaction should be considered when prescribing a CYP2D6 inhibitor alongside a CYP2D6 substrate?", "must_contain": ["cyp2d6"], "category": "drug_drug_interaction"}
-{"question": "What condition is Metformin used to treat?", "must_contain": ["diabetes"], "category": "indication"}
-{"question": "What is Atorvastatin indicated for?", "must_contain": ["cholesterol"], "category": "indication"}
-{"question": "What is Adalimumab used for?", "must_contain": ["rheumatoid"], "category": "indication"}
-{"question": "What are the major safety warnings for Methotrexate?", "must_contain": ["toxicity"], "category": "drug_warning"}
-{"question": "What bleeding risk is associated with Warfarin?", "must_contain": ["bleeding"], "category": "drug_warning"}
-{"question": "What drug class does Fluoxetine belong to?", "must_contain": ["serotonin reuptake"], "category": "classification"}
-{"question": "What class of drug is Atorvastatin?", "must_contain": ["statin"], "category": "classification"}
+{"question": "What does SIROLIMUS target?", "must_contain": ["peptidyl-prolyl cis-trans isomerase fkbp1a"], "category": "mechanism_of_action", "chembl_id": "CHEMBL413", "drug": "SIROLIMUS"}
+{"question": "What does BRECANAVIR target?", "must_contain": ["human immunodeficiency virus type 1 protease"], "category": "mechanism_of_action", "chembl_id": "CHEMBL206031", "drug": "BRECANAVIR"}
+{"question": "What does OLENDALIZUMAB target?", "must_contain": ["complement c5"], "category": "mechanism_of_action", "chembl_id": "CHEMBL3990025", "drug": "OLENDALIZUMAB"}
+{"question": "What does RXDX-103 target?", "must_contain": ["cell division cycle 7-related protein kinase"], "category": "mechanism_of_action", "chembl_id": "CHEMBL3545090", "drug": "RXDX-103"}
+{"question": "What does MDX-070 target?", "must_contain": ["glutamate carboxypeptidase 2"], "category": "mechanism_of_action", "chembl_id": "CHEMBL2109555", "drug": "MDX-070"}
+{"question": "What does ROPINIROLE HYDROCHLORIDE target?", "must_contain": ["d2-like dopamine receptor"], "category": "mechanism_of_action", "chembl_id": "CHEMBL1200411", "drug": "ROPINIROLE HYDROCHLORIDE"}
+{"question": "What does AMG-517 target?", "must_contain": ["transient receptor potential cation channel subfamily v member 1"], "category": "mechanism_of_action", "chembl_id": "CHEMBL229430", "drug": "AMG-517"}
+{"question": "What does PROCAINAMIDE HYDROCHLORIDE target?", "must_contain": ["sodium channel alpha subunit"], "category": "mechanism_of_action", "chembl_id": "CHEMBL605", "drug": "PROCAINAMIDE HYDROCHLORIDE"}
+{"question": "What does CALCIUM OXYBATE target?", "must_contain": ["gaba-b receptor"], "category": "mechanism_of_action", "chembl_id": "CHEMBL4594393", "drug": "CALCIUM OXYBATE"}
+{"question": "What does BELAPECTIN target?", "must_contain": ["galectin-3"], "category": "mechanism_of_action", "chembl_id": "CHEMBL4297577", "drug": "BELAPECTIN"}
+{"question": "What does ESOMEPRAZOLE STRONTIUM target?", "must_contain": ["potassium-transporting atpase"], "category": "mechanism_of_action", "chembl_id": "CHEMBL2146140", "drug": "ESOMEPRAZOLE STRONTIUM"}
+{"question": "What does DOMAGROZUMAB target?", "must_contain": ["growth/differentiation factor 8"], "category": "mechanism_of_action", "chembl_id": "CHEMBL3544991", "drug": "DOMAGROZUMAB"}
+{"question": "What does LANDIOLOL target?", "must_contain": ["beta-1 adrenergic receptor"], "category": "mechanism_of_action", "chembl_id": "CHEMBL1742466", "drug": "LANDIOLOL"}
+{"question": "What does RADOTINIB target?", "must_contain": ["bcr/abl fusion protein"], "category": "mechanism_of_action", "chembl_id": "CHEMBL4297524", "drug": "RADOTINIB"}
+{"question": "What does JNJ-26483327 target?", "must_contain": ["epidermal growth factor receptor"], "category": "mechanism_of_action", "chembl_id": "CHEMBL3109738", "drug": "JNJ-26483327"}
+{"question": "What does DEXTROMORAMIDE target?", "must_contain": ["opioid receptors; mu/kappa/delta"], "category": "mechanism_of_action", "chembl_id": "CHEMBL3833389", "drug": "DEXTROMORAMIDE"}
+{"question": "What does CANRENONE target?", "must_contain": ["mineralocorticoid receptor"], "category": "mechanism_of_action", "chembl_id": "CHEMBL1463345", "drug": "CANRENONE"}
+{"question": "What does AMPHETAMINE target?", "must_contain": ["sodium-dependent dopamine transporter"], "category": "mechanism_of_action", "chembl_id": "CHEMBL405", "drug": "AMPHETAMINE"}
+{"question": "What does DONEPEZIL HYDROCHLORIDE target?", "must_contain": ["acetylcholinesterase"], "category": "mechanism_of_action", "chembl_id": "CHEMBL1678", "drug": "DONEPEZIL HYDROCHLORIDE"}
+{"question": "What does TERBUTALINE SULFATE target?", "must_contain": ["beta-2 adrenergic receptor"], "category": "mechanism_of_action", "chembl_id": "CHEMBL1315867", "drug": "TERBUTALINE SULFATE"}
+{"question": "What does GLICLAZIDE target?", "must_contain": ["sulfonylurea receptor 1, kir6.2"], "category": "mechanism_of_action", "chembl_id": "CHEMBL427216", "drug": "GLICLAZIDE"}
+{"question": "What does DANTHRON target?", "must_contain": ["retinoic acid receptor rxr-alpha"], "category": "mechanism_of_action", "chembl_id": "CHEMBL53418", "drug": "DANTHRON"}
+{"question": "What does CAPTOPRIL target?", "must_contain": ["angiotensin-converting enzyme"], "category": "mechanism_of_action", "chembl_id": "CHEMBL1560", "drug": "CAPTOPRIL"}
+{"question": "What does ASPARAGINASE target?", "must_contain": ["asparagine"], "category": "mechanism_of_action", "chembl_id": "CHEMBL2108989", "drug": "ASPARAGINASE"}
+{"question": "What does MONGERSEN SODIUM target?", "must_contain": ["smad-7 mrna"], "category": "mechanism_of_action", "chembl_id": "CHEMBL3707383", "drug": "MONGERSEN SODIUM"}
+{"question": "What does UNASNEMAB target?", "must_contain": ["repulsive guidance molecule a"], "category": "mechanism_of_action", "chembl_id": "CHEMBL4650492", "drug": "UNASNEMAB"}
+{"question": "What does SIGVOTATUG target?", "must_contain": ["integrin beta-6"], "category": "mechanism_of_action", "chembl_id": "CHEMBL5314878", "drug": "SIGVOTATUG"}
+{"question": "What does TALIMOGENE LAHERPAREPVEC target?", "must_contain": ["melanoma cell"], "category": "mechanism_of_action", "chembl_id": "CHEMBL2108727", "drug": "TALIMOGENE LAHERPAREPVEC"}
+{"question": "What does AMSACRINE target?", "must_contain": ["dna topoisomerase ii"], "category": "mechanism_of_action", "chembl_id": "CHEMBL43", "drug": "AMSACRINE"}
+{"question": "What does TOVORAFENIB target?", "must_contain": ["raf serine/threonine protein kinase"], "category": "mechanism_of_action", "chembl_id": "CHEMBL3348923", "drug": "TOVORAFENIB"}
+{"question": "What does A27.15 target?", "must_contain": ["transferrin receptor protein 1"], "category": "mechanism_of_action", "chembl_id": "CHEMBL2109494", "drug": "A27.15"}
+{"question": "What does AT-7519 target?", "must_contain": ["cyclin-dependent kinase"], "category": "mechanism_of_action", "chembl_id": "CHEMBL445813", "drug": "AT-7519"}
+{"question": "What does TEZAMPANEL target?", "must_contain": ["glutamate receptor ionotropic ampa"], "category": "mechanism_of_action", "chembl_id": "CHEMBL3989703", "drug": "TEZAMPANEL"}
+{"question": "What does CALCITONIN target?", "must_contain": ["calcitonin receptor"], "category": "mechanism_of_action", "chembl_id": "CHEMBL4594242", "drug": "CALCITONIN"}
+{"question": "What does CILGAVIMAB target?", "must_contain": ["spike glycoprotein"], "category": "mechanism_of_action", "chembl_id": "CHEMBL4650258", "drug": "CILGAVIMAB"}
+{"question": "What does ABACAVIR SULFATE target?", "must_contain": ["human immunodeficiency virus type 1 reverse transcriptase"], "category": "mechanism_of_action", "chembl_id": "CHEMBL4303288", "drug": "ABACAVIR SULFATE"}
+{"question": "What does OLECLUMAB target?", "must_contain": ["5'-nucleotidase"], "category": "mechanism_of_action", "chembl_id": "CHEMBL3990016", "drug": "OLECLUMAB"}
+{"question": "What does PATISIRAN SODIUM target?", "must_contain": ["transthyretin mrna"], "category": "mechanism_of_action", "chembl_id": "CHEMBL4297536", "drug": "PATISIRAN SODIUM"}
+{"question": "What does UR-63325 target?", "must_contain": ["histamine h4 receptor"], "category": "mechanism_of_action", "chembl_id": "CHEMBL5314396", "drug": "UR-63325"}
+{"question": "What does OSAVAMPATOR target?", "must_contain": ["glutamate receptor ionotropic ampa"], "category": "mechanism_of_action", "chembl_id": "CHEMBL4594403", "drug": "OSAVAMPATOR"}

@@ -62,9 +62,7 @@ class TestTransformData:
 
     @patch("duckdb.connect")
     @patch("shutil.rmtree")
-    def test_transform_data_success(
-        self, mock_rmtree, mock_duckdb_connect, temp_data_dir
-    ):
+    def test_transform_data_success(self, mock_rmtree, mock_duckdb_connect, temp_data_dir):
         mock_conn = self._make_conn(["activities", "assays"])
         mock_duckdb_connect.return_value = mock_conn
 
@@ -202,9 +200,7 @@ class TestTransformData:
 
     @patch("duckdb.connect")
     @patch("shutil.rmtree")
-    def test_cleanup_success(
-        self, mock_rmtree, mock_duckdb_connect, temp_data_dir
-    ):
+    def test_cleanup_success(self, mock_rmtree, mock_duckdb_connect, temp_data_dir):
         mock_conn = self._make_conn([])
         mock_duckdb_connect.return_value = mock_conn
 
@@ -228,12 +224,11 @@ class TestTransformData:
             transform_data()  # must not raise
 
     @patch("duckdb.connect")
-    def test_cleanup_skipped_when_dir_absent(
-        self, mock_duckdb_connect, temp_data_dir
-    ):
+    def test_cleanup_skipped_when_dir_absent(self, mock_duckdb_connect, temp_data_dir):
         mock_conn = self._make_conn([])
         mock_duckdb_connect.return_value = mock_conn
         import shutil as _shutil
+
         _shutil.rmtree(Path("data") / "chembl_37")  # remove what fixture created
 
         with patch("builtins.print") as mock_print:

@@ -19,7 +19,13 @@ LEARNING_RATE = 1e-5
 MAX_SEQ_LEN = 2048
 STEPS_PER_REPORT = 25  # was 1; reduces per-iteration I/O overhead
 STEPS_PER_EVAL = 200
-SAVE_EVERY = 500
+SAVE_EVERY = 100  # a crash costs at most 100 iters; checkpoints are ~10 MB each
+# macOS kills a Metal command buffer that hogs the GPU ("Impacting Interactivity",
+# kIOGPUCommandBufferCallbackErrorImpactingInteractivity). It is a watchdog, not
+# OOM: the same command runs fine on a quiet machine. Resume from the last
+# checkpoint instead of losing the run.
+METAL_WATCHDOG_ERROR = "Impacting Interactivity"
+MAX_METAL_RETRIES = 3
 
 
 def _run(cmd: list[str], cwd: Path | None = None, log_file: Path | None = None) -> None:
@@ -140,12 +146,17 @@ def finetune_lora(
     steps_per_eval: int = STEPS_PER_EVAL,
     save_every: int = SAVE_EVERY,
     log_file: Path | None = None,
+    resume_from: Path | None = None,
 ) -> Path:
-    """Launch LoRA fine-tuning using mlx_lm."""
+    """Launch LoRA fine-tuning using mlx_lm, resuming after a Metal watchdog kill.
+
+    *resume_from* starts training from existing adapter weights instead of from
+    scratch — continued training on a new dataset rather than a fresh run.
+    """
     adapter_dir.mkdir(parents=True, exist_ok=True)
 
-    _run(
-        [
+    def lora_cmd(remaining: int, resume_from: Path | None) -> list[str]:
+        cmd = [
             "python",
             "-m",
             "mlx_lm",
@@ -162,7 +173,7 @@ def finetune_lora(
             "--num-layers",
             str(num_layers),
             "--iters",
-            str(iters),
+            str(remaining),
             "--learning-rate",
             str(learning_rate),
             "--max-seq-length",
@@ -176,9 +187,45 @@ def finetune_lora(
             str(steps_per_eval),
             "--save-every",
             str(save_every),
-        ],
-        log_file=log_file,
-    )
+        ]
+        if resume_from is not None:
+            cmd += ["--resume-adapter-file", str(resume_from)]
+        return cmd
+
+    def latest_checkpoint() -> tuple[Path, int] | None:
+        """Newest numbered checkpoint and the iteration it was written at."""
+        checkpoints = sorted(adapter_dir.glob("*_adapters.safetensors"))
+        if not checkpoints:
+            return None
+        newest = checkpoints[-1]
+        return newest, int(newest.name.split("_")[0])
+
+    done = 0
+    for attempt in range(1, MAX_METAL_RETRIES + 2):
+        try:
+            _run(lora_cmd(iters - done, resume_from), log_file=log_file)
+            return adapter_dir
+        except subprocess.CalledProcessError:
+            log = log_file.read_text() if log_file and log_file.exists() else ""
+            if METAL_WATCHDOG_ERROR not in log or attempt > MAX_METAL_RETRIES:
+                raise
+            if log_file and log_file.exists():
+                # _run truncates the log per attempt; keep the crash for debugging.
+                log_file.replace(log_file.with_name(f"{log_file.stem}.attempt{attempt}.log"))
+            checkpoint = latest_checkpoint()
+            if checkpoint is None:
+                print(
+                    f"\nMetal watchdog killed the run before the first checkpoint "
+                    f"(attempt {attempt}/{MAX_METAL_RETRIES}). Restarting from scratch.\n"
+                )
+                continue
+            resume_from, checkpoint_iter = checkpoint
+            done += checkpoint_iter
+            print(
+                f"\nMetal watchdog killed the run at ~iter {done} "
+                f"(attempt {attempt}/{MAX_METAL_RETRIES}). "
+                f"Resuming from {resume_from.name}, {iters - done} iters to go.\n"
+            )
 
     return adapter_dir
 
@@ -187,22 +234,32 @@ def gemma3_chembl_toon_finetune_flow(
     hf_model_id: str = HF_MODEL_ID,
     data_dir: str = str(DATA_DIR),
     run_name: str | None = None,
-) -> None:
+    export: bool = True,
+) -> Path:
     """
     Finetuning pipeline optimised for Apple Silicon (M1 Pro, 32 GB):
 
     1. Pre-split training sequences > 2048 tokens to eliminate truncation waste.
     2. Convert Gemma 3 HF model -> MLX format (4-bit quantised).
     3. LoRA fine-tuning with gradient checkpointing, log capture.
+    4. Export to Ollama — only when *export* is true.
 
-    When run standalone, also exports the adapter to Ollama (step 4).
-    When run via the Prefect pipeline, Ollama export is handled as a
-    separate task after this flow completes.
+    Pass ``export=False`` when something downstream evaluates this adapter
+    first. The Dagster pipeline does: it continues this run on a tool-heavy
+    mix, evaluates that, and exports only if the gate passes. Exporting here
+    would publish an unevaluated model and leave it served if the gate then
+    failed — which is what this flow used to do unconditionally, despite the
+    docstring claiming otherwise.
 
     Args:
         hf_model_id: HuggingFace model ID
         data_dir: Path to training data directory (must contain train.jsonl)
         run_name: Optional custom run name, defaults to timestamp
+        export: Register the fused adapter with Ollama when finished.
+
+    Returns:
+        The run directory, so a caller can evaluate or continue this run
+        without guessing at "the latest directory in artifacts/".
     """
     if run_name is None:
         run_name = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -228,7 +285,10 @@ def gemma3_chembl_toon_finetune_flow(
     print(f"Training log: {log_file}")
     print(f"{'=' * 60}\n")
 
-    export_to_ollama(run_dir=run_dir, force=True)
+    if export:
+        export_to_ollama(run_dir=run_dir, force=True)
+
+    return run_dir
 
 
 if __name__ == "__main__":
