@@ -166,7 +166,8 @@ def export_to_ollama(
     # template).  Override Ollama's default Gemma template so prompts are sent
     # in the exact format the model expects.
     modelfile_path.write_text(
-        f"FROM {gguf_path.resolve()}\n\n"
+        # Relative to the Modelfile, so the folder can be copied anywhere (e.g. a container).
+        f"FROM ./{gguf_path.name}\n\n"
         f'SYSTEM """\n{SYSTEM_PROMPT}\n"""\n\n'
         # Multi-turn template: each user message is wrapped in ### Question / ### Answer
         # so the model sees the exact format it was trained on, while Ollama passes the

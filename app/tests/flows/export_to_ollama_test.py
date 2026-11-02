@@ -129,7 +129,7 @@ class TestExportToOllama:
             export_to_ollama(run_dir=run_dir)
 
         modelfile = (run_dir / "mlx" / "ollama" / "Modelfile").read_text()
-        assert "chembl-drug-chat.gguf" in modelfile
+        assert modelfile.startswith("FROM ./chembl-drug-chat.gguf\n")
 
     def test_modelfile_contains_stop_tokens(self, run_dir: Path) -> None:
         with (

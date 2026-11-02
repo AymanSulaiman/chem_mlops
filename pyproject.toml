@@ -4,26 +4,31 @@ version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.13"
+# Serving set: just what the chat app's tool bridge imports
+# (app.scripts.flows.vector_store.tools). Keep it small; the web image installs only this.
 dependencies = [
+    "lancedb>=0.30.2",
+    "numpy>=2.3.3",
+    "polars>=1.33.1",
+    "pyarrow>=21.0.0",
+    "rdkit>=2026.3.1",
+    "tqdm>=4.0.0",
+]
+
+[dependency-groups]
+# Data pipeline, fine-tuning and orchestration. mlx-lm is Apple Silicon only.
+train = [
+    "dagster>=1.9.0",
+    "dagster-webserver>=1.9.0",
     "duckdb>=1.4.0",
     "gguf>=0.18.0",
     "httpx>=0.28.1",
     "huggingface-hub>=0.36.0",
-    "mlx-lm>=0.28.3",
-    "numpy>=2.3.3",
+    "mlx-lm>=0.28.3; sys_platform == 'darwin'",
     "pandas>=2.3.2",
-    "polars>=1.33.1",
-    "dagster>=1.9.0",
-    "dagster-webserver>=1.9.0",
-    "pyarrow>=21.0.0",
     "sentencepiece>=0.2.1",
-    "tqdm>=4.0.0",
     "transformers>=4.57.1",
-    "lancedb>=0.30.2",
-    "rdkit>=2026.3.1",
 ]
-
-[dependency-groups]
 dev = [
     "jupyterlab>=4.4.9",
     "pytest>=8.4.2",
@@ -31,6 +36,10 @@ dev = [
     "seaborn>=0.13.2",
     "ty>=0.0.28",
 ]
+
+[tool.uv]
+# Local `uv sync` still installs everything; the serving image uses --no-default-groups.
+default-groups = ["dev", "train"]
 
 [build-system]
 requires = ["setuptools", "wheel"]

@@ -4,6 +4,7 @@
 # similarity search, plus all metadata columns for scalar filtering.
 
 import math
+import os
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any
 
@@ -19,7 +20,8 @@ from rdkit.rdBase import BlockLogs
 from tqdm import tqdm
 
 DATA_DIR: str = "data/chembl_transform"
-LANCEDB_DIR: str = "data/lancedb"
+# Override in deployments, e.g. a mounted bucket: LANCEDB_DIR=/mnt/lancedb
+LANCEDB_DIR: str = os.environ.get("LANCEDB_DIR", "data/lancedb")
 COMPOUNDS_TABLE: str = "compounds"
 MORGAN_RADIUS: int = 2
 MORGAN_BITS: int = 2048

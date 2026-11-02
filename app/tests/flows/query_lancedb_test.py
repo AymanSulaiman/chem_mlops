@@ -105,6 +105,12 @@ class TestResolveLancedbUri:
         with pytest.raises(FileNotFoundError, match="No chembl_CHEMBL"):
             _resolve_lancedb_uri(str(tmp_path))
 
+    def test_db_name_env_skips_scan(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Directory doesn't even exist: proves no listing happens.
+        monkeypatch.setenv("CHEMBL_DB_NAME", "chembl_CHEMBL_37")
+        uri = _resolve_lancedb_uri(str(tmp_path / "mnt"))
+        assert uri == str(tmp_path / "mnt" / "chembl_CHEMBL_37")
+
 
 # ── _smiles_to_query_vector ───────────────────────────────────────────────────
 

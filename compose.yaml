@@ -1,0 +1,27 @@
+# Local check of the deployed setup (two containers, LanceDB mounted read-only).
+#   MODEL_DIR=artifacts/<run>/mlx/ollama docker compose up --build
+#   open http://localhost:3000
+services:
+  ollama:
+    build:
+      context: ${MODEL_DIR:?set MODEL_DIR to artifacts/<run>/mlx/ollama}
+      dockerfile: ${PWD}/deploy/ollama.Dockerfile
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 5s
+      retries: 30
+
+  web:
+    build:
+      context: .
+      dockerfile: deploy/web.Dockerfile
+    ports: ["3000:3000"]
+    environment:
+      OLLAMA_BASE_URL: http://ollama:11434
+      # Set to skip the directory scan, e.g. chembl_CHEMBL_36
+      CHEMBL_DB_NAME: ${CHEMBL_DB_NAME:-}
+    volumes:
+      - ${LANCEDB_HOST_DIR:-./data/lancedb}:/mnt/lancedb:ro
+    depends_on:
+      ollama:
+        condition: service_healthy

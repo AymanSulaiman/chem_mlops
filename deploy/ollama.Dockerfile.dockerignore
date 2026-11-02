@@ -1,0 +1,4 @@
+# The model folder also holds fused_hf/ (several GB); send only what the image needs.
+*
+!chembl-drug-chat.gguf
+!Modelfile

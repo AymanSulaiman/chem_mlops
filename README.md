@@ -57,6 +57,8 @@ The pipeline is orchestrated with **Dagster** and runs entirely locally.
 | macOS + Apple Silicon | M1 / M2 / M3 |
 
 > **Note:** The fine-tuning step uses `mlx-lm` and requires Apple Silicon. All other steps — including the web app, vector store, and evaluation — run on any platform.
+>
+> Python dependencies are split in `pyproject.toml`. The default set is only what the chat app's tools import (LanceDB, RDKit, Polars); the data pipeline, fine-tuning and Dagster live in the `train` group. A plain `uv sync` installs both (plus `dev`). The serving image installs just the default set with `uv sync --no-default-groups`.
 
 ---
 
@@ -271,6 +273,30 @@ A `web/.env` file with working defaults is committed — Bun loads it automatica
 
 ---
 
+## Docker
+
+The chat app runs as two containers: the Bun server with the Python tool bridge, and Ollama with the fine-tuned model built in. This is the shape the Cloud Run deployment uses (in progress on `gcp_deployable`, tracked in issue #33). Training stays local.
+
+```bash
+MODEL_DIR=artifacts/<stamp>_tools/mlx/ollama docker compose up --build
+```
+
+Open [http://localhost:3000](http://localhost:3000). `data/lancedb` is mounted read-only; set `LANCEDB_HOST_DIR` to mount a different folder and `CHEMBL_DB_NAME` to skip the folder scan.
+
+| Image | Dockerfile | Size | Contents |
+|-------|-----------|------|----------|
+| web | `deploy/web.Dockerfile` (context: repo root) | ~1.6 GB | Bun, Python 3.13 with the default (serving) dependencies only, `app/` and `web/` |
+| ollama | `deploy/ollama.Dockerfile` (context: the model folder) | ~2.2 GB | Ollama binary and CPU libraries on Ubuntu, `chembl-drug-chat:1b` created at build time |
+
+Notes:
+
+- The Ollama image is CPU only. It drops the ~3.5 GB of GPU libraries in the official image; for a GPU, base it on `ollama/ollama` unchanged.
+- `--build-arg QUANTIZE=q8_0` quantises the model at build time, roughly halving its size and CPU latency. The default keeps the evaluated F16 weights; re-run the evals before switching.
+- `OLLAMA_KEEP_ALIVE=-1` keeps the model loaded between requests.
+- Build for Cloud Run with `--platform linux/amd64`. On Apple Silicon this runs under emulation and is slow.
+
+---
+
 ## Vector Store
 
 The pipeline builds a **LanceDB vector store** alongside fine-tuning — every molecule in ChEMBL, each small molecule represented as a 2048-bit Morgan fingerprint (ECFP4, radius 2).
@@ -298,6 +324,13 @@ uv run python -m app.scripts.flows.vector_store.ingest_to_lancedb
 ```
 
 Re-runs are safe — the table is always overwritten. Output: `data/lancedb/chembl_CHEMBL_37/`.
+
+Two environment variables move the store without code changes (both optional):
+
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `LANCEDB_DIR` | `data/lancedb` | Root folder holding `chembl_CHEMBL_*`. Used by ingest and query alike. |
+| `CHEMBL_DB_NAME` | unset | e.g. `chembl_CHEMBL_37`. When set, queries connect straight to it instead of picking the latest folder, which avoids a directory listing per tool call on a mounted bucket. |
 
 > **A store built before the `has_structure` column needs re-ingesting.**
 > `query_compounds` filters on that column, and LanceDB errors on an unknown
@@ -561,6 +594,16 @@ uv run python -m app.scripts.flows.finetuning.export_to_ollama --force
 
 The export script fuses the LoRA adapter, converts to GGUF via llama.cpp, writes a Modelfile, and registers with Ollama. The llama.cpp conversion script is cached at `~/.cache/chem_mlops/convert_hf_to_gguf.py` on first run.
 
+The Modelfile uses a relative `FROM ./chembl-drug-chat.gguf`, so `artifacts/<run>/mlx/ollama/` is portable: copy the GGUF and Modelfile anywhere and `ollama create chembl-drug-chat:1b -f Modelfile` rebuilds the same model. Exports made before this change have an absolute path on the first line; edit it to the relative form.
+
+**Publish a model** to Cloud Storage for the deployed service, after evaluating and exporting a run:
+
+```bash
+BUCKET=<bucket> ./deploy/publish_model.sh artifacts/<stamp>_tools
+```
+
+This uploads the GGUF, the Modelfile and a `manifest.json` (run, git commit, GGUF checksum, eval metrics from `data/eval/<run>/` if present) to `gs://<bucket>/models/<run>/`. Requires `gcloud`.
+
 **Chat directly via Ollama:**
 
 ```bash
@@ -625,6 +668,11 @@ chem_mlops/
 │   ├── llm_finetune/                      # train.jsonl / valid.jsonl
 │   ├── lancedb/chembl_CHEMBL_37/          # compounds (small molecules + biologics) + polypharmacy
 │   └── twosides/TWOSIDES.parquet          # PRR-filtered FAERS pairs (~50 MB, gitignored)
+├── deploy/
+│   ├── web.Dockerfile                     # Chat app image (Bun + serving Python deps)
+│   ├── ollama.Dockerfile                  # CPU-only Ollama with the model baked in
+│   └── publish_model.sh                   # Upload GGUF + Modelfile + manifest to GCS
+├── compose.yaml                           # Run both images locally
 ├── deployments/workspace.yaml             # Dagster code-location config
 ├── ROADMAP.md                             # Ranked work items, with what was measured
 ├── artifacts/                             # Fine-tuning run outputs (gitignored)

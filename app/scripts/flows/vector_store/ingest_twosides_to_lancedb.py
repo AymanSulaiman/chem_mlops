@@ -11,6 +11,7 @@ Run download_twosides.py first:
     uv run python -m app.scripts.flows.llm_finetuning_data.download_twosides
 """
 
+import os
 from pathlib import Path
 
 import lancedb
@@ -18,7 +19,7 @@ import polars as pl
 from tqdm import tqdm
 
 TWOSIDES_PATH = Path("data/twosides/TWOSIDES.parquet")
-LANCEDB_DIR = Path("data/lancedb")
+LANCEDB_DIR = Path(os.environ.get("LANCEDB_DIR", "data/lancedb"))
 POLYPHARMACY_TABLE = "polypharmacy"
 
 MIN_PRR = 3.0

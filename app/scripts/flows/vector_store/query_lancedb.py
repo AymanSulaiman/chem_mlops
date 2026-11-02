@@ -23,14 +23,18 @@ from app.scripts.flows.vector_store.ingest_twosides_to_lancedb import POLYPHARMA
 
 
 def _resolve_lancedb_uri(lancedb_dir: str) -> str:
-    """Return the path of the latest chembl_CHEMBL_* subdirectory.
+    """Return the path of the ChEMBL database inside *lancedb_dir*.
 
-    Scans *lancedb_dir* for directories whose names start with ``chembl_CHEMBL``
+    If ``CHEMBL_DB_NAME`` is set (e.g. ``chembl_CHEMBL_37``) it is used as-is,
+    skipping the scan: listing a mounted bucket on every tool call is slow.
+    Otherwise scans *lancedb_dir* for directories whose names start with ``chembl_CHEMBL``
     and returns the lexicographically last one (e.g. ``chembl_CHEMBL_36``).
 
     Raises:
         FileNotFoundError: If no matching subdirectory exists.
     """
+    if db_name := os.environ.get("CHEMBL_DB_NAME"):
+        return os.path.join(lancedb_dir, db_name)
     if not os.path.isdir(lancedb_dir):
         raise FileNotFoundError(
             f"LanceDB directory not found: '{lancedb_dir}'. "
