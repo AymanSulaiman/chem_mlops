@@ -1,7 +1,7 @@
 """Convert a fused Gemma 3 HuggingFace model to GGUF (F16).
 
-Uses ``mlx.core`` to load safetensors (no PyTorch required) and the
-``gguf`` package for writing the output file.
+Loads safetensors with PyTorch (bf16 has no NumPy dtype) and writes the
+output with the ``gguf`` package.
 """
 
 from __future__ import annotations
@@ -9,11 +9,10 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import cast
 
 import gguf
-import mlx.core as mx
-import numpy as np
+import torch
+from safetensors.torch import load_file
 
 
 def convert(hf_dir: Path, output_path: Path) -> None:
@@ -40,14 +39,14 @@ def convert(hf_dir: Path, output_path: Path) -> None:
     writer = gguf.GGUFWriter(output_path, arch_name)
 
     # --- Model metadata ---
-    writer.add_name("chembl-drug-chat-1b")
+    writer.add_name("chembl-drug-chat")
     writer.add_block_count(n_layers)
     writer.add_context_length(ctx_len)
     writer.add_embedding_length(hidden_size)
     writer.add_feed_forward_length(ffn_size)
     writer.add_head_count(n_heads)
     writer.add_head_count_kv(n_kv_heads)
-    # head_dim (256) differs from hidden_size/n_heads (288) — must be explicit.
+    # head_dim (256) differs from hidden_size/n_heads — must be explicit.
     writer.add_key_length(head_dim)
     writer.add_value_length(head_dim)
     writer.add_layer_norm_rms_eps(rms_eps)
@@ -101,9 +100,9 @@ def convert(hf_dir: Path, output_path: Path) -> None:
 
     # Collect all safetensors shards in order.
     safetensors_files = sorted(hf_dir.glob("*.safetensors"))
-    all_weights: dict[str, mx.array] = {}
+    all_weights: dict[str, torch.Tensor] = {}
     for st_file in safetensors_files:
-        all_weights.update(cast(dict[str, mx.array], mx.load(str(st_file))))
+        all_weights.update(load_file(st_file))
 
     # Gemma 3 ties input and output embeddings — do NOT write a separate output.weight.
     # llama.cpp handles weight tying automatically when output.weight is absent.
@@ -138,11 +137,11 @@ def convert(hf_dir: Path, output_path: Path) -> None:
         # The HF safetensors store only the `weight` offset; llama.cpp applies
         # the stored value directly as a scale, so we must add +1.0 here.
         if tensor.ndim == 1:
-            arr = np.array(tensor.astype(mx.float32), dtype=np.float32)
+            arr = tensor.to(torch.float32).numpy()
             if hf_name.endswith("norm.weight"):
                 arr = arr + 1.0
         else:
-            arr = np.array(tensor.astype(mx.float16), dtype=np.float16)
+            arr = tensor.to(torch.float16).numpy()
         writer.add_tensor(gguf_base + suffix, arr)
 
     if skipped:

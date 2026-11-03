@@ -8,7 +8,7 @@ on:
 
 jobs:
   python:
-    runs-on: macos-14  # Apple Silicon — required for mlx-lm
+    runs-on: macos-14  # small CPU torch wheel; on Linux uv would pull the multi-GB CUDA build
     steps:
       - uses: actions/checkout@v4
 

@@ -68,21 +68,18 @@ class TestBuildToolMix:
 
 
 class TestContinueToolTraining:
-    def test_resumes_from_the_source_adapter_into_a_new_run(self, tmp_path: Path) -> None:
+    def test_continues_the_source_model_into_a_new_run(self, tmp_path: Path) -> None:
         data_dir = _dataset(tmp_path, tool=4, prose=40)
         source = tmp_path / "artifacts" / "20260101_000000"
-        (source / "adapters" / "gemma3-1b-pt-chembl-toon").mkdir(parents=True)
-        (source / "adapters" / "gemma3-1b-pt-chembl-toon" / "adapters.safetensors").touch()
-        (source / "mlx" / "gemma-3-1b-pt-mlx").mkdir(parents=True)
+        (source / "model").mkdir(parents=True)
+        (source / "model" / "config.json").write_text("{}")
 
         with (
             patch(
                 "app.scripts.flows.finetuning.continue_tool_training.ARTIFACTS_DIR",
                 tmp_path / "artifacts",
             ),
-            patch(
-                "app.scripts.flows.finetuning.continue_tool_training.finetune_lora"
-            ) as mock_train,
+            patch("app.scripts.flows.finetuning.continue_tool_training.finetune") as mock_train,
         ):
             run_dir = continue_tool_training(
                 from_run=source,
@@ -92,15 +89,15 @@ class TestContinueToolTraining:
                 run_name="20260102_000000_tools",
             )
 
-        kwargs = mock_train.call_args.kwargs
-        assert kwargs["resume_from"].name == "adapters.safetensors"
-        assert kwargs["iters"] == 120
-        # The source adapter must not be the training output: it stays intact.
-        assert run_dir != source
-        assert mock_train.call_args.args[1] != source / "adapters" / "gemma3-1b-pt-chembl-toon"
+        base, out_dir, train_dir = mock_train.call_args.args
+        assert base == source / "model"
+        assert train_dir == tmp_path / "mix"
+        assert mock_train.call_args.kwargs["iters"] == 120
+        # The source model must not be the training output: it stays intact.
+        assert out_dir == run_dir != source
 
     def test_refuses_a_run_that_never_finished_training(self, tmp_path: Path) -> None:
         source = tmp_path / "artifacts" / "20260101_000000"
-        (source / "adapters" / "gemma3-1b-pt-chembl-toon").mkdir(parents=True)  # config only
-        with pytest.raises(FileNotFoundError, match="No trained adapter"):
+        (source / "checkpoints" / "checkpoint-200").mkdir(parents=True)  # no model/
+        with pytest.raises(FileNotFoundError, match="No trained model"):
             continue_tool_training(from_run=source, data_dir=_dataset(tmp_path, 2, 2))

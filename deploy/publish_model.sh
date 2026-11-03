@@ -5,14 +5,14 @@
 #
 # Defaults to the latest run in artifacts/. Re-run after each new fine-tune +
 # export_to_ollama; then rebuild the Ollama image from that prefix.
-# Rebuild on any machine with:  ollama create chembl-drug-chat:1b -f Modelfile
+# Rebuild on any machine with:  ollama create chembl-drug-chat:270m -f Modelfile
 set -euo pipefail
 
 : "${BUCKET:?set BUCKET to the GCS bucket name}"
 run_dir="${1:-$(ls -d artifacts/*/ | sort | tail -1)}"
 run_dir="${run_dir%/}"
 run="$(basename "$run_dir")"
-src="$run_dir/mlx/ollama"
+src="$run_dir/ollama"
 eval_metrics="data/eval/$run/finetuned_eval_metrics.json"
 
 [[ -f "$src/chembl-drug-chat.gguf" && -f "$src/Modelfile" ]] \

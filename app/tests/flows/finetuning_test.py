@@ -1,17 +1,18 @@
 """Tests for app/scripts/flows/finetuning/finetuning.py."""
 
 import json
-import subprocess
 from pathlib import Path
 from unittest.mock import DEFAULT, MagicMock, patch
 
-import pytest
+import torch
+
+# transformers loads these lazily; touch them once so the patches below stick.
+from transformers import AutoModelForCausalLM, AutoTokenizer, Trainer  # noqa: F401
 
 from app.scripts.flows.finetuning.finetuning import (
     HF_MODEL_ID,
-    MAX_METAL_RETRIES,
-    convert_to_mlx,
-    finetune_lora,
+    collate,
+    finetune,
     gemma3_chembl_toon_finetune_flow,
     split_long_sequences,
 )
@@ -165,250 +166,112 @@ class TestSplitLongSequences:
         assert len(result) == 4  # 1 unchanged + 3 chunks
 
 
-# ── convert_to_mlx ────────────────────────────────────────────────────────────
+# ── collate ───────────────────────────────────────────────────────────────────
 
 
-class TestConvertToMlx:
-    def test_returns_mlx_model_dir(self, tmp_path: Path) -> None:
-        mlx_dir = tmp_path / "mlx" / "model"
-        with patch("app.scripts.flows.finetuning.finetuning._run"):
-            result = convert_to_mlx(HF_MODEL_ID, mlx_dir)
-        assert result == mlx_dir
+class _CharTokenizer:
+    """One token per character, right padding with 0 — enough to check masking."""
 
-    def test_creates_parent_dir(self, tmp_path: Path) -> None:
-        mlx_dir = tmp_path / "mlx" / "nested" / "model"
-        with patch("app.scripts.flows.finetuning.finetuning._run"):
-            convert_to_mlx(HF_MODEL_ID, mlx_dir)
-        assert mlx_dir.parent.exists()
+    eos_token = "|"
 
-    def test_run_called_with_mlx_lm_convert(self, tmp_path: Path) -> None:
-        mlx_dir = tmp_path / "model"
-        with patch("app.scripts.flows.finetuning.finetuning._run") as mock_run:
-            convert_to_mlx(HF_MODEL_ID, mlx_dir)
-
-        cmd = mock_run.call_args.args[0]
-        assert "-m" in cmd
-        assert "mlx_lm" in cmd
-        assert "convert" in cmd
-
-    def test_run_called_with_hf_model_id(self, tmp_path: Path) -> None:
-        mlx_dir = tmp_path / "model"
-        with patch("app.scripts.flows.finetuning.finetuning._run") as mock_run:
-            convert_to_mlx(HF_MODEL_ID, mlx_dir)
-
-        cmd = mock_run.call_args.args[0]
-        assert HF_MODEL_ID in cmd
-
-    def test_run_called_with_4bit_quantisation(self, tmp_path: Path) -> None:
-        mlx_dir = tmp_path / "model"
-        with patch("app.scripts.flows.finetuning.finetuning._run") as mock_run:
-            convert_to_mlx(HF_MODEL_ID, mlx_dir)
-
-        cmd = mock_run.call_args.args[0]
-        assert "--q-bits" in cmd
-        assert "4" in cmd
+    def __call__(self, texts, max_length, **_):
+        ids = [[ord(c) for c in t][:max_length] for t in texts]
+        width = max(len(i) for i in ids)
+        return {
+            "input_ids": torch.tensor([i + [0] * (width - len(i)) for i in ids]),
+            "attention_mask": torch.tensor([[1] * len(i) + [0] * (width - len(i)) for i in ids]),
+        }
 
 
-# ── finetune_lora ─────────────────────────────────────────────────────────────
+class TestCollate:
+    def test_appends_eos_so_the_model_learns_to_stop(self) -> None:
+        batch = collate(_CharTokenizer(), ["ab"])
+        assert batch["input_ids"][0].tolist() == [ord("a"), ord("b"), ord("|")]
+
+    def test_padding_is_masked_out_of_the_loss(self) -> None:
+        batch = collate(_CharTokenizer(), ["a", "abc"])
+        assert batch["labels"][0].tolist() == [ord("a"), ord("|"), -100, -100]
+        assert batch["labels"][1].tolist() == batch["input_ids"][1].tolist()
+
+    def test_truncates_to_max_seq_len(self) -> None:
+        batch = collate(_CharTokenizer(), ["abcdef"], max_seq_len=3)
+        assert batch["input_ids"].shape == (1, 3)
 
 
-class TestFinetuneLora:
-    def test_returns_adapter_dir(self, tmp_path: Path) -> None:
-        mlx_dir = tmp_path / "mlx"
-        adapter_dir = tmp_path / "adapter"
-        with patch("app.scripts.flows.finetuning.finetuning._run"):
-            result = finetune_lora(mlx_dir, adapter_dir)
-        assert result == adapter_dir
+# ── finetune ──────────────────────────────────────────────────────────────────
 
-    def test_creates_adapter_dir(self, tmp_path: Path) -> None:
-        mlx_dir = tmp_path / "mlx"
-        adapter_dir = tmp_path / "nested" / "adapter"
-        with patch("app.scripts.flows.finetuning.finetuning._run"):
-            finetune_lora(mlx_dir, adapter_dir)
-        assert adapter_dir.exists()
 
-    def test_run_called_with_mlx_lm_lora(self, tmp_path: Path) -> None:
-        with patch("app.scripts.flows.finetuning.finetuning._run") as mock_run:
-            finetune_lora(tmp_path / "mlx", tmp_path / "adapter")
+def _finetune_with_mocks(tmp_path: Path, run_dir: Path) -> MagicMock:
+    """Run finetune() with model, tokenizer and Trainer mocked; return the Trainer mock."""
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    _write_jsonl(data_dir / "train.jsonl", [{"text": "q1"}, {"text": "q2"}])
+    _write_jsonl(data_dir / "valid.jsonl", [{"text": "v1"}])
+    trainer = MagicMock()
+    trainer.state.log_history = [{"loss": 1.0}]
+    with (
+        patch("transformers.AutoTokenizer.from_pretrained"),
+        patch("transformers.AutoModelForCausalLM.from_pretrained"),
+        patch("transformers.Trainer", return_value=trainer) as trainer_cls,
+    ):
+        finetune("base", run_dir, data_dir, iters=10)
+    trainer.cls_kwargs = trainer_cls.call_args.kwargs
+    return trainer
 
-        cmd = mock_run.call_args.args[0]
-        assert "mlx_lm" in cmd
-        assert "lora" in cmd
 
-    def test_run_called_with_grad_checkpoint(self, tmp_path: Path) -> None:
-        with patch("app.scripts.flows.finetuning.finetuning._run") as mock_run:
-            finetune_lora(tmp_path / "mlx", tmp_path / "adapter")
+class TestFinetune:
+    def test_trains_on_the_text_of_each_record(self, tmp_path: Path) -> None:
+        trainer = _finetune_with_mocks(tmp_path, tmp_path / "run")
+        assert trainer.cls_kwargs["train_dataset"] == ["q1", "q2"]
+        assert trainer.cls_kwargs["eval_dataset"] == ["v1"]
 
-        cmd = mock_run.call_args.args[0]
-        assert "--grad-checkpoint" in cmd
+    def test_fresh_run_does_not_resume(self, tmp_path: Path) -> None:
+        trainer = _finetune_with_mocks(tmp_path, tmp_path / "run")
+        trainer.train.assert_called_once_with(resume_from_checkpoint=None)
 
-    def test_log_file_passed_to_run(self, tmp_path: Path) -> None:
-        log = tmp_path / "logs" / "finetune.log"
-        with patch("app.scripts.flows.finetuning.finetuning._run") as mock_run:
-            finetune_lora(tmp_path / "mlx", tmp_path / "adapter", log_file=log)
+    def test_resumes_when_a_checkpoint_exists(self, tmp_path: Path) -> None:
+        run_dir = tmp_path / "run"
+        (run_dir / "checkpoints" / "checkpoint-200").mkdir(parents=True)
+        trainer = _finetune_with_mocks(tmp_path, run_dir)
+        trainer.train.assert_called_once_with(resume_from_checkpoint=True)
 
-        assert mock_run.call_args.kwargs.get("log_file") == log
-
-    def test_custom_iters_passed_to_run(self, tmp_path: Path) -> None:
-        with patch("app.scripts.flows.finetuning.finetuning._run") as mock_run:
-            finetune_lora(tmp_path / "mlx", tmp_path / "adapter", iters=42)
-
-        cmd = mock_run.call_args.args[0]
-        assert "--iters" in cmd
-        assert "42" in cmd
+    def test_saves_model_and_training_log(self, tmp_path: Path) -> None:
+        run_dir = tmp_path / "run"
+        trainer = _finetune_with_mocks(tmp_path, run_dir)
+        trainer.save_model.assert_called_once_with(str(run_dir / "model"))
+        assert json.loads((run_dir / "logs" / "train_log.json").read_text()) == [{"loss": 1.0}]
 
 
 # ── gemma3_chembl_toon_finetune_flow ──────────────────────────────────────────
 
-_FLOW_PATCH = "app.scripts.flows.finetuning.finetuning"
-
 
 class TestGemma3ChemblToonFinetuneFlow:
-    def test_all_stages_called(self) -> None:
+    def _run(self, **kwargs) -> dict[str, MagicMock]:
         with patch.multiple(
-            _FLOW_PATCH,
+            "app.scripts.flows.finetuning.finetuning",
             split_long_sequences=DEFAULT,
-            convert_to_mlx=DEFAULT,
-            finetune_lora=DEFAULT,
+            finetune=DEFAULT,
             export_to_ollama=DEFAULT,
         ) as mocks:
-            mocks["convert_to_mlx"].side_effect = lambda hf, d: d
-            mocks["finetune_lora"].side_effect = lambda m, d, *a, **kw: d
-            gemma3_chembl_toon_finetune_flow(run_name="test_run")
+            gemma3_chembl_toon_finetune_flow(**kwargs)
+        return mocks
 
-        assert mocks["split_long_sequences"].called
-        assert mocks["convert_to_mlx"].called
-        assert mocks["finetune_lora"].called
-        assert mocks["export_to_ollama"].called
-
-    def test_respects_custom_run_name(self) -> None:
-        with patch.multiple(
-            _FLOW_PATCH,
-            split_long_sequences=DEFAULT,
-            convert_to_mlx=DEFAULT,
-            finetune_lora=DEFAULT,
-            export_to_ollama=DEFAULT,
-        ) as mocks:
-            mocks["convert_to_mlx"].side_effect = lambda hf, d: d
-            mocks["finetune_lora"].side_effect = lambda m, d, *a, **kw: d
-            gemma3_chembl_toon_finetune_flow(run_name="my_custom_run")
-
-        # run_name is embedded in mlx_model_dir: artifacts/<run_name>/mlx/...
-        mlx_dir_arg: Path = mocks["convert_to_mlx"].call_args.args[1]
-        assert "my_custom_run" in str(mlx_dir_arg)
+    def test_trains_into_the_named_run(self) -> None:
+        mocks = self._run(run_name="my_run", export=False)
+        base, run_dir = mocks["finetune"].call_args.args[:2]
+        assert base == HF_MODEL_ID
+        assert run_dir == Path("artifacts") / "my_run"
 
     def test_run_name_defaults_to_timestamp(self) -> None:
-        with patch.multiple(
-            _FLOW_PATCH,
-            split_long_sequences=DEFAULT,
-            convert_to_mlx=DEFAULT,
-            finetune_lora=DEFAULT,
-            export_to_ollama=DEFAULT,
-        ) as mocks:
-            mocks["convert_to_mlx"].side_effect = lambda hf, d: d
-            mocks["finetune_lora"].side_effect = lambda m, d, *a, **kw: d
-            gemma3_chembl_toon_finetune_flow()
+        mocks = self._run(export=False)
+        run_dir: Path = mocks["finetune"].call_args.args[1]
+        assert run_dir.name[:8].isdigit()
 
-        # mlx_model_dir = artifacts/<run_name>/mlx/gemma-3-1b-pt-mlx
-        mlx_dir_arg: Path = mocks["convert_to_mlx"].call_args.args[1]
-        run_name = mlx_dir_arg.parts[1]  # ('artifacts', '<run_name>', 'mlx', ...)
-        assert len(run_name) == 15  # YYYYMMDD_HHMMSS
+    def test_hf_model_id_forwarded_to_split_and_training(self) -> None:
+        mocks = self._run(hf_model_id="org/other", run_name="r", export=False)
+        assert mocks["split_long_sequences"].call_args.args[1] == "org/other"
+        assert mocks["finetune"].call_args.args[0] == "org/other"
 
-    def test_hf_model_id_forwarded_to_split(self) -> None:
-        custom_id = "google/gemma-3-4b-pt"
-        with patch.multiple(
-            _FLOW_PATCH,
-            split_long_sequences=DEFAULT,
-            convert_to_mlx=DEFAULT,
-            finetune_lora=DEFAULT,
-            export_to_ollama=DEFAULT,
-        ) as mocks:
-            mocks["convert_to_mlx"].side_effect = lambda hf, d: d
-            mocks["finetune_lora"].side_effect = lambda m, d, *a, **kw: d
-            gemma3_chembl_toon_finetune_flow(hf_model_id=custom_id, run_name="test_run")
-
-        assert mocks["split_long_sequences"].call_args.args[1] == custom_id
-
-
-# ── Metal watchdog retry ──────────────────────────────────────────────────────
-
-
-class TestMetalWatchdogRetry:
-    """A killed command buffer must resume from the last checkpoint, not restart."""
-
-    @staticmethod
-    def _crash_then_succeed(adapter_dir: Path, log_file: Path, checkpoint_iter: int | None):
-        calls: list[list[str]] = []
-
-        def fake_run(cmd, cwd=None, log_file=log_file):  # noqa: ARG001
-            calls.append(cmd)
-            if len(calls) == 1:
-                log_file.parent.mkdir(parents=True, exist_ok=True)
-                log_file.write_text(
-                    "Iter 100: Train loss 1.5\nlibc++abi: ... Impacting Interactivity ...\n"
-                )
-                if checkpoint_iter is not None:
-                    adapter_dir.mkdir(parents=True, exist_ok=True)
-                    (adapter_dir / f"{checkpoint_iter:07d}_adapters.safetensors").touch()
-                raise subprocess.CalledProcessError(6, cmd)
-
-        return calls, fake_run
-
-    def test_resumes_from_latest_checkpoint_with_remaining_iters(self, tmp_path: Path) -> None:
-        adapter_dir, log_file = tmp_path / "adapter", tmp_path / "logs" / "finetune.log"
-        calls, fake_run = self._crash_then_succeed(adapter_dir, log_file, checkpoint_iter=100)
-
-        with patch("app.scripts.flows.finetuning.finetuning._run", side_effect=fake_run):
-            finetune_lora(tmp_path / "mlx", adapter_dir, iters=3000, log_file=log_file)
-
-        assert len(calls) == 2
-        assert "--resume-adapter-file" not in calls[0]
-        assert calls[0][calls[0].index("--iters") + 1] == "3000"
-        resumed = calls[1][calls[1].index("--resume-adapter-file") + 1]
-        assert resumed.endswith("0000100_adapters.safetensors")
-        assert calls[1][calls[1].index("--iters") + 1] == "2900"
-        # The crash log is kept rather than overwritten by the retry.
-        assert (log_file.parent / "finetune.attempt1.log").exists()
-
-    def test_restarts_when_the_crash_predates_the_first_checkpoint(self, tmp_path: Path) -> None:
-        adapter_dir, log_file = tmp_path / "adapter", tmp_path / "logs" / "finetune.log"
-        calls, fake_run = self._crash_then_succeed(adapter_dir, log_file, checkpoint_iter=None)
-
-        with patch("app.scripts.flows.finetuning.finetuning._run", side_effect=fake_run):
-            finetune_lora(tmp_path / "mlx", adapter_dir, iters=3000, log_file=log_file)
-
-        assert len(calls) == 2
-        assert "--resume-adapter-file" not in calls[1]
-        assert calls[1][calls[1].index("--iters") + 1] == "3000"
-
-    def test_other_failures_are_not_retried(self, tmp_path: Path) -> None:
-        log_file = tmp_path / "logs" / "finetune.log"
-
-        def fake_run(cmd, cwd=None, log_file=log_file):  # noqa: ARG001
-            log_file.parent.mkdir(parents=True, exist_ok=True)
-            log_file.write_text("RuntimeError: something else entirely\n")
-            raise subprocess.CalledProcessError(1, cmd)
-
-        with (
-            patch("app.scripts.flows.finetuning.finetuning._run", side_effect=fake_run) as mock_run,
-            pytest.raises(subprocess.CalledProcessError),
-        ):
-            finetune_lora(tmp_path / "mlx", tmp_path / "adapter", log_file=log_file)
-        assert mock_run.call_count == 1
-
-    def test_gives_up_after_max_retries(self, tmp_path: Path) -> None:
-        log_file = tmp_path / "logs" / "finetune.log"
-
-        def always_killed(cmd, cwd=None, log_file=log_file):  # noqa: ARG001
-            log_file.parent.mkdir(parents=True, exist_ok=True)
-            log_file.write_text("libc++abi: ... Impacting Interactivity ...\n")
-            raise subprocess.CalledProcessError(6, cmd)
-
-        with (
-            patch(
-                "app.scripts.flows.finetuning.finetuning._run", side_effect=always_killed
-            ) as mock_run,
-            pytest.raises(subprocess.CalledProcessError),
-        ):
-            finetune_lora(tmp_path / "mlx", tmp_path / "adapter", log_file=log_file)
-        assert mock_run.call_count == MAX_METAL_RETRIES + 1
+    def test_export_only_when_asked(self) -> None:
+        assert not self._run(run_name="r", export=False)["export_to_ollama"].called
+        assert self._run(run_name="r", export=True)["export_to_ollama"].called

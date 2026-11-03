@@ -248,3 +248,30 @@ class TestCollectData:
 
         mock_tarfile.assert_called_once_with(archive_path, "r:gz")
         mock_tar.extractall.assert_called_once_with(path="data", filter="data")
+
+
+def test_existing_archive_skips_download(tmp_path, monkeypatch):
+    """A pre-downloaded archive (e.g. via aria2c) is extracted, not re-downloaded."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "data").mkdir()
+    sample = tmp_path / "sample.txt"
+    sample.write_text("x")
+    archive = tmp_path / "data" / "chembl_37_sqlite.tar.gz"
+    with tarfile.open(archive, "w:gz") as tar:
+        tar.add(sample, arcname="chembl_37/sqlite/sample.txt")
+
+    with patch("httpx.stream") as stream:
+        collect_data("37")
+
+    stream.assert_not_called()
+    assert (tmp_path / "data/chembl_37/sqlite/sample.txt").exists()
+    assert not archive.exists()
+
+
+def test_already_extracted_skips_everything(tmp_path, monkeypatch):
+    """A re-run after extraction (e.g. the pipeline resuming) downloads nothing."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "data/chembl_37/chembl_37_sqlite").mkdir(parents=True)
+    with patch("httpx.stream") as stream:
+        collect_data("37")
+    stream.assert_not_called()

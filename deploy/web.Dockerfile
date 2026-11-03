@@ -22,12 +22,13 @@ RUN cd web && bun install --frozen-lockfile --production
 COPY app app
 COPY web web
 
-# server.ts rebuilds public/frontend.js on boot, so the runtime user must own public/.
-RUN chown -R bun:bun web/public
+# Build the frontend once here instead of on every boot (cold start).
+RUN cd web && bun build src/frontend.ts --outdir public --target browser
 USER bun
 
 WORKDIR /app/web
 ENV PORT=3000 \
-    LANCEDB_DIR=/mnt/lancedb
+    LANCEDB_DIR=/mnt/lancedb \
+    FRONTEND_PREBUILT=1
 EXPOSE 3000
 CMD ["bun", "run", "server.ts"]

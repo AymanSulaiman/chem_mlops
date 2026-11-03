@@ -105,7 +105,7 @@ function readTextFile(path: string, publicDir: URL) {
 export function createChatRequestHandler(options: ChatAppOptions = {}) {
   const ollamaBaseUrl = options.ollamaBaseUrl ?? Bun.env.OLLAMA_BASE_URL ?? "http://127.0.0.1:11434";
   const ollamaModelPrefix = options.ollamaModelPrefix ?? Bun.env.OLLAMA_MODEL_PREFIX ?? "chembl-drug-chat";
-  const fallbackModelName = options.fallbackModelName ?? Bun.env.OLLAMA_MODEL_NAME ?? "chembl-drug-chat:1b";
+  const fallbackModelName = options.fallbackModelName ?? Bun.env.OLLAMA_MODEL_NAME ?? "chembl-drug-chat:270m";
   const publicDir = options.publicDir ?? new URL("../public/", import.meta.url);
   const fetchImpl = options.fetchImpl ?? fetch;
   const toolRunner = options.toolRunner ?? ((call: ToolCall) => runTool(call));

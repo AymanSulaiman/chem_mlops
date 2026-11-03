@@ -1,8 +1,9 @@
 """
-Export a fine-tuned ChEMBL LoRA adapter to Ollama.
+Export a fine-tuned ChEMBL model to GGUF and register it with Ollama.
 
 Use this script to register (or re-register) any completed fine-tuning run with
-Ollama without re-running the full training pipeline.
+Ollama without re-running training. Training can happen elsewhere (Colab): copy
+the run's ``model/`` folder into ``artifacts/<run>/`` and export here.
 
 Usage
 -----
@@ -13,12 +14,8 @@ Usage
     uv run python -m app.scripts.flows.finetuning.export_to_ollama \\
         --run-dir artifacts/20260403_220717
 
-    # Custom Ollama model name:
-    uv run python -m app.scripts.flows.finetuning.export_to_ollama \\
-        --model-name my-chem-model:latest
-
     # After export, start a chat:
-    ollama run chembl-drug-chat:1b
+    ollama run chembl-drug-chat:270m
 """
 
 import argparse
@@ -28,29 +25,25 @@ import sys
 from pathlib import Path
 
 ARTIFACTS_DIR = Path("artifacts")
-DEFAULT_MLX_SUBDIR = "mlx/gemma-3-1b-pt-mlx"
-DEFAULT_ADAPTER_SUBDIR = "adapters/gemma3-1b-pt-chembl-toon"
-DEFAULT_MODEL_NAME = "chembl-drug-chat:1b"
+MODEL_SUBDIR = "model"  # the fine-tuned Hugging Face model inside a run dir
+CHECKPOINTS_SUBDIR = "checkpoints"
+OLLAMA_SUBDIR = "ollama"  # GGUF + Modelfile, portable as a pair
+DEFAULT_MODEL_NAME = "chembl-drug-chat:270m"
+# llama.cpp quantization type. The quantized GGUF is the file that ships, so the
+# deployed model is byte-for-byte the one registered (and measured) here.
+# Done with llama-quantize because Ollama 0.40 can only quantize safetensors
+# imports, and that path does not support Gemma 3.
+QUANTIZE = "Q4_K_M"
 
-SYSTEM_PROMPT = """\
-You are ChEMBL Drug Chat, a conversational pharmacology assistant specialising in \
-drug-drug interactions, mechanisms of action, and clinical pharmacology. \
-Your knowledge comes from the ChEMBL database.
 
-Rules:
-- Greetings ("hi", "hello", "hey"): respond with a short, friendly introduction. \
-Do NOT mention specific compounds.
-- Capability questions ("what can you do", "help", "tell me what you can do"): list \
-your topic areas briefly. Do NOT reference compounds from earlier in the conversation.
-- Drug interaction questions: name the shared metabolic enzyme (e.g. CYP3A4), explain \
-what competition for that enzyme means for plasma levels, and state the clinical risk. \
-Be specific — do not use vague filler like "consult guidelines" as your main answer.
-- If you don't have data on a specific drug pair, say so clearly: \
-"I don't have specific interaction data for that pair in ChEMBL."
-- Do NOT repeat sentences or phrases you have already written in this response.
-- Do not role-play as a doctor, pharmacist, or any other professional.
-- If a question is off-topic, say so in one sentence and offer to help with a drug question.\
-"""
+def _quantize(src: Path, dst: Path, qtype: str) -> None:
+    tool = shutil.which("llama-quantize")
+    if tool is None:
+        raise FileNotFoundError(
+            "llama-quantize not found. Install llama.cpp (macOS: `brew install llama.cpp`), "
+            "or export unquantized with --quantize ''."
+        )
+    _run([tool, str(src), str(dst), qtype])
 
 
 def _run(cmd: list[str]) -> None:
@@ -70,105 +63,15 @@ def latest_run_dir(artifacts_dir: Path) -> Path:
     return runs[-1]
 
 
-def export_to_ollama(
-    run_dir: Path,
-    model_name: str = DEFAULT_MODEL_NAME,
-    mlx_subdir: str = DEFAULT_MLX_SUBDIR,
-    adapter_subdir: str = DEFAULT_ADAPTER_SUBDIR,
-    force: bool = False,
-) -> None:
-    """
-    Fuse a LoRA adapter into the base MLX model, export to GGUF, and register
-    the resulting model with Ollama.
-
-    Args:
-        run_dir:        Artifact run directory (e.g. ``artifacts/20260403_220717``).
-        model_name:     Ollama model name to create (e.g. ``chembl-drug-chat:1b``).
-        mlx_subdir:     Subdirectory within run_dir containing the MLX base model.
-        adapter_subdir: Subdirectory within run_dir containing the LoRA adapter.
-        force:          If True, overwrite an existing ollama export directory.
-    """
-    mlx_model_dir = run_dir / mlx_subdir
-    adapter_dir = run_dir / adapter_subdir
-    output_dir = run_dir / "mlx" / "ollama"
-    gguf_path = output_dir / "chembl-drug-chat.gguf"
-    modelfile_path = output_dir / "Modelfile"
-
-    if not mlx_model_dir.exists():
-        raise FileNotFoundError(f"MLX model not found: {mlx_model_dir}")
-    if not adapter_dir.exists():
-        raise FileNotFoundError(f"Adapter not found: {adapter_dir}")
-    # mlx_lm writes adapters.safetensors only when training finishes. A crashed run
-    # leaves adapter_config.json alone, or numbered checkpoints if it got past
-    # --save-every; fail here rather than inside mlx_lm's traceback.
-    if not (adapter_dir / "adapters.safetensors").exists():
-        checkpoints = sorted(adapter_dir.glob("*_adapters.safetensors"))
-        hint = (
-            f"Latest checkpoint is {checkpoints[-1].name} — copy it to adapters.safetensors "
-            "to export a partially trained adapter."
-            if checkpoints
-            else "No checkpoints either: the run crashed before the first --save-every. "
-            "Check the training log and re-run the fine-tune."
-        )
-        raise FileNotFoundError(
-            f"Training did not finish: no adapters.safetensors in {adapter_dir}. {hint}"
-        )
-
-    print(f"\n{'=' * 60}")
-    print(f"Exporting run: {run_dir}")
-    print(f"  MLX model : {mlx_model_dir}")
-    print(f"  Adapter   : {adapter_dir}")
-    print(f"  Output    : {output_dir}")
-    print(f"  Ollama    : {model_name}")
-    print(f"{'=' * 60}\n")
-
-    if output_dir.exists():
-        if force:
-            shutil.rmtree(output_dir)
-        else:
-            print(f"Output directory already exists: {output_dir}")
-            print("Use --force to overwrite.")
-            return
-
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    fused_hf_dir = output_dir / "fused_hf"
-
-    # Step 1 — fuse adapter into base model, save as HF safetensors
-    # (mlx_lm --export-gguf does not support gemma3_text, so we use --save-path
-    #  and convert to GGUF in step 2 via llama.cpp's convert script)
-    print("Step 1/4 — Fusing LoRA adapter into base model (HF format)...")
-    _run(
-        [
-            "python",
-            "-m",
-            "mlx_lm",
-            "fuse",
-            "--model",
-            str(mlx_model_dir),
-            "--adapter-path",
-            str(adapter_dir),
-            "--save-path",
-            str(fused_hf_dir),
-            "--de-quantize",
-        ]
-    )
-
-    # Step 2 — convert HF safetensors → GGUF using built-in converter (no PyTorch needed)
-    print("Step 2/4 — Converting to GGUF (mlx + gguf, no PyTorch)...")
-    from app.scripts.flows.finetuning.convert_gemma3_gguf import convert as _gguf_convert
-
-    _gguf_convert(fused_hf_dir, gguf_path)
-
-    # Step 3 — write Modelfile
-    print("Step 3/4 — Writing Modelfile...")
-    # The model was fine-tuned on raw "### Question / ### Answer" text (no chat
-    # template).  Override Ollama's default Gemma template so prompts are sent
-    # in the exact format the model expects.
+def write_modelfile(modelfile_path: Path, gguf_name: str) -> None:
+    """Write the Modelfile that pairs with *gguf_name* in the same folder."""
+    # No SYSTEM block. The model is trained and evaluated on bare
+    # "### Question / ### Answer" text; a baked-in system prompt is prepended by
+    # Ollama to every chat and pulls it out of distribution. Measured on
+    # 20260921_184541_tools: 0/8 tool calls with the old SYSTEM block, 4/8 without.
     modelfile_path.write_text(
         # Relative to the Modelfile, so the folder can be copied anywhere (e.g. a container).
-        f"FROM ./{gguf_path.name}\n\n"
-        f'SYSTEM """\n{SYSTEM_PROMPT}\n"""\n\n'
+        f"FROM ./{gguf_name}\n\n"
         # Multi-turn template: each user message is wrapped in ### Question / ### Answer
         # so the model sees the exact format it was trained on, while Ollama passes the
         # full conversation history via .Messages on every turn.
@@ -188,15 +91,82 @@ def export_to_ollama(
         "PARAMETER repeat_penalty 1.1\n"
         "PARAMETER repeat_last_n 512\n"
         # 2048 was fine for prose turns; a tool result (truncated at 2000 chars)
-        # plus the system prompt plus history overflows it and silently drops the
-        # oldest turns — including the tool result the answer depends on.
+        # plus history overflows it and silently drops the oldest turns —
+        # including the tool result the answer depends on.
         "PARAMETER num_ctx 8192\n"
         "PARAMETER num_predict 512\n"
         'PARAMETER stop "### Question"\n'
     )
+
+
+def export_to_ollama(
+    run_dir: Path,
+    model_name: str = DEFAULT_MODEL_NAME,
+    force: bool = False,
+    quantize: str = QUANTIZE,
+) -> None:
+    """
+    Convert the run's fine-tuned model to GGUF, write a Modelfile, and register
+    it with Ollama. The GGUF is quantized to *quantize* (empty string keeps F16).
+
+    Args:
+        run_dir:    Artifact run directory (e.g. ``artifacts/20260403_220717``).
+        model_name: Ollama model name to create.
+        force:      If True, overwrite an existing ollama export directory.
+        quantize:   llama.cpp quantization type, e.g. ``Q4_K_M``.
+    """
+    model_dir = run_dir / MODEL_SUBDIR
+    output_dir = run_dir / OLLAMA_SUBDIR
+    gguf_path = output_dir / "chembl-drug-chat.gguf"
+    modelfile_path = output_dir / "Modelfile"
+
+    # The Trainer writes model/ only when training finishes. A crashed run
+    # leaves checkpoints/; fail here rather than inside the converter.
+    if not (model_dir / "config.json").exists():
+        checkpoints = sorted(
+            (run_dir / CHECKPOINTS_SUBDIR).glob("checkpoint-*"),
+            key=lambda p: int(p.name.split("-")[-1]),
+        )
+        hint = (
+            f"Latest checkpoint is {checkpoints[-1].name}: re-run training with the same "
+            "--run-name to resume and finish."
+            if checkpoints
+            else "No checkpoints either. Check the training log and re-run the fine-tune."
+        )
+        raise FileNotFoundError(f"Training did not finish: no model in {model_dir}. {hint}")
+
+    print(f"\n{'=' * 60}")
+    print(f"Exporting run: {run_dir}")
+    print(f"  Model    : {model_dir}")
+    print(f"  Output   : {output_dir}")
+    print(f"  Ollama   : {model_name} ({quantize or 'F16'})")
+    print(f"{'=' * 60}\n")
+
+    if output_dir.exists():
+        if force:
+            shutil.rmtree(output_dir)
+        else:
+            print(f"Output directory already exists: {output_dir}")
+            print("Use --force to overwrite.")
+            return
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    print("Step 1/4 — Converting to GGUF (F16)...")
+    from app.scripts.flows.finetuning.convert_gemma3_gguf import convert as _gguf_convert
+
+    f16_path = gguf_path.with_suffix(".f16.gguf") if quantize else gguf_path
+    _gguf_convert(model_dir, f16_path)
+
+    if quantize:
+        print(f"Step 2/4 — Quantizing to {quantize}...")
+        _quantize(f16_path, gguf_path, quantize)
+        f16_path.unlink(missing_ok=True)  # rebuildable from model/; only the shipped file is kept
+
+    print("Step 3/4 — Writing Modelfile...")
+    write_modelfile(modelfile_path, gguf_path.name)
     print(f"  Written to {modelfile_path}")
 
-    # Step 4 — register with Ollama
     print(f"Step 4/4 — Registering '{model_name}' with Ollama...")
     _run(["ollama", "create", model_name, "-f", str(modelfile_path)])
 
@@ -206,15 +176,13 @@ def export_to_ollama(
     print(f"  ollama run {model_name}")
     print("\nExample questions:")
     print("  What does Aspirin target?")
-    print("  How is Warfarin metabolised?")
-    print("  Which drugs share the CYP2C9 pathway with Warfarin?")
-    print("  What are the black box warnings for Methotrexate?")
+    print("  Is it safe to take warfarin with aspirin?")
     print(f"{'=' * 60}\n")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Fuse a LoRA adapter and register the model with Ollama.",
+        description="Convert a fine-tuned run to GGUF and register it with Ollama.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
@@ -235,16 +203,9 @@ if __name__ == "__main__":
         help=f"Ollama model name to create (default: {DEFAULT_MODEL_NAME})",
     )
     parser.add_argument(
-        "--mlx-subdir",
-        default=DEFAULT_MLX_SUBDIR,
-        metavar="PATH",
-        help=f"MLX model subdirectory within run-dir (default: {DEFAULT_MLX_SUBDIR})",
-    )
-    parser.add_argument(
-        "--adapter-subdir",
-        default=DEFAULT_ADAPTER_SUBDIR,
-        metavar="PATH",
-        help=f"Adapter subdirectory within run-dir (default: {DEFAULT_ADAPTER_SUBDIR})",
+        "--quantize",
+        default=QUANTIZE,
+        help=f"llama.cpp quantization, '' for F16 (default: {QUANTIZE})",
     )
     parser.add_argument(
         "--force",
@@ -254,12 +215,9 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    run_dir = args.run_dir or latest_run_dir(ARTIFACTS_DIR)
-
     export_to_ollama(
-        run_dir=run_dir,
+        run_dir=args.run_dir or latest_run_dir(ARTIFACTS_DIR),
         model_name=args.model_name,
-        mlx_subdir=args.mlx_subdir,
-        adapter_subdir=args.adapter_subdir,
         force=args.force,
+        quantize=args.quantize,
     )

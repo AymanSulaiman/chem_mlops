@@ -1,6 +1,6 @@
 # ChEMBL MLOps Pipeline
 
-Orchestrated with [Dagster](https://dagster.io). The pipeline downloads ChEMBL and TWOSIDES, transforms them into Parquet, builds training datasets and a vector store in parallel, fine-tunes Gemma 3, continues that adapter on a tool-heavy mix, gates on evaluation, and exports to Ollama.
+Orchestrated with [Dagster](https://dagster.io). The pipeline downloads ChEMBL and TWOSIDES, transforms them into Parquet, builds training datasets and a vector store in parallel, fine-tunes Gemma 3 270M, continues that model on a tool-heavy mix, gates on evaluation, and exports to Ollama.
 
 ---
 
@@ -150,10 +150,10 @@ flowchart LR
 |---|---|
 | Module | `app.scripts.flows.finetuning.finetuning` |
 | Depends on | Both dataset ops (fan-in) |
-| What it does | Fine-tunes `google/gemma-3-1b-pt` with LoRA via MLX |
+| What it does | Full fine-tune of `google/gemma-3-270m` with the Hugging Face Trainer (PyTorch) |
 | Config | `BATCH_SIZE=2`, `NUM_LAYERS=16`, `ITERS=3000`, `LR=1e-5`, `MAX_SEQ_LEN=2048`, `SAVE_EVERY=100` |
 | Note | `export=False`. The model that gets published is the tool-trained one, and only after the gate — exporting here would put an unevaluated model in Ollama and leave it there if the gate later failed. |
-| Output | `artifacts/<timestamp>/` — adapter weights |
+| Output | `artifacts/<timestamp>/model/` — the fine-tuned model |
 | Typical duration | ~2–4 h (Apple Silicon M1 Pro / 32 GB) |
 
 ---
@@ -164,7 +164,7 @@ flowchart LR
 |---|---|
 | Module | `app.scripts.flows.eval.eval_finetuned_model` |
 | Depends on | `finetune_llm_op` |
-| What it does | Measures the base adapter with **both quality gates disabled** (`tool_call_threshold=0.0`, `pass_threshold=0.0`). Perplexity still gates. |
+| What it does | Measures the base model with **both quality gates disabled** (`tool_call_threshold=0.0`, `pass_threshold=0.0`). Perplexity still gates. |
 | Typical duration | ~15 min |
 
 Measured, not shipped. Two reasons to spend the time:
@@ -172,7 +172,7 @@ Measured, not shipped. Two reasons to spend the time:
 - **Attribution.** Without it, a bad number after continued training has two suspects — the base run or the continuation — and no way to tell them apart once `artifacts/` has been cleaned.
 - It answers whether continued training earns its place on every run, rather than as a special investigation.
 
-The tool and golden gates are off here on purpose: this adapter has tool records at ~6% of its mix and is not expected to clear a tool-call bar. Blocking the pipeline on a model nobody ships is the mistake the golden gate used to make. Perplexity still applies — continuing from a regressed adapter is pointless, and it is better to find out before spending the continuation.
+The tool and golden gates are off here on purpose: this model has tool records at ~6% of its mix and is not expected to clear a tool-call bar. Blocking the pipeline on a model nobody ships is the mistake the golden gate used to make. Perplexity still applies — continuing from a regressed adapter is pointless, and it is better to find out before spending the continuation.
 
 ---
 
@@ -182,13 +182,13 @@ The tool and golden gates are off here on purpose: this adapter has tool records
 |---|---|
 | Module | `app.scripts.flows.finetuning.continue_tool_training` |
 | Depends on | `eval_base_model_op` |
-| Output | A new `artifacts/<stamp>_tools/` run — the source adapter is never modified |
+| Output | A new `artifacts/<stamp>_tools/` run — the source model is never modified |
 | Config | `CONTINUE_ITERS=600`, `CONTINUE_LEARNING_RATE=1e-5`, `PROSE_RATIO=2` |
 | Typical duration | minutes, not hours |
 
 The full run's tool-call records compete with ~900 K prose records answering the same question shapes from memory — roughly 6% of what the model sees. This continues that adapter on a rebuilt mix (`data/llm_finetune_tools/`) of every tool record plus prose sampled at 1:2, so tool calls are about a third of the mix. **The model that reaches the export is the tool-trained one.**
 
-The MLX base model is symlinked rather than reconverted: only the adapter changes.
+It starts from the base run's `model/` and writes its own.
 
 ---
 
@@ -220,8 +220,8 @@ The metrics file records `gates_applied` and `ungated_metrics` explicitly, so a 
 |---|---|
 | Module | `app.scripts.flows.finetuning.export_to_ollama` |
 | Depends on | `eval_finetuned_model_op` |
-| What it does | Fuses the LoRA adapter , converts to GGUF, writes a Modelfile with the `### Question / ### Answer` template and `num_ctx 8192`, and runs `ollama create chembl-drug-chat:1b` |
-| After export | `ollama run chembl-drug-chat:1b` |
+| What it does | Converts `model/` to GGUF, quantizes it to Q4_K_M, writes a Modelfile with the `### Question / ### Answer` template and `num_ctx 8192`, and runs `ollama create chembl-drug-chat:270m` |
+| After export | `ollama run chembl-drug-chat:270m` |
 
 
 ---
@@ -276,11 +276,11 @@ flowchart LR
     PQ -->|21 QA categories| FT[data/llm_finetune/\ntrain.jsonl + valid.jsonl]
     TW --> FT
 
-    FT -->|MLX LoRA| ART[artifacts/<run>/\nbase adapter]
+    FT -->|full fine-tune| ART[artifacts/<run>/\nbase model]
     ART -->|every tool record\n+ prose at 1:2| MIX[data/llm_finetune_tools/]
-    MIX -->|600 iters| ART2[artifacts/<run>_tools/\ntool-trained adapter]
-    ART2 -->|gate → fuse| HF[artifacts/<run>_tools/\nfused_hf/]
-    HF -->|GGUF + Modelfile| OLL[(Ollama\nchembl-drug-chat:1b)]
+    MIX -->|600 iters| ART2[artifacts/<run>_tools/\ntool-trained model]
+    ART2 -->|gate → GGUF → Q4_K_M| HF[artifacts/<run>_tools/\nollama/]
+    HF -->|GGUF + Modelfile| OLL[(Ollama\nchembl-drug-chat:270m)]
 ```
 
 ---
@@ -307,9 +307,9 @@ All ops, jobs, and schedules are exported through the `defs` object.
 | `download_twosides_op` starts immediately | Wait for ChEMBL collect | TWOSIDES is independent; starting in parallel saves ~3 min |
 | `ingest_chembl_to_lancedb_op` runs in parallel with dataset builders | Sequential after transform | No data dependency; ~6 min overlap saves wall-clock time |
 | `ingest_twosides_to_lancedb_op` fan-in from both ChEMBL LanceDB + TWOSIDES | After ChEMBL only | Needs the ChEMBL DB to exist (same LanceDB dir) and the TWOSIDES Parquet to be ready |
-| Fan-in before finetuning | Start finetuning on first dataset ready | MLX training needs both datasets for a balanced model |
+| Fan-in before finetuning | Start finetuning on first dataset ready | Training needs both datasets for a balanced model |
 | `eval_finetuned_model_op` gates finetuned quality | Export unconditionally | Prevents a regressed model from overwriting a good one |
-| Base adapter measured with gates off | Skip it and evaluate once | Attribution: a bad number after continued training otherwise has two suspects and no way to separate them |
+| Base model measured with gates off | Skip it and evaluate once | Attribution: a bad number after continued training otherwise has two suspects and no way to separate them |
 | Continued tool training in the pipeline | Full retrain on a tool-heavy mix | Minutes against hours, and it attacks the mix ratio directly. A full retrain stays available and is the honest end state if continued training drifts |
 | Run directory passed op to op | `latest_run_dir()` in each op | Anything else writing to `artifacts/` could otherwise send the gate and the export at different models |
 | Export gates on `eval_finetuned_model_op` only | Also gate on a RAG head-to-head | The RAG pane is gone — the vector store is agent tools now, so a base-vs-fine-tuned comparison measures nothing |

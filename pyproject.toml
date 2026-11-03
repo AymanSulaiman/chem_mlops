@@ -16,17 +16,18 @@ dependencies = [
 ]
 
 [dependency-groups]
-# Data pipeline, fine-tuning and orchestration. mlx-lm is Apple Silicon only.
+# Data pipeline, fine-tuning and orchestration. PyTorch runs on CUDA (Colab), MPS or CPU.
 train = [
+    "accelerate>=1.0.0",
     "dagster>=1.9.0",
     "dagster-webserver>=1.9.0",
     "duckdb>=1.4.0",
     "gguf>=0.18.0",
     "httpx>=0.28.1",
     "huggingface-hub>=0.36.0",
-    "mlx-lm>=0.28.3; sys_platform == 'darwin'",
     "pandas>=2.3.2",
     "sentencepiece>=0.2.1",
+    "torch>=2.6.0",
     "transformers>=4.57.1",
 ]
 dev = [
@@ -57,3 +58,8 @@ ignore = ["E501"]
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["app*"]
+
+[tool.ty.src]
+# ponytail: eval still imports mlx-lm, which is no longer installed. Drop this
+# exclude when eval is ported to Ollama.
+exclude = ["app/scripts/flows/eval/eval_finetuned_model.py"]
