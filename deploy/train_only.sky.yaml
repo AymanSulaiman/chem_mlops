@@ -1,0 +1,43 @@
+# Training only, from data a previous run already put in the bucket
+# (gs://chem-mlops-train/data/llm_finetune):
+#   sky jobs launch deploy/train_only.sky.yaml --env HF_TOKEN=$(cat ~/.cache/huggingface/token) -y
+# Same as the train step of deploy/train.sky.yaml (app/tests/sky_yaml_test.py keeps them equal).
+name: train
+
+resources:
+  # GPUs often sell out. Each line tries every GCP region with that GPU,
+  # cheapest first: L4 (bf16, $0.70/h), T4 (fp32, $0.59/h), V100 (fp32, $2.95/h).
+  # Outside us-central1 the bucket traffic is billed as cross-region egress.
+  ordered:
+    - {infra: gcp, accelerators: L4:1}
+    - {infra: gcp, accelerators: T4:1}
+    - {infra: gcp, accelerators: V100:1}
+  disk_size: 100
+
+workdir: .
+
+file_mounts:
+  # Checkpoints and models go here during training.
+  /bucket:
+    source: gs://chem-mlops-train
+    mode: MOUNT_CACHED
+    type: MODEL_CHECKPOINT_RW
+
+envs:
+  RUN_NAME: gcp_v1  # models land in artifacts/gcp_v1 and artifacts/gcp_v1_tools
+  HF_TOKEN:         # pass with --env; Gemma is gated on Hugging Face
+  ITERS: ""         # training steps per stage; empty = full run, e.g. 20 for a smoke test
+
+setup: |
+  curl -LsSf https://astral.sh/uv/install.sh | sh
+  ~/.local/bin/uv sync
+
+run: |
+  set -e
+  mkdir -p data /bucket/artifacts
+  cp -r /bucket/data/llm_finetune data/  # local copy: faster reads, and the tool mix is written beside it
+  ln -sfn /bucket/artifacts artifacts
+  ~/.local/bin/uv run python -m app.scripts.flows.finetuning.finetuning \
+    --run-name $RUN_NAME --no-export ${ITERS:+--iters $ITERS}
+  ~/.local/bin/uv run python -m app.scripts.flows.finetuning.continue_tool_training \
+    --from-run artifacts/$RUN_NAME --run-name ${RUN_NAME}_tools ${ITERS:+--iters $ITERS}

@@ -306,7 +306,7 @@ uv run python -m app.scripts.flows.vector_store.ingest_to_lancedb
 uv run python -m app.scripts.flows.vector_store.ingest_twosides_to_lancedb
 ```
 
-**2. Train** (needs `huggingface-cli login` with the Gemma license accepted). On a Mac, time `--iters 50` first to estimate the full 3,000 steps, or [train on Colab](#train-on-colab) and copy `model/` back into `artifacts/<run>/`. Re-running the same command resumes.
+**2. Train** (needs `huggingface-cli login` with the Gemma license accepted). On a Mac, time `--iters 50` first to estimate the full 3,000 steps, or train remotely ([Colab](#train-on-colab) or [GCP with one command](#train-on-gcp-one-command)) and copy `model/` back into `artifacts/<run>/`. Re-running the same command resumes.
 
 ```bash
 uv run python -m app.scripts.flows.finetuning.finetuning --run-name local_v1 --no-export
@@ -550,6 +550,93 @@ uv run python -m app.scripts.flows.finetuning.export_to_ollama --run-dir artifac
 
 Checkpoints hold optimizer state (~3.5 GB each); delete `checkpoints/` on Drive once a run finishes.
 
+### Train on GCP (one command)
+
+`deploy/train.sky.yaml` runs the whole pipeline in your GCP project with [SkyPilot](https://docs.skypilot.ai): the same Dagster steps as `install.sh` on a Mac, minus the Ollama export. One command runs it as two steps, each on its own VM that is deleted when the step ends:
+
+| Step | VM | ~$/h | Does |
+|------|----|------|------|
+| `data` | CPU only, 64 GB RAM (`n4-highmem-8`, us-central1) | 0.48 | Download ChEMBL and TWOSIDES, transform, build the datasets and LanceDB, copy them to the bucket |
+| `train` | L4 (`g2-standard-4`), else T4, else V100, in any GCP region with one free | 0.70 / 0.59 / 2.95 | Fine-tune, then tool-call training, from the bucket |
+
+The split exists because the data steps need lots of RAM but no GPU (the 24 GB LanceDB build), and GPU machines with that much RAM are often sold out; training needs ~16 GB. The models, checkpoints and LanceDB land in a Cloud Storage bucket. Your local code is uploaded at launch, so nothing needs pushing first. Both VMs are on-demand, not spot.
+
+**One-time setup**
+
+1. GPUs need a paid billing account (not the free trial) and GPU quota in your project: request `GPUS_ALL_REGIONS` = 1 under IAM → Quotas.
+2. Point gcloud at the project and let SkyPilot use it:
+
+```bash
+brew install --cask gcloud-cli
+gcloud auth login && gcloud auth application-default login
+gcloud config set project <PROJECT_ID>
+gcloud auth application-default set-quota-project <PROJECT_ID>
+gcloud services enable compute.googleapis.com storage.googleapis.com
+uv tool install "skypilot[gcp]"
+sky check gcp
+```
+
+3. Create the bucket. To use another name, change `source:` in `deploy/train.sky.yaml` and `deploy/train_only.sky.yaml`.
+
+```bash
+gcloud storage buckets create gs://chem-mlops-train --location=us-central1
+```
+
+**End to end: data → trained model → running app**
+
+```bash
+# 1. Data + training on GCP. Streams the logs until both steps finish;
+#    once streaming starts you can Ctrl-C (the job keeps running) or let the laptop sleep.
+sky jobs launch deploy/train.sky.yaml --env HF_TOKEN=$(cat ~/.cache/huggingface/token) -y
+
+# 2. Check both steps say SUCCEEDED
+sky jobs queue --refresh
+
+# 3. Bring the model and LanceDB home (skip lancedb if data/lancedb is already from the same build)
+gcloud storage cp -r gs://chem-mlops-train/artifacts/gcp_v1_tools/model artifacts/gcp_v1_tools/
+gcloud storage cp -r gs://chem-mlops-train/data/lancedb data/
+
+# 4. Quantise to Q4_K_M for Ollama and start the containers
+uv run python -m app.scripts.flows.finetuning.export_to_ollama --run-dir artifacts/gcp_v1_tools
+MODEL_DIR=artifacts/gcp_v1_tools/ollama docker compose up -d --build --wait
+open http://localhost:3000
+```
+
+`--env RUN_NAME=<name>` names the run (default `gcp_v1`): the models land in `artifacts/<name>` and `artifacts/<name>_tools` in the bucket, so swap `gcp_v1` for your name in steps 3–4.
+
+**Train only.** When the data is already in the bucket (a previous run's `data` step finished), skip the 45-minute data step:
+
+```bash
+sky jobs launch deploy/train_only.sky.yaml --env HF_TOKEN=$(cat ~/.cache/huggingface/token) -y
+```
+
+It takes the same `--env RUN_NAME=…` and `--env ITERS=…` options. Reuse a `RUN_NAME` to resume that run from its last checkpoint.
+
+For a smoke test of the whole path before the full run, add `--env ITERS=20 --env RUN_NAME=smoke`: the data step runs in full, training stops after 20 steps per stage. Then check `gcloud storage ls gs://chem-mlops-train/artifacts/smoke_tools/model/` and delete the `smoke*` folders.
+
+**Watch, stop and clean up**
+
+```bash
+sky jobs queue --refresh -a    # every job and step, with status and recovery count
+sky jobs logs <ID>             # follow a job's output
+sky jobs logs --controller <ID> # SkyPilot's side: provisioning, recoveries, why it failed
+sky jobs cancel <ID> -y        # stop a running job (deletes its VMs)
+sky jobs cancel -a -y          # stop every running job
+```
+
+A job that ended (`SUCCEEDED`, `FAILED`, `CANCELLED`) has nothing to cancel: SkyPilot deletes its VMs when it ends, and the row stays in `sky jobs queue -a` only as history. To be sure nothing is still billing:
+
+```bash
+sky status                                  # should list only sky-jobs-controller-…
+sky down <cluster> -y                       # delete any leftover VM it lists
+sky down sky-jobs-controller-<hash> -y      # optional, only with no jobs running; it also stops itself after 10 min idle
+gcloud compute instances list               # GCP's own view: nothing RUNNING
+```
+
+A step that keeps showing `RECOVERING` means its VM keeps dying (out of memory freezes it, and SkyPilot relaunches from scratch). Cancel it and read `sky jobs logs --controller <ID>` rather than letting it loop.
+
+Costs: each VM bills only while its step runs. SkyPilot also starts a small controller VM to manage the job, which shuts itself down after 10 minutes idle. Checkpoints (~3.5 GB each) stay in the bucket: delete `gs://chem-mlops-train/artifacts/<run>/checkpoints/` once a run finishes, and set a budget alert on the project.
+
 ### Continuing a run on tool calls
 
 A full run trains ~950 K records, in which the 60 K tool-call examples compete
@@ -779,12 +866,14 @@ chem_mlops/
 ├── deploy/
 │   ├── web.Dockerfile                     # Chat app image (Bun + serving Python deps)
 │   ├── ollama.Dockerfile                  # CPU-only Ollama with the model baked in
-│   └── publish_model.sh                   # Upload GGUF + Modelfile + manifest to GCS
+│   ├── publish_model.sh                   # Upload GGUF + Modelfile + manifest to GCS
+│   ├── train.sky.yaml                     # The whole pipeline on GCP in one command (SkyPilot, two steps)
+│   └── train_only.sky.yaml                # Just the training step, from data already in the bucket
 ├── compose.yaml                           # Run both images locally
 ├── deployments/workspace.yaml             # Dagster code-location config
 ├── ROADMAP.md                             # Ranked work items, with what was measured
 ├── artifacts/                             # Fine-tuning run outputs (gitignored)
-├── install.sh                             # One-command installer for Apple Silicon Macs
+├── install.sh                             # One command: data → training → running containers (macOS)
 └── pyproject.toml
 ```
 
