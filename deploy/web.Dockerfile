@@ -24,6 +24,8 @@ COPY web web
 
 # Build the frontend once here instead of on every boot (cold start).
 RUN cd web && bun build src/frontend.ts --outdir public --target browser
+# Usage log volume (compose mounts it); owned by bun so the server can append.
+RUN mkdir -p /var/log/chem && chown bun /var/log/chem
 USER bun
 
 WORKDIR /app/web

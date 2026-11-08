@@ -24,8 +24,11 @@ services:
       CHEMBL_DB_NAME: ${CHEMBL_DB_NAME:-}
       # "Sign in with Google" (demo only). Unset = no sign-in, for local runs.
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      # Who signed in and chatted, one JSON line each (kept across redeploys).
+      USAGE_LOG: /var/log/chem/usage.jsonl
     volumes:
       - ${LANCEDB_HOST_DIR:-./data/lancedb}:/mnt/lancedb:ro
+      - usage_logs:/var/log/chem
     depends_on:
       ollama:
         condition: service_healthy
@@ -46,3 +49,4 @@ services:
 
 volumes:
   caddy_data:
+  usage_logs:

@@ -35,7 +35,7 @@ if ! gcloud compute instances describe "$VM" --zone "$ZONE" &>/dev/null; then
     --machine-type e2-micro \
     --image-family debian-12 --image-project debian-cloud \
     --boot-disk-size "${DISK_GB}GB" --boot-disk-type pd-standard \
-    --scopes storage-ro \
+    --scopes storage-rw \
     --metadata-from-file startup-script=<(cat <<'EOF'
 #!/bin/bash
 # Docker + compose, and 2 GB swap: 1 GB RAM is tight for the model plus a tool call.
@@ -74,23 +74,63 @@ if [[ -f "$SETTINGS" ]]; then
 fi
 PROFILE="$( [[ -n "$DOMAIN" ]] && echo "--profile public" || true)"
 
+echo "==> Uploading the usage log to gs://$BUCKET/usage/ every 10 minutes"
+# The web container appends to the usage_logs volume; this timer copies the file
+# to the bucket so DuckDB can read it (README "Usage log"). Needs the VM's
+# storage-rw scope.
+ssh_vm "sudo tee /etc/systemd/system/chem-usage-upload.service >/dev/null <<'EOF'
+[Unit]
+Description=Copy the chat usage log to gs://$BUCKET/usage/
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c '[ ! -f /var/lib/docker/volumes/chem_mlops_usage_logs/_data/usage.jsonl ] || gcloud storage cp --quiet /var/lib/docker/volumes/chem_mlops_usage_logs/_data/usage.jsonl gs://$BUCKET/usage/usage.jsonl'
+EOF
+sudo tee /etc/systemd/system/chem-usage-upload.timer >/dev/null <<'EOF'
+[Unit]
+Description=Copy the chat usage log to GCS every 10 minutes
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=10min
+
+[Install]
+WantedBy=timers.target
+EOF
+sudo systemctl daemon-reload && sudo systemctl enable --now chem-usage-upload.timer"
+
 # The sync and the image builds run detached on the VM (they take a while on
 # an e2-micro), so a dropped connection doesn't kill them. This script follows
 # ~/deploy.log; if it gets cut off, check on it with:
 #   gcloud compute ssh chem-demo --zone us-central1-a -- tail -f deploy.log
 echo "==> Syncing the model ($RUN) and LanceDB from gs://$BUCKET, then building and starting the app"
-ssh_vm "cat > ~/deploy.sh <<EOF
+# The settings go in as a header; the rest is a quoted heredoc, so it runs on
+# the VM exactly as written here.
+{
+  printf 'BUCKET=%q\nRUN=%q\nPROFILE=%q\n' "$BUCKET" "$RUN" "$PROFILE"
+  cat <<'EOF'
 set -e
 mkdir -p ~/model ~/data/lancedb
-gcloud storage rsync --recursive --delete-unmatched-destination-objects gs://$BUCKET/models/$RUN ~/model
-gcloud storage rsync --recursive --delete-unmatched-destination-objects gs://$BUCKET/data/lancedb ~/data/lancedb
+gcloud storage rsync --recursive --delete-unmatched-destination-objects "gs://$BUCKET/models/$RUN" ~/model
+gcloud storage rsync --recursive --delete-unmatched-destination-objects "gs://$BUCKET/data/lancedb" ~/data/lancedb
 cd ~/chem_mlops
-sudo env PWD=\\\$PWD MODEL_DIR=\\\$HOME/model LANCEDB_HOST_DIR=\\\$HOME/data/lancedb \\
-  docker compose $PROFILE up -d --build --wait
-sudo docker ps --format "{{.Names}}  {{.Status}}"
+compose() { sudo env PWD="$PWD" MODEL_DIR="$HOME/model" LANCEDB_HOST_DIR="$HOME/data/lancedb" docker compose $PROFILE "$@"; }
+# The Ollama image only changes with the model; rebuilding it unpacks a 3 GB
+# base image, which a small disk can't always fit. Rebuild it only when needed.
+model_sha="$(sha256sum ~/model/chembl-drug-chat.gguf | cut -d' ' -f1)"
+if ! sudo docker image inspect chem_mlops-ollama >/dev/null 2>&1 || [ "$model_sha" != "$(cat ~/.model.sha 2>/dev/null)" ]; then
+  compose build ollama web
+  echo "$model_sha" > ~/.model.sha
+else
+  compose build web
+fi
+compose up -d --no-build --wait
+sudo docker builder prune -f   # build leftovers, several GB on a 50 GB disk
+sudo docker image prune -f
+sudo docker ps --format '{{.Names}}  {{.Status}}'
 EOF
-rm -f ~/deploy.log
-setsid nohup bash -c 'bash ~/deploy.sh; echo DEPLOY_EXIT=\$?' > ~/deploy.log 2>&1 < /dev/null &"
+} | ssh_vm 'cat > ~/deploy.sh'
+ssh_vm 'rm -f ~/deploy.log; setsid nohup bash -c "bash ~/deploy.sh; echo DEPLOY_EXIT=\$?" > ~/deploy.log 2>&1 < /dev/null &'
 ssh_vm 'tail -n +1 -F ~/deploy.log 2>/dev/null | sed -u "/^DEPLOY_EXIT=/q"'
 ssh_vm 'grep -q "^DEPLOY_EXIT=0" ~/deploy.log' || { echo "Deploy failed: see ~/deploy.log on $VM" >&2; exit 1; }
 

@@ -11,6 +11,8 @@ from rdkit import Chem
 from app.scripts.flows.vector_store.ingest_to_lancedb import (
     _FP_GEN,
     COMPOUNDS_TABLE,
+    NAME_KEYS_COLUMN,
+    add_name_keys,
 )
 from app.scripts.flows.vector_store.ingest_twosides_to_lancedb import POLYPHARMACY_TABLE
 from app.scripts.flows.vector_store.query_lancedb import (
@@ -368,24 +370,45 @@ class TestQueryDrugSideEffects:
 # ── get_compound_by_name ──────────────────────────────────────────────────────
 
 
+@pytest.fixture(params=["name_keys index", "legacy store"])
+def name_dir(request: pytest.FixtureRequest, lancedb_dir: str) -> str:
+    """The same compounds, with and without the indexed name_keys column."""
+    if request.param == "name_keys index":
+        table = lancedb.connect(f"{lancedb_dir}/chembl_CHEMBL_36").open_table(COMPOUNDS_TABLE)
+        add_name_keys(table)
+        assert NAME_KEYS_COLUMN in table.schema.names
+    return lancedb_dir
+
+
 class TestGetCompoundByName:
-    def test_matches_pref_name_case_insensitively(self, lancedb_dir: str) -> None:
+    def test_matches_pref_name_case_insensitively(self, name_dir: str) -> None:
+        lancedb_dir = name_dir
         record = get_compound_by_name("ASPIRIN", lancedb_dir=lancedb_dir)
         assert record is not None
         assert record["chembl_id"] == "CHEMBL25"
 
-    def test_falls_back_to_a_trade_name(self, lancedb_dir: str) -> None:
+    def test_falls_back_to_a_trade_name(self, name_dir: str) -> None:
         """ChEMBL stores paracetamol as ACETAMINOPHEN; brands live in synonyms."""
+        lancedb_dir = name_dir
         record = get_compound_by_name("Nurofen", lancedb_dir=lancedb_dir)
         assert record is not None
         assert record["pref_name"] == "Ibuprofen"
 
-    def test_synonym_match_is_a_whole_entry_not_a_substring(self, lancedb_dir: str) -> None:
+    def test_synonym_match_is_a_whole_entry_not_a_substring(self, name_dir: str) -> None:
+        lancedb_dir = name_dir
         # "Ibuprofen component of combogesic" must not make "combogesic" resolve.
         assert get_compound_by_name("combogesic", lancedb_dir=lancedb_dir) is None
 
-    def test_returns_none_for_an_unknown_name(self, lancedb_dir: str) -> None:
-        assert get_compound_by_name("Notadrug", lancedb_dir=lancedb_dir) is None
+    def test_returns_none_for_an_unknown_name(self, name_dir: str) -> None:
+        assert get_compound_by_name("Notadrug", lancedb_dir=name_dir) is None
+        assert get_compound_by_name("  ", lancedb_dir=name_dir) is None
+
+    def test_name_keys_lookup_uses_the_index(self, lancedb_dir: str) -> None:
+        table = lancedb.connect(f"{lancedb_dir}/chembl_CHEMBL_36").open_table(COMPOUNDS_TABLE)
+        add_name_keys(table)
+        add_name_keys(table)  # idempotent
+        plan = table.search().where(f"array_has_any({NAME_KEYS_COLUMN}, ['advil'])").explain_plan(True)
+        assert "ScalarIndexQuery" in plan
 
 
 def test_a_biologic_is_findable_by_name_but_never_by_similarity(lancedb_dir: str) -> None:

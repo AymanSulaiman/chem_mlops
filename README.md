@@ -281,6 +281,23 @@ A `web/.env` file with working defaults is committed — Bun loads it automatica
 
 Sign-in is on only when `GOOGLE_CLIENT_ID` is set: the OAuth client ID from the GCP console (APIs & Services → Credentials → OAuth client ID → Web application, with your demo's `https://` address as an authorised JavaScript origin). It isn't a secret.
 
+**Usage log.** Every sign-in and every chat is logged as one JSON line: time, email, question length, tools called, latency and token counts (never the question text). Lines go to the container's output and, when `USAGE_LOG` is set (compose sets it), to a file on the `usage_logs` Docker volume, which survives redeploys. On the VM, a systemd timer installed by `vm.sh` copies that file to `gs://chem-mlops-train/usage/usage.jsonl` every 10 minutes (the VM needs the `storage-rw` scope).
+
+Query it straight from the bucket with DuckDB (it uses your `gcloud auth application-default login`):
+
+```sql
+INSTALL httpfs; LOAD httpfs;
+CREATE SECRET (TYPE gcs, PROVIDER credential_chain);
+
+-- Who used it, and how much
+SELECT email, count(*) AS chats, min(ts) AS first_seen, max(ts) AS last_seen,
+       round(avg(latencyMs) / 1000, 1) AS avg_seconds
+FROM read_json_auto('gs://chem-mlops-train/usage/usage.jsonl')
+WHERE event = 'chat'
+GROUP BY email
+ORDER BY chats DESC;
+```
+
 Without it (local runs), there is no sign-in, every visitor counts as the same person (so nobody queues), and the server logs a warning at startup.
 
 ---
@@ -356,11 +373,11 @@ Caveats:
 | Image | Dockerfile | Size | Contents |
 |-------|-----------|------|----------|
 | web | `deploy/web.Dockerfile` (context: repo root) | ~2.2 GB (x86_64) | Bun, Python 3.13 with the default (serving) dependencies only, `app/` and `web/`, frontend prebuilt |
-| ollama | `deploy/ollama.Dockerfile` (context: the model folder) | ~430 MB | Ollama binary and CPU libraries on Ubuntu, `chembl-drug-chat:270m` created at build time from the Q4_K_M GGUF |
+| ollama | `deploy/ollama.Dockerfile` (context: the model folder) | ~4.3 GB (x86_64; see note) | Ollama binary and CPU libraries on Ubuntu, `chembl-drug-chat:270m` created at build time from the Q4_K_M GGUF |
 
 Notes:
 
-- The Ollama image is CPU only. It drops the ~3.5 GB of GPU libraries in the official image; for a GPU, base it on `ollama/ollama` unchanged.
+- The Ollama image is meant to be CPU only, dropping the ~3.5 GB of GPU libraries in the official image. **That isn't working yet:** the image measured 4.3 GB on the VM (x86_64), where ~430 MB was expected. The cause is still being investigated; until it is fixed, it is the largest thing on the VM's disk after LanceDB. For a GPU, base it on `ollama/ollama` unchanged.
 - The image serves the GGUF exactly as exported (already Q4_K_M); it does not re-quantize.
 - The model container uses ~620 MB RAM at `num_ctx 8192`.
 - `OLLAMA_KEEP_ALIVE=-1` keeps the model loaded between requests.
@@ -399,9 +416,9 @@ GOOGLE_CLIENT_ID=<id>.apps.googleusercontent.com
 
 With that file present, `vm.sh` copies it to the VM, opens ports 80 and 443, and starts Caddy, which serves `https://$DOMAIN` with a free certificate it gets and renews by itself. Visitors then sign in with Google before they can chat.
 
-Re-running `vm.sh` copies the code fresh, syncs only changed files from the bucket, and rebuilds only images whose inputs changed. Set `RUN=<run>` to serve another published model. The containers restart on their own after a VM reboot.
+Re-running `vm.sh` copies the code fresh, syncs only changed files from the bucket, and rebuilds the web image. The Ollama image is rebuilt only when the model file changes (its checksum is kept in `~/.model.sha` on the VM), because rebuilding it unpacks a 3 GB base image the disk can barely fit. Each deploy then clears Docker's build leftovers. Set `RUN=<run>` to serve another published model. The containers restart on their own after a VM reboot.
 
-Cost: the e2-micro itself is in the free tier (one per billing account, in us-central1, us-east1 or us-west1), as is 30 GB of standard disk. The 24 GB LanceDB needs a 50 GB disk, about $1 a month for the extra 20 GB, until its fingerprints are bit-packed. The static IP (`chem-demo-ip`) may also be billed. The first run installs Docker, copies the LanceDB (~20 min) and builds both images on the VM's small shared CPU, which takes a few hours; later redeploys rebuild only what changed. `sudo docker builder prune` on the VM frees the ~10 GB of build leftovers afterwards.
+Cost: the e2-micro itself is in the free tier (one per billing account, in us-central1, us-east1 or us-west1), as is 30 GB of standard disk. The 24 GB LanceDB needs a 50 GB disk, about $1 a month for the extra 20 GB, until its fingerprints are bit-packed. The static IP (`chem-demo-ip`) may also be billed. The first run installs Docker, copies the LanceDB (~20 min) and builds both images on the VM's small shared CPU, which takes a few hours; later redeploys rebuild only what changed.
 
 ---
 

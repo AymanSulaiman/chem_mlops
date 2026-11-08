@@ -23,6 +23,10 @@ DATA_DIR: str = "data/chembl_transform"
 # Override in deployments, e.g. a mounted bucket: LANCEDB_DIR=/mnt/lancedb
 LANCEDB_DIR: str = os.environ.get("LANCEDB_DIR", "data/lancedb")
 COMPOUNDS_TABLE: str = "compounds"
+# Every name a compound goes by, lowercased: pref_name plus each synonym. A
+# LABEL_LIST index on it turns a name lookup into one index probe instead of a
+# scan of 3M names (~0.3 s locally, minutes on a slow disk or a bucket).
+NAME_KEYS_COLUMN: str = "name_keys"
 MORGAN_RADIUS: int = 2
 MORGAN_BITS: int = 2048
 BATCH_SIZE: int = 10_000
@@ -478,6 +482,7 @@ def _write_to_lancedb(
     if table is not None:
         table.create_scalar_index("chembl_id")
         table.create_scalar_index("standard_inchi_key")
+        add_name_keys(table)
 
     return written, structureless
 
@@ -518,5 +523,33 @@ def ingest_compounds_to_lancedb(
     )
 
 
+def add_name_keys(table: Table) -> None:
+    """Add the indexed ``name_keys`` column to a compounds table (idempotent).
+
+    Synonyms are stored joined with "; " (see ``_load_synonyms``), so splitting
+    on it gives whole entries: "codeine" matches CODEINE, never "Codeine
+    component of ...".
+    """
+    sources = [c for c in ("pref_name", "synonyms") if c in table.schema.names]
+    if not sources:
+        return  # no names to index (e.g. a structures-only test table)
+    if NAME_KEYS_COLUMN not in table.schema.names:
+        # concat + coalesce rather than concat_ws: concat_ws panics on an
+        # all-null column. Missing names leave empty entries, never looked up.
+        parts = ", '; ', ".join(f"coalesce(CAST({c} AS STRING), '')" for c in sources)
+        table.add_columns({NAME_KEYS_COLUMN: f"string_to_array(lower(concat({parts})), '; ')"})
+    table.create_scalar_index(NAME_KEYS_COLUMN, index_type="LABEL_LIST", replace=True)
+
+
 if __name__ == "__main__":
-    ingest_compounds_to_lancedb()
+    import sys
+
+    if "--name-keys-only" in sys.argv:
+        # Upgrade an existing store in place, no re-ingest. Works on a bucket
+        # path too: LANCEDB_DIR=gs://... CHEMBL_DB_NAME=chembl_CHEMBL_37
+        from app.scripts.flows.vector_store.query_lancedb import _open_table
+
+        add_name_keys(_open_table(LANCEDB_DIR, COMPOUNDS_TABLE))
+        print(f"Added {NAME_KEYS_COLUMN} and its index.")
+    else:
+        ingest_compounds_to_lancedb()

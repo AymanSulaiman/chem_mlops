@@ -330,3 +330,26 @@ test("without a Google client ID, local runs work with no sign-in", async () => 
   expect((await post(handler as ReturnType<typeof demoHandler>, "/api/session")).status).toBe(200);
   expect((await post(handler as ReturnType<typeof demoHandler>, "/api/chat", undefined, hello)).status).toBe(200);
 });
+
+test("sign-ins and chats are logged with the visitor's email, never the question", async () => {
+  const lines: string[] = [];
+  const original = console.log;
+  console.log = (line: unknown) => void lines.push(String(line));
+  try {
+    const handler = demoHandler();
+    const res = await post(handler, "/api/chat", "a@x.com", { messages: [{ role: "user", content: "secret question" }] });
+    await res.text();
+  } finally {
+    console.log = original;
+  }
+  const events = lines.flatMap((line) => {
+    try {
+      return [JSON.parse(line)];
+    } catch {
+      return [];
+    }
+  });
+  expect(events).toContainEqual(expect.objectContaining({ event: "login", email: "a@x.com" }));
+  expect(events).toContainEqual(expect.objectContaining({ event: "chat", email: "a@x.com", questionChars: 15 }));
+  expect(lines.join("\n")).not.toContain("secret question");
+});

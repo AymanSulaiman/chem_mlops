@@ -15,6 +15,7 @@ from lancedb.table import Table
 from app.scripts.flows.vector_store.ingest_to_lancedb import (
     COMPOUNDS_TABLE,
     LANCEDB_DIR,
+    NAME_KEYS_COLUMN,
     _smiles_to_fp,
 )
 from app.scripts.flows.vector_store.ingest_twosides_to_lancedb import POLYPHARMACY_TABLE
@@ -207,13 +208,25 @@ def get_compound_by_name(
     Raises:
         FileNotFoundError: If the LanceDB table does not exist.
     """
+    if not name.strip():
+        return None
     table: Table = _open_table(lancedb_dir, COMPOUNDS_TABLE)
     safe = name.strip().replace("'", "''")
-    rows: list[dict[str, Any]] = (
-        table.search().where(f"LOWER(pref_name) = '{safe.lower()}'").limit(1).to_list()
-    )
-    if not rows:
-        rows = _search_synonyms(table, safe)
+    if NAME_KEYS_COLUMN in table.schema.names:
+        wanted = name.strip().lower()
+        rows: list[dict[str, Any]] = (
+            table.search()
+            .where(f"array_has_any({NAME_KEYS_COLUMN}, ['{safe.lower()}'])")
+            .limit(25)
+            .to_list()
+        )
+        # A preferred-name match beats a synonym match, as before.
+        rows.sort(key=lambda r: (r.get("pref_name") or "").lower() != wanted)
+    else:
+        # Stores built before name_keys: scan pref_name, then synonyms.
+        rows = table.search().where(f"LOWER(pref_name) = '{safe.lower()}'").limit(1).to_list()
+        if not rows:
+            rows = _search_synonyms(table, safe)
     if not rows:
         return None
     row = rows[0]

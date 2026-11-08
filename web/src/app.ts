@@ -10,6 +10,16 @@ import {
 } from "./tools";
 import { MAX_MESSAGE_CHARS, MAX_MESSAGES, MAX_USER_CHARS } from "./frontend-helpers";
 import { createGate, createGoogleVerifier, createSessions, type GateOptions } from "./access";
+import { appendFile } from "node:fs/promises";
+
+// Usage log: one JSON line per sign-in and per chat, to stdout and, when
+// USAGE_LOG is set (the VM: a Docker volume), to a file that survives redeploys.
+function logEvent(event: Record<string, unknown>) {
+  const line = JSON.stringify({ ts: new Date().toISOString(), ...event });
+  console.log(line);
+  const file = Bun.env.USAGE_LOG;
+  if (file) appendFile(file, `${line}\n`).catch((error) => console.error(error));
+}
 
 export type ChatMessage = {
   role: "user" | "assistant";
@@ -234,7 +244,7 @@ export function createChatRequestHandler(options: ChatAppOptions = {}) {
   // until the turn ends, because a tool call cannot be recognised until its JSON
   // closes. Held text that turns out not to be a call is released at the end, so
   // nothing is ever dropped.
-  async function agentChat(messages: ChatMessage[]): Promise<Response> {
+  async function agentChat(messages: ChatMessage[], email: string): Promise<Response> {
     const modelInfo = await detectLatestModel();
     const startMs = now();
     // No system prompt. The fine-tune's training records carry none — they are
@@ -255,6 +265,7 @@ export function createChatRequestHandler(options: ChatAppOptions = {}) {
         let promptTokens = 0;
         let completionTokens = 0;
         let steps = 0;
+        const toolNames: string[] = [];
         if (busy > 0) send({ waiting: true });
         busy++;
         const release = await takeTurn();
@@ -298,6 +309,7 @@ export function createChatRequestHandler(options: ChatAppOptions = {}) {
             }
 
             steps++;
+            toolNames.push(call.tool);
             send({ tool: call });
             const outcome = await toolRunner(call);
             send({ toolResult: { tool: call.tool, ...outcome } });
@@ -310,15 +322,20 @@ export function createChatRequestHandler(options: ChatAppOptions = {}) {
         } finally {
           release();
           busy--;
-          console.log(JSON.stringify({
-            ts: new Date().toISOString(),
+          // One line per chat: who, when, how long, how much. The question
+          // text is not logged.
+          logEvent({
+            event: "chat",
+            email,
+            questionChars: messages.at(-1)?.content.length ?? 0,
+            tools: toolNames,
             model: modelInfo.model,
             source: modelInfo.source,
             latencyMs: now() - startMs,
             toolCalls: steps,
             promptTokens,
             completionTokens,
-          }));
+          });
           controller.close();
         }
       },
@@ -386,6 +403,7 @@ export function createChatRequestHandler(options: ChatAppOptions = {}) {
         console.error(error);
       }
       if (!email) return unauthorized();
+      logEvent({ event: "login", email });
       return new Response(JSON.stringify({ email }), {
         headers: { "content-type": "application/json", "set-cookie": sessions.issue(email) },
       });
@@ -436,7 +454,7 @@ export function createChatRequestHandler(options: ChatAppOptions = {}) {
       }
 
       try {
-        return await agentChat(messages);
+        return await agentChat(messages, email);
       } catch (error) {
         return json(
           {
