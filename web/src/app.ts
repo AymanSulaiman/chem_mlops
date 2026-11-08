@@ -8,6 +8,8 @@ import {
   type ToolCall,
   type ToolOutcome,
 } from "./tools";
+import { MAX_MESSAGE_CHARS, MAX_MESSAGES, MAX_USER_CHARS } from "./frontend-helpers";
+import { createGate, createGoogleVerifier, createSessions, type GateOptions } from "./access";
 
 export type ChatMessage = {
   role: "user" | "assistant";
@@ -30,7 +32,22 @@ export type ChatAppOptions = {
   maxToolSteps?: number;
   now?: () => number;
   cacheTtlMs?: number;
+  // Google OAuth client ID for "Sign in with Google". Unset = no sign-in
+  // (local runs); every caller is then treated as one user, "local".
+  googleClientId?: string | null;
+  gate?: GateOptions;
 };
+
+export function oversizedReason(messages: ChatMessage[]): string | null {
+  if (messages.length > MAX_MESSAGES) return `Conversations are limited to ${MAX_MESSAGES} messages.`;
+  for (const m of messages) {
+    if (m.role === "user" && m.content.length > MAX_USER_CHARS)
+      return `Messages are limited to ${MAX_USER_CHARS.toLocaleString("en")} characters.`;
+    if (m.content.length > MAX_MESSAGE_CHARS) return "A message in this conversation is too long.";
+  }
+  return null;
+}
+
 
 type CachedModel = {
   model: string;
@@ -112,8 +129,32 @@ export function createChatRequestHandler(options: ChatAppOptions = {}) {
   const maxToolSteps = options.maxToolSteps ?? 3;
   const now = options.now ?? (() => Date.now());
   const cacheTtlMs = options.cacheTtlMs ?? 15_000;
+  const googleClientId =
+    options.googleClientId === undefined ? Bun.env.GOOGLE_CLIENT_ID || null : options.googleClientId;
+  const verifyGoogle = googleClientId ? createGoogleVerifier(googleClientId, fetchImpl, now) : null;
+  const sessions = createSessions(now);
+  const gate = createGate({ now, ...options.gate });
 
   let cachedModel: CachedModel | null = null;
+
+  // One chat at a time: the CPU model serves one well, and queuing here (not in
+  // Ollama) lets a waiting visitor be told so.
+  let turn: Promise<void> = Promise.resolve();
+  let busy = 0;
+  function takeTurn(): Promise<() => void> {
+    const previous = turn;
+    let release!: () => void;
+    turn = new Promise((resolve) => (release = resolve));
+    return previous.then(() => release);
+  }
+
+  function visitor(request: Request): string | null {
+    return verifyGoogle ? sessions.read(request.headers.get("cookie")) : "local";
+  }
+
+  const unauthorized = () => json({ error: "Sign in with Google to use the chat." }, 401);
+  const queued = (position: number) =>
+    json({ error: `You're #${position} in the queue. The chat opens when it's your turn.`, queued: true, position }, 503);
 
   async function detectLatestModel() {
     if (cachedModel && now() - cachedModel.fetchedAt < cacheTtlMs) {
@@ -214,6 +255,9 @@ export function createChatRequestHandler(options: ChatAppOptions = {}) {
         let promptTokens = 0;
         let completionTokens = 0;
         let steps = 0;
+        if (busy > 0) send({ waiting: true });
+        busy++;
+        const release = await takeTurn();
 
         try {
           for (let step = 0; ; step++) {
@@ -264,6 +308,8 @@ export function createChatRequestHandler(options: ChatAppOptions = {}) {
         } catch (error) {
           send({ error: error instanceof Error ? error.message : "Chat request failed." });
         } finally {
+          release();
+          busy--;
           console.log(JSON.stringify({
             ts: new Date().toISOString(),
             model: modelInfo.model,
@@ -319,12 +365,74 @@ export function createChatRequestHandler(options: ChatAppOptions = {}) {
       }
     }
 
+    // What the page needs to show the sign-in button.
+    if (request.method === "GET" && url.pathname === "/api/config") {
+      return json({ googleClientId, signInRequired: Boolean(verifyGoogle) });
+    }
+
+    // The Google button's ID token in, a session cookie out.
+    if (request.method === "POST" && url.pathname === "/api/login") {
+      if (!verifyGoogle) return json({ error: "Sign-in is not enabled." }, 404);
+      let credential: unknown;
+      try {
+        credential = ((await request.json()) as { credential?: unknown }).credential;
+      } catch {
+        return json({ error: "Send the sign-in token as JSON." }, 400);
+      }
+      let email: string | null = null;
+      try {
+        email = await verifyGoogle(credential);
+      } catch (error) {
+        console.error(error);
+      }
+      if (!email) return unauthorized();
+      return new Response(JSON.stringify({ email }), {
+        headers: { "content-type": "application/json", "set-cookie": sessions.issue(email) },
+      });
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/logout") {
+      const email = visitor(request);
+      if (email) gate.leave(email);
+      return new Response(null, { status: 204, headers: { "set-cookie": sessions.clear() } });
+    }
+
+    // Heartbeat while the chat page is open: joins the queue or keeps your place.
+    // { seated: true, position: 0 } = in the chat; otherwise position = place in line.
+    if (request.method === "POST" && url.pathname === "/api/session") {
+      const email = visitor(request);
+      if (!email) return unauthorized();
+      return json({ ...gate.claim(email), email });
+    }
+
+    // Sent by navigator.sendBeacon when the tab closes, so the next person goes in at once.
+    if (request.method === "POST" && url.pathname === "/api/session/leave") {
+      const email = visitor(request);
+      if (email) gate.leave(email);
+      return new Response(null, { status: 204 });
+    }
+
     if (request.method === "POST" && url.pathname === "/api/chat") {
-      const body = (await request.json()) as { messages?: unknown };
+      const email = visitor(request);
+      if (!email) return unauthorized();
+      const place = gate.claim(email);
+      if (!place.seated) return queued(place.position);
+
+      let body: { messages?: unknown };
+      try {
+        body = (await request.json()) as { messages?: unknown };
+      } catch {
+        return json({ error: "Send the chat as JSON." }, 400);
+      }
       const messages = normalizeMessages(body.messages);
 
       if (messages.length === 0) {
         return json({ error: "Send at least one user message." }, 400);
+      }
+      const oversized = oversizedReason(messages);
+      if (oversized) return json({ error: oversized }, 413);
+      if (!gate.allowChat(email)) {
+        return json({ error: "You've reached the chat limit for now. Try again later." }, 429);
       }
 
       try {

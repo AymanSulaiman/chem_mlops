@@ -18,7 +18,10 @@ COPY --from=build /usr/lib/ollama /usr/lib/ollama
 COPY --from=build /root/.ollama /root/.ollama
 ENV OLLAMA_HOST=0.0.0.0:11434 \
     # Keep the model in memory; reloading it per request would dominate latency.
-    OLLAMA_KEEP_ALIVE=-1
+    OLLAMA_KEEP_ALIVE=-1 \
+    # One chat at a time (the web server queues the rest): saves the memory of
+    # extra context slots on a small VM.
+    OLLAMA_NUM_PARALLEL=1
 EXPOSE 11434
 ENTRYPOINT ["/usr/bin/ollama"]
 CMD ["serve"]

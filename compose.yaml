@@ -6,6 +6,7 @@ services:
     build:
       context: ${MODEL_DIR:?set MODEL_DIR to artifacts/<run>/ollama}
       dockerfile: ${PWD}/deploy/ollama.Dockerfile
+    restart: unless-stopped  # come back after a VM reboot
     healthcheck:
       test: ["CMD", "ollama", "list"]
       interval: 5s
@@ -15,13 +16,33 @@ services:
     build:
       context: .
       dockerfile: deploy/web.Dockerfile
+    restart: unless-stopped
     ports: ["3000:3000"]
     environment:
       OLLAMA_BASE_URL: http://ollama:11434
       # Set to skip the directory scan, e.g. chembl_CHEMBL_36
       CHEMBL_DB_NAME: ${CHEMBL_DB_NAME:-}
+      # "Sign in with Google" (demo only). Unset = no sign-in, for local runs.
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
     volumes:
       - ${LANCEDB_HOST_DIR:-./data/lancedb}:/mnt/lancedb:ro
     depends_on:
       ollama:
         condition: service_healthy
+
+  # HTTPS for the public demo; only with `--profile public` (vm.sh adds it when
+  # DOMAIN is set), so local runs stay plain http://localhost:3000.
+  caddy:
+    image: caddy:2.10.2-alpine
+    profiles: [public]
+    restart: unless-stopped
+    ports: ["80:80", "443:443"]
+    environment:
+      DOMAIN: ${DOMAIN:-}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data  # certificates survive restarts
+    depends_on: [web]
+
+volumes:
+  caddy_data:

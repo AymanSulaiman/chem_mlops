@@ -276,6 +276,19 @@ bun test
 
 A `web/.env` file with working defaults is committed — Bun loads it automatically, no setup needed. Edit it to point at a different Ollama host or override the model prefix.
 
+**Demo access and limits.** For a shared demo, the server can require "Sign in with Google" and cap how much the demo is used. All limits are kept in memory, so they reset when the server restarts.
+
+| What | Limit | When exceeded |
+|------|-------|---------------|
+| Sign-in | Google's sign-in button gives the page an ID token; the server checks it against Google's public keys (signature, your client ID, expiry, verified email) and sets a signed session cookie for 24 h. A restart signs everyone out | 401, and the page shows the sign-in button |
+| People at once | 1. Everyone else waits in line and sees their number ("You're #2 in the queue"). The page pings `/api/session` to keep its place; closing the tab, or ~2 min without a ping, gives the place up. While anyone is waiting, the person in the chat moves to the back of the line after 5 min without sending a message | A chat sent before your turn gets a 503 with your position |
+| Chats per person | 20 an hour, 100 a day | 429 |
+| Request size | 20 messages per conversation (the page sends only the latest 20), 2,000 characters per question, 256 KB per request | 413 |
+
+Sign-in is on only when `GOOGLE_CLIENT_ID` is set: the OAuth client ID from the GCP console (APIs & Services → Credentials → OAuth client ID → Web application, with your demo's `https://` address as an authorised JavaScript origin). It isn't a secret.
+
+Without it (local runs), there is no sign-in, every visitor counts as the same person (so nobody queues), and the server logs a warning at startup.
+
 ---
 
 ## Docker
@@ -358,6 +371,38 @@ Notes:
 - The model container uses ~620 MB RAM at `num_ctx 8192`.
 - `OLLAMA_KEEP_ALIVE=-1` keeps the model loaded between requests.
 - To publish a model for deployment: `BUCKET=<bucket> ./deploy/publish_model.sh artifacts/<run>` uploads the GGUF, Modelfile and a `manifest.json` to `gs://<bucket>/models/<run>/`.
+
+### Run on a GCP VM
+
+`deploy/vm.sh` runs the same two containers on one e2-micro VM, fed from the bucket, so nothing is rebuilt or retrained. Try changes locally with `docker compose` first, then redeploy; the app is down for a few minutes while images rebuild.
+
+```bash
+# Once per model: convert it (see "Bring the model home") and publish it to the bucket
+BUCKET=chem-mlops-train ./deploy/publish_model.sh artifacts/gcp_v1_tools
+
+# Create (first run) or redeploy: ships your working copy, uncommitted changes included
+./deploy/vm.sh chem-demo
+
+# Open it privately (before the domain is set up, or for debugging)
+gcloud compute ssh chem-demo --zone us-central1-a -- -N -L 3000:localhost:3000
+open http://localhost:3000
+
+# Logs
+gcloud compute ssh chem-demo --zone us-central1-a -- 'cd chem_mlops && sudo docker compose logs -f'
+```
+
+**Public address with sign-in.** Put two settings in `deploy/chem-demo.env` (gitignored):
+
+```bash
+DOMAIN=demo.<your-domain>          # needs a DNS A record pointing at the VM's static IP (chem-demo-ip)
+GOOGLE_CLIENT_ID=<id>.apps.googleusercontent.com
+```
+
+With that file present, `vm.sh` copies it to the VM, opens ports 80 and 443, and starts Caddy, which serves `https://$DOMAIN` with a free certificate it gets and renews by itself. Visitors then sign in with Google before they can chat.
+
+Re-running `vm.sh` copies the code fresh, syncs only changed files from the bucket, and rebuilds only images whose inputs changed. Set `RUN=<run>` to serve another published model. The containers restart on their own after a VM reboot.
+
+Cost: the e2-micro itself is in the free tier (one per billing account, in us-central1, us-east1 or us-west1), as is 30 GB of standard disk. The 24 GB LanceDB needs a 50 GB disk, about $1 a month for the extra 20 GB, until its fingerprints are bit-packed. The external IP may also be billed. The first run installs Docker and copies the LanceDB, so it takes about an hour.
 
 ---
 
@@ -868,7 +913,8 @@ chem_mlops/
 │   ├── ollama.Dockerfile                  # CPU-only Ollama with the model baked in
 │   ├── publish_model.sh                   # Upload GGUF + Modelfile + manifest to GCS
 │   ├── train.sky.yaml                     # The whole pipeline on GCP in one command (SkyPilot, two steps)
-│   └── train_only.sky.yaml                # Just the training step, from data already in the bucket
+│   ├── train_only.sky.yaml                # Just the training step, from data already in the bucket
+│   └── vm.sh                              # Create or redeploy the app on the e2-micro VM
 ├── compose.yaml                           # Run both images locally
 ├── deployments/workspace.yaml             # Dagster code-location config
 ├── ROADMAP.md                             # Ranked work items, with what was measured
