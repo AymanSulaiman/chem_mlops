@@ -1,11 +1,11 @@
 """Full fine-tune of Gemma 3 270M on the ChEMBL QA dataset with the Hugging Face Trainer.
 
-Runs wherever PyTorch does: CUDA (a Colab T4), Apple MPS, or CPU (slow).
+Runs wherever PyTorch does: CUDA (a GCP L4 or T4), Apple MPS, or CPU (slow).
 
     uv run python -m app.scripts.flows.finetuning.finetuning --run-name gemma270m_v1
 
 Re-running with the same --run-name resumes from the last checkpoint, which is
-what a Colab disconnect needs. Output: artifacts/<run>/model/ (Hugging Face
+what a preempted or dropped run needs. Output: artifacts/<run>/model/ (Hugging Face
 format), which export_to_ollama turns into a GGUF.
 
 ponytail: full fine-tune rather than LoRA. At 270M parameters the whole model
@@ -29,7 +29,7 @@ from app.scripts.flows.finetuning.export_to_ollama import (
 HF_MODEL_ID = "google/gemma-3-270m"
 DATA_DIR = Path("data/llm_finetune")
 
-# Sized for a Colab T4 (16 GB, no bf16, so fp32). The 262K-token vocabulary
+# Sized to fit a 16 GB T4 (no bf16, so fp32), the smallest GPU in deploy/train.sky.yaml. The 262K-token vocabulary
 # makes the logits the largest tensor (batch x seq x 262144 floats), so the
 # micro-batch stays small and gradient accumulation makes up the rest.
 # Gemma's 262k-token vocabulary makes the logits the biggest tensor in training

@@ -16,7 +16,7 @@ dependencies = [
 ]
 
 [dependency-groups]
-# Data pipeline, fine-tuning and orchestration. PyTorch runs on CUDA (Colab), MPS or CPU.
+# Data pipeline, fine-tuning and orchestration. PyTorch runs on CUDA (GCP), MPS or CPU.
 train = [
     "accelerate>=1.0.0",
     "dagster>=1.9.0",

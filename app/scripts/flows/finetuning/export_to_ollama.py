@@ -2,7 +2,7 @@
 Export a fine-tuned ChEMBL model to GGUF and register it with Ollama.
 
 Use this script to register (or re-register) any completed fine-tuning run with
-Ollama without re-running training. Training can happen elsewhere (Colab): copy
+Ollama without re-running training. Training can happen elsewhere (GCP): copy
 the run's ``model/`` folder into ``artifacts/<run>/`` and export here.
 
 Usage

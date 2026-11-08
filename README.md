@@ -1,6 +1,6 @@
 # chem_mlops
 
-An end-to-end MLOps pipeline that fine-tunes a Gemma 3 270M language model on ChEMBL drug-interaction data, builds a 2.85 M-compound vector store, and serves the model as a **tool-calling agent** in a streaming web chat. Training is PyTorch (a free Colab T4 is enough); serving runs on any x86_64 or arm64 machine, small enough for a 1 GB VM.
+An end-to-end MLOps pipeline that fine-tunes a Gemma 3 270M language model on ChEMBL drug-interaction data, builds a 2.96 M-compound vector store, and serves the model as a **tool-calling agent** in a streaming web chat. Training is PyTorch on a GCP GPU, launched with one command; serving runs on any x86_64 or arm64 machine, small enough for a 1 GB VM.
 
 The model does not have context injected into its prompt. It asks for the lookups it needs, the server runs them against LanceDB, and the results come back into the conversation.
 
@@ -15,22 +15,20 @@ flowchart LR
 
     S3[(TWOSIDES\nFDA FAERS · S3)] --> DLT[download_twosides\nstream-decompress\n→ Parquet]
 
-    TRF --> DDI[build_drug_interaction_dataset\n23 tables · 21 QA categories\n~500K+ training pairs]
+    TRF --> DDI[build_drug_interaction_dataset\n23 tables · 22 QA categories\n~1.1M training pairs]
     DLT --> DDI
     TRF --> FDS[create_finetuning_dataset\nactivities Parquet → JSONL]
-    TRF --> ING[ingest_to_lancedb\n2.85M compound vectors\nMorgan fingerprints · ~6 min]
+    TRF --> ING[ingest_to_lancedb\n2.96M compound vectors\nMorgan fingerprints · ~6 min]
 
     ING --> LDB[(LanceDB\nchembl_CHEMBL_37\ncompounds table)]
     DLT --> ING2[ingest_twosides_to_lancedb\nPRR-filtered pairs\n→ polypharmacy table]
     ING2 --> LDB2[(LanceDB\nchembl_CHEMBL_37\npolypharmacy table)]
 
-    DDI --> FT[finetune\nfull fine-tune Gemma 3 270M\n3000 steps · PyTorch · Colab T4]
+    DDI --> FT[finetune\nfull fine-tune Gemma 3 270M\n3000 steps · PyTorch · GPU]
     FDS --> FT
 
-    FT --> EVB[eval base model\nperplexity gates\ntool rates recorded]
-    EVB --> CTT[continue_tool_training\ntool calls 6% → 33% of the mix\n600 iters · minutes]
-    CTT --> EVL[eval_finetuned_model\nperplexity + tool-call gate]
-    EVL --> EXP[export_to_ollama\nGGUF → Q4_K_M\nollama create]
+    FT --> CTT[continue_tool_training\ntool calls 6% → 33% of the mix\n600 steps]
+    CTT --> EXP[export_to_ollama\nGGUF → Q4_K_M\nollama create]
     EXP --> OLL[(Ollama\nchembl-drug-chat:270m)]
 
     USR([User question]) --> AGT[agent loop\nweb/src/app.ts]
@@ -42,7 +40,7 @@ flowchart LR
     LDB2 --> AGT
 ```
 
-The pipeline is orchestrated with **Dagster** and runs entirely locally.
+The pipeline is orchestrated with **Dagster** and runs locally, or on GCP with one command ([Train on GCP](#train-on-gcp-one-command)). Evaluation is not in the pipeline yet: it still uses MLX and is being ported, so the export is currently ungated.
 
 ---
 
@@ -56,7 +54,7 @@ The pipeline is orchestrated with **Dagster** and runs entirely locally.
 | [Ollama](https://ollama.com) | any |
 | [llama.cpp](https://github.com/ggml-org/llama.cpp) `llama-quantize` | any (for the Ollama export) |
 
-> **Note:** Training uses PyTorch: CUDA (a Colab T4 is enough), Apple MPS, or CPU (slow). See [Train on Colab](#train-on-colab). **The evaluation step still uses `mlx-lm` and has not been ported yet**, so it cannot score new runs until it is.
+> **Note:** Training uses PyTorch on a GCP GPU (an L4, else a T4 or V100), launched with one command: see [Train on GCP](#train-on-gcp-one-command). **The evaluation step still uses `mlx-lm` and has not been ported yet**, so it cannot score new runs until it is.
 >
 > Python dependencies are split in `pyproject.toml`. The default set is only what the chat app's tools import (LanceDB, RDKit, Polars); the data pipeline, fine-tuning and Dagster live in the `train` group. A plain `uv sync` installs both (plus `dev`). The serving image installs just the default set with `uv sync --no-default-groups`.
 
@@ -111,36 +109,30 @@ This executes the full pipeline via Dagster:
 
 1. Download ChEMBL SQLite archive
 2. Convert all tables to Parquet
-3. In parallel:
+3. Then (in parallel under `dagster dev`, one after another when run headless as above):
    - Download TWOSIDES polypharmacy dataset (FDA FAERS, Tatonetti et al.)
    - Build the QA JSONL dataset (ChEMBL + TWOSIDES)
    - Build the activity Parquet
-   - **Ingest 2.85 M compounds into LanceDB** (vector store behind the agent's tools)
+   - **Ingest 2.96 M compounds into LanceDB** (vector store behind the agent's tools)
    - **Ingest TWOSIDES polypharmacy pairs into LanceDB**
 4. Fine-tune Gemma 3 270M (full fine-tune)
-5. **Evaluate the base model** — perplexity gates; golden and tool rates recorded only
-6. **Continue that model on a tool-heavy mix** — minutes, into its own `<stamp>_tools` run
-7. Evaluate the tool-trained model (perplexity + golden + tool-call) — gates Ollama export
-8. Convert to GGUF, quantize to Q4_K_M and register the model with Ollama
+5. **Continue that model on a tool-heavy mix**, into its own `<run>_tools` run
+6. Convert to GGUF, quantize to Q4_K_M and register the model with Ollama
 
-Steps 4–8 pass the run directory explicitly between the ops. They used to each
+Steps 4–6 pass the run directory explicitly between the ops. They used to each
 look up "the latest run in `artifacts/`", which meant anything else writing
-there could gate on one model and ship another.
+there could measure one model and ship another. Only the tool-trained model is
+exported: `gemma3_chembl_toon_finetune_flow` exports when run standalone, and
+the pipeline passes `export=False`.
 
-**Why the base model is evaluated too** (step 5): without it, a bad number at
-step 7 has two suspects — the base run or the continuation — and no way to tell
-them apart once the run directory is gone. It also answers whether continued
-training is earning its place, on every run rather than as a special
-investigation. Its golden and tool-call gates are both disabled (thresholds of `0`):
-that model carries tool records at ~6% of its mix and is not expected to clear
-a tool-call or a lookup-dependent bar, and stopping the pipeline on a model
-nobody ships is the mistake the golden gate used to make. Perplexity still gates there — continuing from a
-regressed model is pointless, and it is better to find out before spending the
-continuation.
-
-**Nothing reaches Ollama before the gate.** `gemma3_chembl_toon_finetune_flow`
-exports when run standalone, and the pipeline passes `export=False` so the only
-model published is the tool-trained one, after step 7 passes.
+> **The export is not gated yet.** The two evaluation ops are out of the graph
+> until evaluation is ported off MLX ([Model Evaluation](#model-evaluation)), so
+> the pipeline currently exports the tool-trained model without measuring it.
+> When they return, the base model is measured before step 5 (perplexity gates;
+> golden and tool-call gates disabled, since that model carries tool records at
+> only ~6% of its mix), so a bad final number has one suspect rather than two.
+> The tool-trained model is then measured before step 6, and that measurement
+> gates the export.
 
 ### Build with the full dataset
 
@@ -151,28 +143,29 @@ uv run python -m app.scripts.flows.initial_data_transformation.collect_data
 # Step 2 — Convert SQLite → Parquet for all 74 tables (~10–20 min)
 uv run python -m app.scripts.flows.initial_data_transformation.transform_data
 
-# Step 3a — Build the QA finetuning dataset (~16–24 GB RAM recommended)
+# Step 3a — Build the QA finetuning dataset (~8 GB RAM peak)
 uv run python -m app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset
 
 # Step 3b — Build the activity Parquet dataset
 uv run python -m app.scripts.flows.llm_finetuning_data.build_finetune_dataset
 
-# Step 3c — Ingest 2.85 M compounds into LanceDB (~6 min)
+# Step 3c — Ingest 2.96 M compounds into LanceDB (~6 min)
 uv run python -m app.scripts.flows.vector_store.ingest_to_lancedb
 
-# Step 3d — Download TWOSIDES from Tatonetti Lab S3 (~120 MB gzip, streamed)
+# Step 3d — Download TWOSIDES from Tatonetti Lab S3 (~740 MB gzip, streamed)
 uv run python -m app.scripts.flows.llm_finetuning_data.download_twosides
 
 # Step 3e — Ingest TWOSIDES into the polypharmacy LanceDB table (run after 3c and 3d)
 uv run python -m app.scripts.flows.vector_store.ingest_twosides_to_lancedb
 
-# Step 4 — Fine-tune Gemma 3 270M (GPU recommended: see Train on Colab).
+# Step 4 — Fine-tune Gemma 3 270M (needs a GPU: see Train on GCP).
 # Run standalone this also exports to Ollama when it finishes. The Dagster
-# pipeline passes export=False so nothing is published before the gate.
+# pipeline passes export=False so only the tool-trained model is published.
 uv run python -m app.scripts.flows.finetuning.finetuning
 
-# Step 4b — Measure the base model before continuing, so a bad number later
-# has one suspect rather than two. Thresholds of 0 record without gating.
+# Step 4b — (Not runnable until eval is ported off MLX.) Measure the base model
+# before continuing, so a bad number later has one suspect rather than two.
+# Thresholds of 0 record without gating.
 uv run python -m app.scripts.flows.eval.eval_finetuned_model \
   --run-dir artifacts/<stamp> --tool-call-threshold 0 --pass-threshold 0
 
@@ -183,8 +176,9 @@ uv run python -m app.scripts.flows.eval.eval_finetuned_model \
 # leaves the model it started from untouched.
 uv run python -m app.scripts.flows.finetuning.continue_tool_training
 
-# Step 6 — Evaluate the tool-trained run. This is the gate: it blocks the export
-# on a perplexity regression or a tool-call parse rate below threshold.
+# Step 6 — (Not runnable until eval is ported off MLX.) Evaluate the tool-trained
+# run. This is the gate: it blocks the export on a perplexity regression or a
+# tool-call parse rate below threshold.
 uv run python -m app.scripts.flows.eval.eval_finetuned_model \
   --run-dir artifacts/<stamp>_tools
 
@@ -200,14 +194,14 @@ Expected disk and time requirements:
 |------|------|---------------|
 | Download ChEMBL SQLite | 5.6 GB | ~5 min |
 | Convert to Parquet | 8–10 GB | ~15 min |
-| Build QA dataset | < 1 GB output | ~30–60 min |
-| Ingest to LanceDB | ~15 GB | ~6 min |
-| Download TWOSIDES | ~50 MB Parquet | ~2–3 min |
-| Ingest TWOSIDES to LanceDB | < 100 MB | ~1 min |
-| Fine-tune (3 000 steps) | ~1 GB model + ~3.5 GB checkpoint | not yet measured on a T4 |
-| Evaluate base model | < 1 MB | ~10–15 min |
-| Continue on tool mix (600 steps) | ~141 MB mix + ~1 GB model | not yet measured |
-| Evaluate tool-trained model | < 1 MB | ~10–15 min |
+| Build QA dataset | < 1 GB output, ~8 GB RAM peak | ~3–10 min |
+| Ingest to LanceDB | ~24 GB | ~6 min |
+| Download TWOSIDES | ~475 MB Parquet | ~2 min |
+| Ingest TWOSIDES to LanceDB | ~110 MB | ~1 min |
+| Fine-tune (3 000 steps) | ~1 GB model + ~3.5 GB checkpoint | ~3.7 h on an L4 (~4.4 s/step) |
+| Evaluate base model | < 1 MB | not runnable yet (MLX) |
+| Continue on tool mix (600 steps) | ~141 MB mix + ~1 GB model | ~45 min on an L4 |
+| Evaluate tool-trained model | < 1 MB | not runnable yet (MLX) |
 | Export to Ollama | ~260 MB Q4_K_M GGUF | < 1 min |
 
 > **Low-RAM machines:** Cap each table at N rows with `--row-limit`:
@@ -245,9 +239,9 @@ The repository includes a Bun chat app (`web/`): a single agentic pane where the
 | `draw_molecule` | ChEMBL structure → RDKit `Draw.MolToImage` → PNG in the chat |
 | `query_compounds` | Morgan-fingerprint similarity search — callable, but **not advertised to the model** (see below) |
 
-The first four are the existing functions in `app/scripts/flows/vector_store/query_lancedb.py`, reached through the `app.scripts.flows.vector_store.tools` CLI. Ollama refuses its native `tools` field for this model (Gemma 3 has no tool template), so tool calls are emitted as bare JSON and parsed out of the reply. Each tool call and its result render as their own bubble, so the lookup is visible.
+All are reached through the `app.scripts.flows.vector_store.tools` CLI: the lookups are the functions in `app/scripts/flows/vector_store/query_lancedb.py`, and `draw_molecule` is added by `tools.py` itself. Ollama refuses its native `tools` field for this model (Gemma 3 has no tool template), so tool calls are emitted as bare JSON and parsed out of the reply. Each tool call and its result render as their own bubble, so the lookup is visible.
 
-**The model is sent no system prompt.** Its training records are bare `### Question` / `### Answer` pairs with no tool list, so prepending one at inference is out-of-distribution text it copies from rather than reasons over — every "is it safe to take X with Y?" collapsed onto whichever tool example sat last in the list. Removing the system prompt took tool routing from 50% to 100% on held-out drugs. `query_compounds` is excluded for the same reason: it is the one tool with no training records, and advertising it made the model copy its example SMILES verbatim for unrelated questions. Both findings are recorded in ROADMAP item 3.
+**The model is sent no system prompt.** Its training records are bare `### Question` / `### Answer` pairs with no tool list, so prepending one at inference is out-of-distribution text it copies from rather than reasons over — every "is it safe to take X with Y?" collapsed onto whichever tool example sat last in the list. Removing the system prompt took tool routing from 50% to 100% on held-out drugs. `query_compounds` is excluded for the same reason: it is the one tool with no training records, and advertising it made the model copy its example SMILES verbatim for unrelated questions.
 
 A near-miss tool name or argument key (`query_compound`, `drug_name` where the tool wants `name`) is mapped onto the real registry by `resolve_tool_call`, mirrored in `web/src/tools.ts` so the served behaviour and the measured behaviour cannot drift.
 
@@ -293,7 +287,7 @@ Without it (local runs), there is no sign-in, every visitor counts as the same p
 
 ## Docker
 
-The chat app runs as two containers: the Bun server with the Python tool bridge, and Ollama with the fine-tuned model built in. This is the shape the GCP deployment uses. Building the data and training happen outside the containers (on your machine or on Colab); the containers only serve the result.
+The chat app runs as two containers: the Bun server with the Python tool bridge, and Ollama with the fine-tuned model built in. The GCP VM runs the same two plus Caddy for HTTPS. Building the data and training happen outside the containers (the data on your machine or on GCP, training on GCP with SkyPilot); the containers only serve the result.
 
 ### Live run, end to end
 
@@ -319,24 +313,24 @@ uv run python -m app.scripts.flows.vector_store.ingest_to_lancedb
 uv run python -m app.scripts.flows.vector_store.ingest_twosides_to_lancedb
 ```
 
-**2. Train** (needs `huggingface-cli login` with the Gemma license accepted). On a Mac, time `--iters 50` first to estimate the full 3,000 steps, or train remotely ([Colab](#train-on-colab) or [GCP with one command](#train-on-gcp-one-command)) and copy `model/` back into `artifacts/<run>/`. Re-running the same command resumes.
+**2. Train** on a GCP GPU (one-time setup in [Train on GCP](#train-on-gcp-one-command); needs `uv run hf auth login` with the Gemma license accepted). Upload the dataset, run the training step, and bring the model back:
 
 ```bash
-uv run python -m app.scripts.flows.finetuning.finetuning --run-name local_v1 --no-export
-uv run python -m app.scripts.flows.finetuning.continue_tool_training \
-  --from-run artifacts/local_v1 --run-name local_v1_tools
+gcloud storage cp -r data/llm_finetune gs://chem-mlops-train/data/
+sky jobs launch deploy/train_only.sky.yaml --env HF_TOKEN=$(cat ~/.cache/huggingface/token) -y
+gcloud storage cp -r gs://chem-mlops-train/artifacts/gcp_v1_tools/model artifacts/gcp_v1_tools/
 ```
 
-**3. Export** to a Q4_K_M GGUF plus Modelfile in `artifacts/local_v1_tools/ollama/` (under a minute). The Ollama image is built from that folder.
+**3. Export** to a Q4_K_M GGUF plus Modelfile in `artifacts/gcp_v1_tools/ollama/` (under a minute). The Ollama image is built from that folder.
 
 ```bash
-uv run python -m app.scripts.flows.finetuning.export_to_ollama --run-dir artifacts/local_v1_tools
+uv run python -m app.scripts.flows.finetuning.export_to_ollama --run-dir artifacts/gcp_v1_tools
 ```
 
 **4. Start the containers.**
 
 ```bash
-MODEL_DIR=artifacts/local_v1_tools/ollama docker compose up --build
+MODEL_DIR=artifacts/gcp_v1_tools/ollama docker compose up --build
 ```
 
 Open [http://localhost:3000](http://localhost:3000) and ask *"Is it safe to take warfarin with aspirin?"*. Working looks like a tool-call bubble (`query_polypharmacy`), the LanceDB result, then the answer. Stop with `Ctrl+C`; `docker compose down` removes the containers.
@@ -348,7 +342,7 @@ docker compose exec ollama ollama run chembl-drug-chat:270m "Is it safe to take 
 # expect: {"tool": "query_polypharmacy", "args": {...}}
 ```
 
-To build the images the GCP VM runs (x86_64), prefix the command with `DOCKER_DEFAULT_PLATFORM=linux/amd64`. On Apple Silicon this runs under emulation and is slow.
+`deploy/vm.sh` builds the images on the VM itself. To test the x86_64 images locally, prefix the command with `DOCKER_DEFAULT_PLATFORM=linux/amd64`; on Apple Silicon this runs under emulation and is slow.
 
 Caveats:
 
@@ -361,7 +355,7 @@ Caveats:
 
 | Image | Dockerfile | Size | Contents |
 |-------|-----------|------|----------|
-| web | `deploy/web.Dockerfile` (context: repo root) | ~1.6 GB | Bun, Python 3.13 with the default (serving) dependencies only, `app/` and `web/`, frontend prebuilt |
+| web | `deploy/web.Dockerfile` (context: repo root) | ~2.2 GB (x86_64) | Bun, Python 3.13 with the default (serving) dependencies only, `app/` and `web/`, frontend prebuilt |
 | ollama | `deploy/ollama.Dockerfile` (context: the model folder) | ~430 MB | Ollama binary and CPU libraries on Ubuntu, `chembl-drug-chat:270m` created at build time from the Q4_K_M GGUF |
 
 Notes:
@@ -374,7 +368,7 @@ Notes:
 
 ### Run on a GCP VM
 
-`deploy/vm.sh` runs the same two containers on one e2-micro VM, fed from the bucket, so nothing is rebuilt or retrained. Try changes locally with `docker compose` first, then redeploy; the app is down for a few minutes while images rebuild.
+`deploy/vm.sh` runs the same containers (plus Caddy for HTTPS) on one e2-micro VM, fed from the bucket, so nothing is rebuilt or retrained. Try changes locally with `docker compose` first, then redeploy; the app is down for a few minutes while images rebuild.
 
 ```bash
 # Once per model: convert it (see "Bring the model home") and publish it to the bucket
@@ -387,9 +381,14 @@ BUCKET=chem-mlops-train ./deploy/publish_model.sh artifacts/gcp_v1_tools
 gcloud compute ssh chem-demo --zone us-central1-a -- -N -L 3000:localhost:3000
 open http://localhost:3000
 
-# Logs
+# Follow a deploy: it ends with DEPLOY_EXIT=0 on success
+gcloud compute ssh chem-demo --zone us-central1-a -- tail -f deploy.log
+
+# App logs
 gcloud compute ssh chem-demo --zone us-central1-a -- 'cd chem_mlops && sudo docker compose logs -f'
 ```
+
+The sync and image builds run detached on the VM and log to `~/deploy.log`, so a dropped connection (a sleeping laptop, a network blip) doesn't stop them; `vm.sh` follows the log until it finishes.
 
 **Public address with sign-in.** Put two settings in `deploy/chem-demo.env` (gitignored):
 
@@ -402,7 +401,7 @@ With that file present, `vm.sh` copies it to the VM, opens ports 80 and 443, and
 
 Re-running `vm.sh` copies the code fresh, syncs only changed files from the bucket, and rebuilds only images whose inputs changed. Set `RUN=<run>` to serve another published model. The containers restart on their own after a VM reboot.
 
-Cost: the e2-micro itself is in the free tier (one per billing account, in us-central1, us-east1 or us-west1), as is 30 GB of standard disk. The 24 GB LanceDB needs a 50 GB disk, about $1 a month for the extra 20 GB, until its fingerprints are bit-packed. The external IP may also be billed. The first run installs Docker and copies the LanceDB, so it takes about an hour.
+Cost: the e2-micro itself is in the free tier (one per billing account, in us-central1, us-east1 or us-west1), as is 30 GB of standard disk. The 24 GB LanceDB needs a 50 GB disk, about $1 a month for the extra 20 GB, until its fingerprints are bit-packed. The static IP (`chem-demo-ip`) may also be billed. The first run installs Docker, copies the LanceDB (~20 min) and builds both images on the VM's small shared CPU, which takes a few hours; later redeploys rebuild only what changed. `sudo docker builder prune` on the VM frees the ~10 GB of build leftovers afterwards.
 
 ---
 
@@ -440,6 +439,15 @@ Two environment variables move the store without code changes (both optional):
 |----------|---------|--------|
 | `LANCEDB_DIR` | `data/lancedb` | Root folder holding `chembl_CHEMBL_*`. Used by ingest and query alike. |
 | `CHEMBL_DB_NAME` | unset | e.g. `chembl_CHEMBL_37`. When set, queries connect straight to it instead of picking the latest folder, which avoids a directory listing per tool call on a mounted bucket. |
+
+`LANCEDB_DIR` can also be a bucket path (`gs://chem-mlops-train/data/lancedb`, with `CHEMBL_DB_NAME` set). Indexed lookups take a few seconds that way, but a lookup by name scans an unindexed column and took ~100 s from a laptop (0.2–0.5 s on a local disk), so serving reads a local copy for now.
+
+**Indexes.** All are B-tree (exact match):
+
+| Table | Indexed | Not indexed |
+|-------|---------|-------------|
+| `compounds` (2.96 M rows) | `chembl_id`, `standard_inchi_key` | `vector` (similarity search reads every fingerprint, ~24 GB), `pref_name` and `synonyms` (name lookups scan the column) |
+| `polypharmacy` (135 K pairs) | `drug_1_name`, `drug_2_name`, `pair_key` | — |
 
 > **A store built before the `has_structure` column needs re-ingesting.**
 > `query_compounds` filters on that column, and LanceDB errors on an unknown
@@ -527,7 +535,7 @@ uv run python -m app.scripts.flows.llm_finetuning_data.build_drug_interaction_da
   [--data-dir PATH]   # default: data/chembl_transform
   [--output-dir PATH] # default: data/llm_finetune
   [--row-limit N]     # cap every table at N rows (useful on low-RAM machines)
-  [--workers N]       # parallel generator processes (default: CPU count)
+  [--workers N]       # parallel generator processes (default: CPU count; each adds memory, the pipeline uses 1)
 ```
 
 ---
@@ -558,43 +566,6 @@ artifacts/<run>/
 
 Re-running with the same `--run-name` resumes from the checkpoint.
 
-### Train on Colab
-
-The dataset build needs 16–24 GB RAM, more than free Colab has, so build `data/llm_finetune/` locally and train on Colab.
-
-1. Accept the Gemma license at [huggingface.co/google/gemma-3-270m](https://huggingface.co/google/gemma-3-270m) and create a read token.
-2. Copy `data/llm_finetune/train.jsonl` and `valid.jsonl` to Google Drive at `MyDrive/chem_mlops/data/llm_finetune/`.
-3. Make the code reachable from Colab (push the `gcp_deployable` branch, or upload the repo).
-4. In a notebook with **Runtime → Change runtime type → T4 GPU**:
-
-```python
-from google.colab import drive
-drive.mount("/content/drive")
-D = "/content/drive/MyDrive/chem_mlops"
-!git clone -b gcp_deployable https://github.com/AymanSulaiman/chem_mlops.git /content/chem_mlops
-%cd /content/chem_mlops
-# Data and runs live on Drive, so a disconnect loses nothing.
-!mkdir -p {D}/artifacts && ln -sfn {D}/data data && ln -sfn {D}/artifacts artifacts
-!pip install -q "accelerate>=1.0.0" "transformers>=4.57.1"
-from huggingface_hub import login; login()
-```
-
-```python
-!python -m app.scripts.flows.finetuning.finetuning --run-name gemma270m_v1 --no-export
-!python -m app.scripts.flows.finetuning.continue_tool_training \
-    --from-run artifacts/gemma270m_v1 --run-name gemma270m_v1_tools
-```
-
-If the session drops, run the setup cell again and repeat the same command; it resumes from the last checkpoint. Colab runs Python 3.12; the training code runs from source there without installing the project, so the repo's 3.13 pin doesn't apply.
-
-5. Download `MyDrive/chem_mlops/artifacts/gemma270m_v1_tools/model/` into `artifacts/gemma270m_v1_tools/model/` locally, then export:
-
-```bash
-uv run python -m app.scripts.flows.finetuning.export_to_ollama --run-dir artifacts/gemma270m_v1_tools
-```
-
-Checkpoints hold optimizer state (~3.5 GB each); delete `checkpoints/` on Drive once a run finishes.
-
 ### Train on GCP (one command)
 
 `deploy/train.sky.yaml` runs the whole pipeline in your GCP project with [SkyPilot](https://docs.skypilot.ai): the same Dagster steps as `install.sh` on a Mac, minus the Ollama export. One command runs it as two steps, each on its own VM that is deleted when the step ends:
@@ -605,6 +576,8 @@ Checkpoints hold optimizer state (~3.5 GB each); delete `checkpoints/` on Drive 
 | `train` | L4 (`g2-standard-4`), else T4, else V100, in any GCP region with one free | 0.70 / 0.59 / 2.95 | Fine-tune, then tool-call training, from the bucket |
 
 The split exists because the data steps need lots of RAM but no GPU (the 24 GB LanceDB build), and GPU machines with that much RAM are often sold out; training needs ~16 GB. The models, checkpoints and LanceDB land in a Cloud Storage bucket. Your local code is uploaded at launch, so nothing needs pushing first. Both VMs are on-demand, not spot.
+
+Measured: the `data` step takes ~45 min (~$0.35); a full `train` step (3,000 + 600 steps) took 4 h 12 m on an L4 (~$3). The SkyPilot controller adds ~$0.19/h while a job runs, including time spent waiting for a free GPU.
 
 **One-time setup**
 
@@ -684,7 +657,7 @@ Costs: each VM bills only while its step runs. SkyPilot also starts a small cont
 
 ### Continuing a run on tool calls
 
-A full run trains ~950 K records, in which the 60 K tool-call examples compete
+A full run trains ~1 M records, in which the 60 K tool-call examples compete
 with ~900 K prose ones answering the same question shapes from memory.
 `continue_tool_training.py` does the cheap experiment instead: it continues an
 existing model on a mix where tool calls are a third of what the model sees,
@@ -697,8 +670,8 @@ uv run python -m app.scripts.flows.finetuning.continue_tool_training
 uv run python -m app.scripts.flows.finetuning.continue_tool_training --mix-only
 ```
 
-Minutes rather than hours. Measure before exporting — it skips the export step
-deliberately:
+About 45 minutes on an L4, rather than hours. Measure before exporting (once
+eval is ported off MLX); it skips the export step deliberately:
 
 ```bash
 uv run python -m app.scripts.flows.eval.eval_finetuned_model --run-dir <new run>
@@ -706,7 +679,7 @@ uv run python -m app.scripts.flows.eval.eval_finetuned_model --run-dir <new run>
 
 ### Rebuilding the agent end to end
 
-The Dagster pipeline runs all of this (steps 4–7 above). Do it by hand when you
+The Dagster pipeline runs steps 1, 2 and 4 of this; evaluation (step 3) is out of the pipeline until it is ported off MLX. Do it by hand when you
 already have the dataset and only the models are missing — `artifacts/` is
 gitignored, so a fresh clone or a lost run directory needs the sequence without
 re-downloading ChEMBL. `data/llm_finetune/` is the expensive input and is reused.
@@ -718,7 +691,7 @@ uv run python -m app.scripts.flows.finetuning.finetuning
 # 2. Continue it on the tool-heavy mix (minutes). Writes artifacts/<stamp>_tools.
 uv run python -m app.scripts.flows.finetuning.continue_tool_training
 
-# 3. Measure. One at a time — see the warning under Model Evaluation.
+# 3. Measure (once eval is ported off MLX). One at a time — see Model Evaluation.
 uv run python -m app.scripts.flows.eval.eval_finetuned_model \
   --run-dir artifacts/<stamp>_tools
 
@@ -727,8 +700,9 @@ uv run python -m app.scripts.flows.finetuning.export_to_ollama \
   --run-dir artifacts/<stamp>_tools
 ```
 
-**What step 3 should print.** On the last run of this pipeline, all four tool
-rates came back at 100% over 40 calls on held-out drugs:
+**What step 3 printed on the earlier 1B MLX model** (run
+`20260920_114710_tools`; the 270M PyTorch model hasn't been measured yet). All
+four tool rates came back at 100% over 40 calls on held-out drugs:
 
 ```
 Running tool-call benchmark (10 held-out drugs) ...
@@ -739,7 +713,7 @@ Running tool-result benchmark (10 held-out drugs) ...
 ```
 
 `build_tool_mix` samples with a fixed seed, so step 2 trains on the same mix
-each time and these numbers should reproduce. **Routing — "right tool" — is the
+each time and these numbers should reproduce for that model. **Routing — "right tool" — is the
 one to watch.** If it comes back near 50% rather than 100%, a system prompt has
 found its way back into the inference path; that single change was the
 difference between the two figures. It happened again through a `SYSTEM` block
@@ -756,8 +730,8 @@ Step 4 is what makes the served model the one you measured. Until it runs,
 
 > **Not yet ported off MLX.** The evaluation below still loads `mlx-lm` and the old adapter layout, so it cannot score runs from the PyTorch training above. It is being moved to Ollama (the served, quantized model) plus `transformers` for perplexity.
 
-After fine-tuning, an evaluation step runs automatically before Ollama export.
-Four signals, two of which block the export:
+Once ported, evaluation runs before the Ollama export; until then it is out of
+the pipeline. Four signals, three of which gate the export:
 
 | Signal | Measures | Gated |
 |--------|----------|-------|
@@ -805,7 +779,7 @@ uv run python -m app.scripts.flows.eval.eval_finetuned_model
 
 # A specific run, and a stricter tool-call gate:
 uv run python -m app.scripts.flows.eval.eval_finetuned_model \
-  --run-dir artifacts/20260403_220717 --tool-call-threshold 0.8
+  --run-dir artifacts/<run> --tool-call-threshold 0.8
 ```
 
 > **Do not run two evaluations at once.** They both spawn `mlx_lm generate`, and
@@ -835,7 +809,7 @@ The export converts `model/` to an F16 GGUF, quantizes it to Q4_K_M with llama.c
 
 The Modelfile has **no system prompt**: the model is trained on bare `### Question` / `### Answer` text, and a baked-in `SYSTEM` block is prepended to every chat. It uses a relative `FROM ./chembl-drug-chat.gguf`, so `artifacts/<run>/ollama/` is portable: copy both files anywhere and `ollama create chembl-drug-chat:270m -f Modelfile` rebuilds the same model.
 
-**Publish a model** to Cloud Storage for the deployed service, after evaluating and exporting a run:
+**Publish a model** to Cloud Storage for the deployed service, after exporting a run (and, once eval is ported, evaluating it):
 
 ```bash
 BUCKET=<bucket> ./deploy/publish_model.sh artifacts/<run>
@@ -872,10 +846,10 @@ chem_mlops/
 │   │   └── chembl_drug_chat_pipeline.py   # Dagster pipeline (@op / @graph / Definitions)
 │   ├── scripts/flows/
 │   │   ├── initial_data_transformation/
-│   │   │   ├── collect_data.py            # Download ChEMBL SQLite
+│   │   │   ├── collect_data.py            # Download ChEMBL SQLite (reuses a finished download)
 │   │   │   └── transform_data.py          # SQLite → Parquet (DuckDB)
 │   │   ├── llm_finetuning_data/
-│   │   │   ├── build_drug_interaction_dataset.py  # 21-category QA builder (parallel)
+│   │   │   ├── build_drug_interaction_dataset.py  # 22-category QA builder (rows streamed, ~8 GB peak)
 │   │   │   ├── build_finetune_dataset.py          # Activity Parquet → JSONL
 │   │   │   └── download_twosides.py               # Stream-download TWOSIDES → Parquet
 │   │   ├── finetuning/
@@ -887,38 +861,43 @@ chem_mlops/
 │   │   │   ├── eval_finetuned_model.py    # Perplexity + tool-call/result + golden benchmarks
 │   │   │   └── golden.jsonl               # 40 questions, built from held-out molecules
 │   │   └── vector_store/
-│   │       ├── ingest_to_lancedb.py       # 2.85 M compounds → Morgan fingerprints → LanceDB
+│   │       ├── ingest_to_lancedb.py       # 2.96 M compounds → Morgan fingerprints → LanceDB
 │   │       ├── ingest_twosides_to_lancedb.py  # TWOSIDES → polypharmacy table
 │   │       ├── query_lancedb.py           # query_compounds / get_compound / polypharmacy API
 │   │       └── tools.py                   # Tool CLI the web agent calls (adds draw_molecule)
-│   └── tests/                             # pytest suite for each pipeline stage
+│   └── tests/
+│       ├── flows/                         # pytest suite for each pipeline stage
+│       └── sky_yaml_test.py               # train_only.sky.yaml stays equal to train.sky.yaml's train step
 ├── web/                                   # Bun chat app
 │   ├── src/
-│   │   ├── app.ts                         # Request handler, agent loop, model detection
+│   │   ├── app.ts                         # Request handler, agent loop, sign-in/queue/limit routes
+│   │   ├── access.ts                      # Google ID token check, session cookie, queue, rate limits
 │   │   ├── tools.ts                       # Tool specs, tool-call parsing, name/arg resolver
-│   │   ├── frontend.ts                    # Single-pane chat UI, tool-call rendering
-│   │   └── frontend-helpers.ts            # renderMarkdown, formatReplyText (no DOM deps, testable)
+│   │   ├── frontend.ts                    # Chat UI: tool calls, Google sign-in, queue position
+│   │   └── frontend-helpers.ts            # renderMarkdown, request size caps (no DOM deps, testable)
 │   ├── public/
-│   │   ├── index.html                     # Single-pane agentic chat layout
+│   │   ├── index.html                     # Chat layout, sign-in panel, status banner
 │   │   └── style.css
 │   ├── test/                              # bun test suite
 │   └── server.ts                          # Bun.serve entry point + frontend build step
-├── data/
-│   ├── chembl_transform/                  # Parquet files (one per ChEMBL table)
-│   ├── llm_finetune/                      # train.jsonl / valid.jsonl
-│   ├── lancedb/chembl_CHEMBL_37/          # compounds (small molecules + biologics) + polypharmacy
-│   └── twosides/TWOSIDES.parquet          # PRR-filtered FAERS pairs (~50 MB, gitignored)
 ├── deploy/
 │   ├── web.Dockerfile                     # Chat app image (Bun + serving Python deps)
 │   ├── ollama.Dockerfile                  # CPU-only Ollama with the model baked in
+│   ├── Caddyfile                          # HTTPS in front of the app (VM only)
 │   ├── publish_model.sh                   # Upload GGUF + Modelfile + manifest to GCS
 │   ├── train.sky.yaml                     # The whole pipeline on GCP in one command (SkyPilot, two steps)
 │   ├── train_only.sky.yaml                # Just the training step, from data already in the bucket
-│   └── vm.sh                              # Create or redeploy the app on the e2-micro VM
-├── compose.yaml                           # Run both images locally
+│   ├── vm.sh                              # Create or redeploy the app on the e2-micro VM
+│   └── chem-demo.env                      # Your VM settings: DOMAIN, GOOGLE_CLIENT_ID (gitignored)
+├── data/                                  # Built by the pipeline (gitignored)
+│   ├── chembl_transform/                  # Parquet files (one per ChEMBL table)
+│   ├── llm_finetune/                      # train.jsonl / valid.jsonl
+│   ├── lancedb/chembl_CHEMBL_37/          # compounds (small molecules + biologics) + polypharmacy
+│   └── twosides/TWOSIDES.parquet          # PRR-filtered FAERS pairs
+├── artifacts/                             # Fine-tuning runs: model, checkpoints, ollama/ export (gitignored)
+├── notebooks/                             # Data exploration
+├── compose.yaml                           # The app's containers: ollama, web, and caddy (VM only)
 ├── deployments/workspace.yaml             # Dagster code-location config
-├── ROADMAP.md                             # Ranked work items, with what was measured
-├── artifacts/                             # Fine-tuning run outputs (gitignored)
 ├── install.sh                             # One command: data → training → running containers (macOS)
 └── pyproject.toml
 ```

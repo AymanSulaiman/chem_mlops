@@ -24,7 +24,8 @@ RUN="${RUN:-gcp_v1_tools}"            # gs://$BUCKET/models/$RUN
 DISK_GB="${DISK_GB:-50}"
 
 cd "$(dirname "$0")/.."
-ssh_vm() { gcloud compute ssh "$VM" --zone "$ZONE" --quiet -- "$@"; }
+# Keep-alives notice a dropped connection (laptop asleep, network blip) instead of hanging.
+ssh_vm() { gcloud compute ssh "$VM" --zone "$ZONE" --quiet -- -o ServerAliveInterval=30 -o ServerAliveCountMax=4 "$@"; }
 SETTINGS="deploy/$VM.env"
 DOMAIN="$( [[ -f "$SETTINGS" ]] && sed -n 's/^DOMAIN=//p' "$SETTINGS" || true)"
 
@@ -73,15 +74,25 @@ if [[ -f "$SETTINGS" ]]; then
 fi
 PROFILE="$( [[ -n "$DOMAIN" ]] && echo "--profile public" || true)"
 
-echo "==> Syncing the model ($RUN) and LanceDB from gs://$BUCKET, then starting the app"
-ssh_vm "set -e
-  mkdir -p ~/model ~/data/lancedb
-  gcloud storage rsync --recursive --delete-unmatched-destination-objects gs://$BUCKET/models/$RUN ~/model
-  gcloud storage rsync --recursive --delete-unmatched-destination-objects gs://$BUCKET/data/lancedb ~/data/lancedb
-  cd ~/chem_mlops
-  sudo env PWD=\$PWD MODEL_DIR=\$HOME/model LANCEDB_HOST_DIR=\$HOME/data/lancedb \
-    docker compose $PROFILE up -d --build --wait
-  sudo docker compose $PROFILE ps"
+# The sync and the image builds run detached on the VM (they take a while on
+# an e2-micro), so a dropped connection doesn't kill them. This script follows
+# ~/deploy.log; if it gets cut off, check on it with:
+#   gcloud compute ssh chem-demo --zone us-central1-a -- tail -f deploy.log
+echo "==> Syncing the model ($RUN) and LanceDB from gs://$BUCKET, then building and starting the app"
+ssh_vm "cat > ~/deploy.sh <<EOF
+set -e
+mkdir -p ~/model ~/data/lancedb
+gcloud storage rsync --recursive --delete-unmatched-destination-objects gs://$BUCKET/models/$RUN ~/model
+gcloud storage rsync --recursive --delete-unmatched-destination-objects gs://$BUCKET/data/lancedb ~/data/lancedb
+cd ~/chem_mlops
+sudo env PWD=\\\$PWD MODEL_DIR=\\\$HOME/model LANCEDB_HOST_DIR=\\\$HOME/data/lancedb \\
+  docker compose $PROFILE up -d --build --wait
+sudo docker ps --format "{{.Names}}  {{.Status}}"
+EOF
+rm -f ~/deploy.log
+setsid nohup bash -c 'bash ~/deploy.sh; echo DEPLOY_EXIT=\$?' > ~/deploy.log 2>&1 < /dev/null &"
+ssh_vm 'tail -n +1 -F ~/deploy.log 2>/dev/null | sed -u "/^DEPLOY_EXIT=/q"'
+ssh_vm 'grep -q "^DEPLOY_EXIT=0" ~/deploy.log' || { echo "Deploy failed: see ~/deploy.log on $VM" >&2; exit 1; }
 
 echo
 if [[ -n "$DOMAIN" ]]; then
