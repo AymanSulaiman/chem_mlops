@@ -2,6 +2,12 @@
 # Build from the repo root:  docker build -f deploy/web.Dockerfile .
 FROM oven/bun:1.3.12-slim
 
+# RDKit's drawing code (draw_molecule) links these X11/Cairo system libraries;
+# the slim base image doesn't have them.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      libx11-6 libxext6 libxrender1 libexpat1 \
+ && rm -rf /var/lib/apt/lists/*
+
 COPY --from=ghcr.io/astral-sh/uv:0.13.6 /uv /usr/local/bin/uv
 ENV UV_PYTHON_INSTALL_DIR=/opt/python \
     UV_COMPILE_BYTECODE=1 \

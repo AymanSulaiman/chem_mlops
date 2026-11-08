@@ -313,6 +313,12 @@ export function createChatRequestHandler(options: ChatAppOptions = {}) {
             send({ tool: call });
             const outcome = await toolRunner(call);
             send({ toolResult: { tool: call.tool, ...outcome } });
+            if (outcome.error) {
+              // Handed an error, the model invents an answer (a made-up
+              // structure for Prozac, with no fluorine). Say what failed instead.
+              send({ message: { content: `I couldn't get that from the database (${call.tool} failed), so I won't guess. Try rephrasing, or ask about another drug.` } });
+              break;
+            }
             convo.push({ role: "assistant", content });
             convo.push({ role: "user", content: formatToolResult(call, outcome) });
           }
