@@ -281,14 +281,17 @@ A `web/.env` file with working defaults is committed — Bun loads it automatica
 
 Sign-in is on only when `GOOGLE_CLIENT_ID` is set: the OAuth client ID from the GCP console (APIs & Services → Credentials → OAuth client ID → Web application, with your demo's `https://` address as an authorised JavaScript origin). It isn't a secret.
 
+Without it (local runs), there is no sign-in, every visitor counts as the same person (so nobody queues), and the server logs a warning at startup.
+
 **Usage log.** Every sign-in and every chat is logged as one JSON line: time, email, question length, tools called, latency and token counts (never the question text). Lines go to the container's output and, when `USAGE_LOG` is set (compose sets it), to a file on the `usage_logs` Docker volume, which survives redeploys. On the VM, a systemd timer installed by `vm.sh` copies that file to `gs://chem-mlops-train/usage/usage.jsonl` every 10 minutes (the VM needs the `storage-rw` scope).
 
-Query it straight from the bucket with DuckDB (it uses your `gcloud auth application-default login`):
+Query it straight from the bucket with DuckDB. DuckDB's GCS `credential_chain` provider doesn't use your gcloud login (it expects HMAC keys), so hand it a short-lived gcloud access token instead; it lasts about an hour:
+
+```bash
+duckdb -cmd "INSTALL httpfs; LOAD httpfs; CREATE SECRET (TYPE gcs, BEARER_TOKEN '$(gcloud auth print-access-token)');"
+```
 
 ```sql
-INSTALL httpfs; LOAD httpfs;
-CREATE SECRET (TYPE gcs, PROVIDER credential_chain);
-
 -- Who used it, and how much
 SELECT email, count(*) AS chats, min(ts) AS first_seen, max(ts) AS last_seen,
        round(avg(latencyMs) / 1000, 1) AS avg_seconds
@@ -297,8 +300,6 @@ WHERE event = 'chat'
 GROUP BY email
 ORDER BY chats DESC;
 ```
-
-Without it (local runs), there is no sign-in, every visitor counts as the same person (so nobody queues), and the server logs a warning at startup.
 
 ---
 
@@ -857,7 +858,7 @@ Example questions:
 
 ```
 chem_mlops/
-├── .github/workflows/ci.yml               # Lint + typecheck + pytest + bun test on every push/PR
+├── .github/workflows/ci.yml               # Lint, typecheck, tests, deploy config + web image checks
 ├── app/
 │   ├── orchestration/
 │   │   └── chembl_drug_chat_pipeline.py   # Dagster pipeline (@op / @graph / Definitions)
@@ -937,7 +938,15 @@ uv run ty check
 cd web && bun test
 ```
 
-All checks run automatically on every push and pull request via `.github/workflows/ci.yml`.
+All checks run automatically on every push and pull request via `.github/workflows/ci.yml`, in three jobs:
+
+| Job | Runs |
+|-----|------|
+| `python` | ruff, ty, pytest |
+| `web` | `tsc --noEmit`, bun test |
+| `deploy` | shellcheck on the deploy scripts; `compose.yaml` and the Caddyfile validated; the web image built, with an RDKit drawing smoke test (a missing system library only shows up when RDKit draws) |
+
+The Ollama image isn't built in CI: it needs the exported model, which isn't in the repo.
 
 ---
 
