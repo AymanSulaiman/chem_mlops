@@ -938,7 +938,7 @@ uv run ty check
 cd web && bun test
 ```
 
-All checks run automatically on every push and pull request via `.github/workflows/ci.yml`, in three jobs:
+All checks run automatically on every push and pull request via `.github/workflows/ci.yml`, in three jobs, all on Linux (`ubuntu-latest`) like the GCP machines the code runs on:
 
 | Job | Runs |
 |-----|------|

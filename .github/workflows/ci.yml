@@ -8,7 +8,10 @@ on:
 
 jobs:
   python:
-    runs-on: macos-14  # small CPU torch wheel; on Linux uv would pull the multi-GB CUDA build
+    # Linux, like everything that runs this code: the GCP training VMs and the
+    # e2-micro. uv installs the CUDA build of torch from the lockfile, the same
+    # wheels the training VM gets (a few GB; the uv cache keeps reruns quick).
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
