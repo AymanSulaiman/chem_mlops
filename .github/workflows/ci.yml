@@ -20,6 +20,9 @@ jobs:
           enable-cache: true
           python-version-file: .python-version
 
+      # RDKit's drawing code (draw_molecule) needs these; same list as deploy/web.Dockerfile.
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends libx11-6 libxext6 libxrender1 libexpat1
+
       - run: uv sync --frozen --group dev
 
       - run: uv run ruff check .

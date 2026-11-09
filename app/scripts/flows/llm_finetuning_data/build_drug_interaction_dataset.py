@@ -33,6 +33,7 @@ Output: data/llm_finetune/train.jsonl  (90 %)
 
 import functools
 import json
+import multiprocessing
 import os
 import random
 from collections.abc import Iterator
@@ -2690,7 +2691,10 @@ def build_drug_interaction_dataset(
     else:
         print(f"Running {len(active)} generators across {n_workers} workers...")
         results: dict[str, list[dict]] = {}
-        with ProcessPoolExecutor(max_workers=n_workers) as executor:
+        # spawn, not Linux's default fork: a forked child inherits locks held by
+        # Polars' thread pool and hangs forever (it did in CI). macOS spawns anyway.
+        spawn = multiprocessing.get_context("spawn")
+        with ProcessPoolExecutor(max_workers=n_workers, mp_context=spawn) as executor:
             futures = {executor.submit(_run_generator, fn): label for label, fn in active}
             for future in as_completed(futures):
                 label = futures[future]
