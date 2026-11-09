@@ -2,6 +2,8 @@
 
 An end-to-end MLOps pipeline that fine-tunes a Gemma 3 270M language model on ChEMBL drug-interaction data, builds a 2.96 M-compound vector store, and serves the model as a **tool-calling agent** in a streaming web chat. Training is PyTorch on a GCP GPU, launched with one command; serving runs on any x86_64 or arm64 machine, small enough for a 1 GB VM.
 
+**Live demo:** [demo.chemmlops.app](https://demo.chemmlops.app) (sign in with Google; one person at a time, so you may wait in a short queue). A scheduled GitHub workflow (`.github/workflows/demo.yml`) checks it every 6 hours.
+
 The model does not have context injected into its prompt. It asks for the lookups it needs, the server runs them against LanceDB, and the results come back into the conversation.
 
 ---
@@ -858,7 +860,9 @@ Example questions:
 
 ```
 chem_mlops/
-├── .github/workflows/ci.yml               # Lint, typecheck, tests, deploy config + web image checks
+├── .github/workflows/
+│   ├── ci.yml                             # Lint, typecheck, tests, deploy config + web image checks
+│   └── demo.yml                           # Checks the live demo every 6 hours
 ├── app/
 │   ├── orchestration/
 │   │   └── chembl_drug_chat_pipeline.py   # Dagster pipeline (@op / @graph / Definitions)
