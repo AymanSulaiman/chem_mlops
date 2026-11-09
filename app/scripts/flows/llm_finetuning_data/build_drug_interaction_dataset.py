@@ -33,6 +33,7 @@ Output: data/llm_finetune/train.jsonl  (90 %)
 
 import functools
 import json
+import multiprocessing
 import os
 import random
 from collections.abc import Iterator
@@ -470,7 +471,7 @@ def generate_activity_qa(
         and not row["pref_name"].strip().upper().startswith("AUTONOM")
     }
 
-    for row in activities.filter(pl.col("pchembl_value").is_not_null()).to_dicts():
+    for row in activities.filter(pl.col("pchembl_value").is_not_null()).iter_rows(named=True):
         mol = mols.get(row.get("molregno"))
         if not mol:
             continue
@@ -941,7 +942,7 @@ def generate_assay_context_qa(
 
     seen: set[tuple[int, int]] = set()
     count = 0
-    for act_row in activities.to_dicts():
+    for act_row in activities.iter_rows(named=True):
         if count >= MAX_ASSAY_PAIRS:
             break
         molregno: int | None = act_row.get("molregno")
@@ -1319,7 +1320,7 @@ def generate_cyp_inhibition_qa(
     count = 0
     seen: set[tuple[int, int]] = set()
 
-    for row in activities.to_dicts():
+    for row in activities.iter_rows(named=True):
         if count >= max_pairs:
             break
         if row.get("standard_type") not in inhibition_types:
@@ -1521,7 +1522,7 @@ def generate_pgp_interaction_qa(
     count = 0
     seen_mol: set[int] = set()
 
-    for row in activities.to_dicts():
+    for row in activities.iter_rows(named=True):
         if count >= max_pairs:
             break
         assay_id = row.get("assay_id")
@@ -2690,7 +2691,10 @@ def build_drug_interaction_dataset(
     else:
         print(f"Running {len(active)} generators across {n_workers} workers...")
         results: dict[str, list[dict]] = {}
-        with ProcessPoolExecutor(max_workers=n_workers) as executor:
+        # spawn, not Linux's default fork: a forked child inherits locks held by
+        # Polars' thread pool and hangs forever (it did in CI). macOS spawns anyway.
+        spawn = multiprocessing.get_context("spawn")
+        with ProcessPoolExecutor(max_workers=n_workers, mp_context=spawn) as executor:
             futures = {executor.submit(_run_generator, fn): label for label, fn in active}
             for future in as_completed(futures):
                 label = futures[future]

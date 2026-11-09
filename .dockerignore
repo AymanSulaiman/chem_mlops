@@ -1,0 +1,12 @@
+# Build context for deploy/web.Dockerfile: code only, no data or weights.
+*
+!pyproject.toml
+!uv.lock
+!.python-version
+!app/
+!web/
+app/tests/
+**/__pycache__/
+web/node_modules/
+web/test/
+web/public/frontend.js

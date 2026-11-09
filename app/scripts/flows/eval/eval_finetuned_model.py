@@ -35,12 +35,13 @@ import types
 from pathlib import Path
 from typing import Any
 
-from app.scripts.flows.finetuning.export_to_ollama import (
-    ARTIFACTS_DIR,
-    DEFAULT_ADAPTER_SUBDIR,
-    DEFAULT_MLX_SUBDIR,
-    latest_run_dir,
-)
+from app.scripts.flows.finetuning.export_to_ollama import ARTIFACTS_DIR, latest_run_dir
+
+# ponytail: still the MLX-era run layout. Training moved to PyTorch (full
+# fine-tune, artifacts/<run>/model/), so this eval cannot score new runs until it
+# is ported to Ollama + transformers — step C of the deployment plan.
+DEFAULT_MLX_SUBDIR = "mlx/gemma-3-1b-pt-mlx"
+DEFAULT_ADAPTER_SUBDIR = "adapters/gemma3-1b-pt-chembl-toon"
 
 # Lazy mlx_lm imports — aliased at module level so tests can patch them.
 # These are only resolved when the functions are called (not at import time),

@@ -1,0 +1,104 @@
+# The whole pipeline on GCP with one command (SkyPilot managed job pipeline):
+#   sky jobs launch deploy/train.sky.yaml --env HF_TOKEN=$(cat ~/.cache/huggingface/token) -y
+# Same Dagster pipeline as install.sh on a Mac, in two steps on two VMs:
+#   1. data   CPU VM, 64 GB RAM: download ChEMBL + TWOSIDES → transform →
+#             datasets → LanceDB, written to the bucket
+#   2. train  small GPU VM: fine-tune → tool-call training, from the bucket
+# The data steps need lots of RAM but no GPU, and GPU VMs with that much RAM
+# are often sold out; this way the GPU VM only needs ~16 GB. Each VM is deleted
+# when its step ends. The Ollama export runs locally after downloading the model.
+# Setup and download: README "Train on GCP".
+name: chem-pipeline
+
+---
+
+name: data
+
+resources:
+  infra: gcp/us-central1  # the bucket's region
+  cpus: 8+
+  memory: 64+  # dataset build peaks at ~8 GB (streamed rows); LanceDB ingest unmeasured, so headroom
+  disk_size: 250  # ChEMBL extract + parquet + 24 GB LanceDB
+
+workdir: .  # your local checkout (.gitignore'd data/ and artifacts/ are skipped)
+
+file_mounts:
+  # Change the bucket name to yours (here and in the train step).
+  /bucket:
+    source: gs://chem-mlops-train
+    mode: MOUNT_CACHED
+
+envs:
+  CHEMBL_VERSION: "37"
+
+setup: |
+  sudo apt-get update -qq && sudo apt-get install -y -qq aria2
+  curl -LsSf https://astral.sh/uv/install.sh | sh
+  ~/.local/bin/uv sync
+
+run: |
+  set -e
+  mkdir -p data /bucket/data
+  # EBI throttles each connection (~50 kB/s); fetch ChEMBL with 16 in parallel.
+  # collect_data then extracts this archive instead of downloading it again.
+  aria2c -x16 -s16 -c -d data \
+    "https://ftp.ebi.ac.uk/pub/databases/chembl/ChEMBLdb/latest/chembl_${CHEMBL_VERSION}_sqlite.tar.gz"
+  # Every data step of the Dagster pipeline, built on local disk (fast).
+  ~/.local/bin/uv run python -c "
+  from app.orchestration.chembl_drug_chat_pipeline import chembl_pipeline
+  chembl_pipeline.execute_in_process(op_selection=[
+      '*create_chembl_finetune_dataset_op',
+      '*build_drug_interaction_dataset_op',
+      '*ingest_twosides_to_lancedb_op',
+  ])
+  "
+  # Outputs: the training data for step 2, LanceDB for the app's tools.
+  # SkyPilot finishes uploading before it marks the step done.
+  rm -rf /bucket/data/llm_finetune /bucket/data/lancedb
+  cp -r data/llm_finetune data/lancedb /bucket/data/
+
+---
+
+name: train
+
+resources:
+  # GPUs often sell out. Each line tries every GCP region with that GPU,
+  # cheapest first: L4 (bf16, $0.70/h), T4 (fp32, $0.59/h), V100 (fp32, $2.95/h).
+  # Outside us-central1 the bucket traffic is billed as cross-region egress.
+  # Keep in sync with deploy/train_only.sky.yaml (app/tests/sky_yaml_test.py checks).
+  ordered:
+    - {infra: gcp, accelerators: L4:1}
+    - {infra: gcp, accelerators: T4:1}
+    - {infra: gcp, accelerators: V100:1}
+  disk_size: 100
+  # ponytail: on-demand, not spot. A checkpoint cut off mid-upload by a
+  # preemption could block the resume. Spot once checkpoint saves are
+  # preemption-safe.
+
+workdir: .
+
+file_mounts:
+  # Checkpoints and models go here during training.
+  /bucket:
+    source: gs://chem-mlops-train
+    mode: MOUNT_CACHED
+    type: MODEL_CHECKPOINT_RW
+
+envs:
+  RUN_NAME: gcp_v1  # models land in artifacts/gcp_v1 and artifacts/gcp_v1_tools
+  HF_TOKEN:         # pass with --env; Gemma is gated on Hugging Face
+  ITERS: ""         # training steps per stage; empty = full run, e.g. 20 for a smoke test
+
+setup: |
+  curl -LsSf https://astral.sh/uv/install.sh | sh
+  ~/.local/bin/uv sync
+
+run: |
+  set -e
+  mkdir -p data /bucket/artifacts
+  cp -r /bucket/data/llm_finetune data/  # local copy: faster reads, and the tool mix is written beside it
+  ln -sfn /bucket/artifacts artifacts
+  ~/.local/bin/uv run python -m app.scripts.flows.finetuning.finetuning \
+    --run-name $RUN_NAME --no-export ${ITERS:+--iters $ITERS}
+  ~/.local/bin/uv run python -m app.scripts.flows.finetuning.continue_tool_training \
+    --from-run artifacts/$RUN_NAME --run-name ${RUN_NAME}_tools ${ITERS:+--iters $ITERS}

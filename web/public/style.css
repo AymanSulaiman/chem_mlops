@@ -314,3 +314,47 @@ body {
   .manual__row { grid-template-columns: 1fr; }
   .manual__name { display: none; }
 }
+
+/* Demo seat status: shown while joining, when the demo is full, or when sign-in is missing. */
+.status {
+  margin: 0;
+  padding: 0.6rem 0.9rem;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface-alt);
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+/* Sign in with Google */
+.signin {
+  display: grid;
+  gap: 0.75rem;
+  justify-items: start;
+  padding: 1rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-alt);
+  color: var(--text);
+}
+.signin p {
+  margin: 0;
+}
+.signin__error {
+  color: #f87171;
+}
+.account {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+.link-button {
+  border: 0;
+  padding: 0;
+  background: none;
+  color: var(--muted);
+  text-decoration: underline;
+  cursor: pointer;
+}

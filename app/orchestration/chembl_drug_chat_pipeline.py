@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 from dagster import Config, Definitions, In, Nothing, Out, ScheduleDefinition, graph, op
@@ -21,6 +22,11 @@ from app.scripts.flows.vector_store.ingest_to_lancedb import (
 from app.scripts.flows.vector_store.ingest_twosides_to_lancedb import (
     ingest_twosides_to_lancedb,
 )
+
+
+def _env_kwargs() -> dict:
+    """ITERS (optional) caps training steps, e.g. ITERS=20 for a quick end-to-end test."""
+    return {"iters": int(os.environ["ITERS"])} if os.environ.get("ITERS") else {}
 
 
 class ChemblConfig(Config):
@@ -57,12 +63,24 @@ def build_drug_interaction_dataset_op() -> None:
 
 
 # Both finetune-data ops must complete before finetuning begins (fan-in via Nothing inputs).
-@op(ins={"start_a": In(Nothing), "start_b": In(Nothing)}, out=Out(str))
+# start_vector_store: the in-process executor runs ops one at a time, so without
+# this the LanceDB ingest could be queued behind hours of training, and a training
+# crash would leave the app's tools with no polypharmacy table.
+@op(
+    ins={"start_a": In(Nothing), "start_b": In(Nothing), "start_vector_store": In(Nothing)},
+    out=Out(str),
+)
 def finetune_llm_op() -> str:
     # export=False: the model that gets published is the tool-trained one, and
     # only after the gate. Exporting here would put an unevaluated model in
     # Ollama and leave it there if the gate later failed.
-    return str(gemma3_chembl_toon_finetune_flow(export=False))
+    # RUN_NAME (optional) fixes the run directory, so a remote job knows where the
+    # model lands and a re-run resumes from its checkpoints. Default: a timestamp.
+    return str(
+        gemma3_chembl_toon_finetune_flow(
+            export=False, run_name=os.environ.get("RUN_NAME"), **_env_kwargs()
+        )
+    )
 
 
 @op(ins={"start": In(Nothing)}, out=Out(Nothing))
@@ -101,7 +119,8 @@ def eval_base_model_op(run_dir: str) -> str:
 # model that reaches the export is therefore the tool-trained one.
 @op(out=Out(str))
 def continue_tool_training_op(run_dir: str) -> str:
-    return str(continue_tool_training(from_run=Path(run_dir)))
+    run_name = f"{os.environ['RUN_NAME']}_tools" if os.environ.get("RUN_NAME") else None
+    return str(continue_tool_training(from_run=Path(run_dir), run_name=run_name, **_env_kwargs()))
 
 
 # Both of these take the run directory explicitly rather than calling
@@ -129,15 +148,21 @@ def chembl_pipeline_graph() -> None:
         start_chembl=chembl_parquet, start_twosides=raw_twosides
     )
     compounds_vector_store = ingest_chembl_to_lancedb_op(start=chembl_parquet)
-    # Terminal op: the vector store serves the web app's agent tools at query
-    # time, so nothing downstream in this pipeline depends on it.
-    ingest_twosides_to_lancedb_op(start_lancedb=compounds_vector_store, start_twosides=raw_twosides)
-    finetuned_model = finetune_llm_op(
-        start_a=chembl_finetune_dataset, start_b=drug_interaction_dataset
+    # The vector store serves the web app's agent tools at query time.
+    vector_store = ingest_twosides_to_lancedb_op(
+        start_lancedb=compounds_vector_store, start_twosides=raw_twosides
     )
-    base_model_measured = eval_base_model_op(finetuned_model)
-    tool_trained_model = continue_tool_training_op(base_model_measured)
-    export_to_ollama_op(eval_finetuned_model_op(tool_trained_model))
+    finetuned_model = finetune_llm_op(
+        start_a=chembl_finetune_dataset,
+        start_b=drug_interaction_dataset,
+        start_vector_store=vector_store,
+    )
+    # ponytail: eval ops are out of the graph until eval is ported off MLX (it
+    # can't run on this stack yet), so the export is ungated. Put back:
+    #   continue_tool_training_op(eval_base_model_op(finetuned_model))
+    #   export_to_ollama_op(eval_finetuned_model_op(tool_trained_model))
+    tool_trained_model = continue_tool_training_op(finetuned_model)
+    export_to_ollama_op(tool_trained_model)
 
 
 chembl_pipeline = chembl_pipeline_graph.to_job(name="chembl_pipeline")

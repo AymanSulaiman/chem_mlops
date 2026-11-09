@@ -216,3 +216,6 @@ web/.bun/
 !web/.env
 .ua
 .gstack/
+
+# Per-VM deploy settings (deploy/vm.sh), e.g. deploy/chem-demo.env
+deploy/*.env

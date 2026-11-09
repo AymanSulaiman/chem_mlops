@@ -1,14 +1,15 @@
 """Continue training an existing adapter on a tool-heavy slice of the dataset.
 
-A full run trains 950 K records for 2-4 hours, and the 60 K tool-call records in
-it compete with ~900 K prose records that answer the same question shapes from
-memory. This does the cheap experiment instead: start from the adapter that is
-already good at pharmacology prose and keep teaching it, on a mix where tool
-calls are a third of what it sees rather than six percent.
+In the full run's dataset the 60 K tool-call records compete with ~900 K prose
+records that answer the same question shapes from memory. This does the cheap
+experiment instead: start from the model that is already good at pharmacology
+prose and keep teaching it, on a mix where tool calls are a third of what it
+sees rather than six percent.
 
     uv run python -m app.scripts.flows.finetuning.continue_tool_training
 
-Writes a new run directory, so the adapter it started from is never modified.
+Writes a new run directory, so the model it started from is never modified.
+Pass the same --run-name again to resume after a disconnect.
 Skips the export — check the tool-call rate with eval_finetuned_model first:
 
     uv run python -m app.scripts.flows.eval.eval_finetuned_model --run-dir <new run>
@@ -29,11 +30,10 @@ from pathlib import Path
 
 from app.scripts.flows.finetuning.export_to_ollama import (
     ARTIFACTS_DIR,
-    DEFAULT_ADAPTER_SUBDIR,
-    DEFAULT_MLX_SUBDIR,
+    MODEL_SUBDIR,
     latest_run_dir,
 )
-from app.scripts.flows.finetuning.finetuning import finetune_lora
+from app.scripts.flows.finetuning.finetuning import finetune
 from app.scripts.flows.llm_finetuning_data.build_drug_interaction_dataset import (
     TOOL_RESULT_HEADER,
     write_jsonl_splits,
@@ -43,7 +43,7 @@ DATA_DIR = Path("data/llm_finetune")
 MIX_DIR = Path("data/llm_finetune_tools")
 PROSE_RATIO = 2  # prose records kept per tool record
 CONTINUE_ITERS = 600
-CONTINUE_LEARNING_RATE = 1e-5
+CONTINUE_LEARNING_RATE = 2e-5
 
 
 def build_tool_mix(
@@ -113,45 +113,29 @@ def continue_tool_training(
     prose_ratio: int = PROSE_RATIO,
     run_name: str | None = None,
 ) -> Path:
-    """Continue the latest (or given) run's adapter on the tool mix.
+    """Continue the latest (or given) run's model on the tool mix.
 
     Returns:
         The new run directory.
     """
     source_run = from_run if from_run is not None else latest_run_dir(ARTIFACTS_DIR)
-    source_adapter = source_run / DEFAULT_ADAPTER_SUBDIR / "adapters.safetensors"
-    if not source_adapter.exists():
-        raise FileNotFoundError(f"No trained adapter at {source_adapter}.")
+    source_model = source_run / MODEL_SUBDIR
+    if not (source_model / "config.json").exists():
+        raise FileNotFoundError(f"No trained model at {source_model}.")
 
     build_tool_mix(data_dir, mix_dir, prose_ratio=prose_ratio)
 
     run_name = run_name or f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_tools"
     run_dir = ARTIFACTS_DIR / run_name
-    adapter_dir = run_dir / DEFAULT_ADAPTER_SUBDIR
-    log_file = run_dir / "logs" / "finetune.log"
-
-    # The MLX base model is shared, not reconverted: only the adapter changes.
-    mlx_model_dir = run_dir / DEFAULT_MLX_SUBDIR
-    mlx_model_dir.parent.mkdir(parents=True, exist_ok=True)
-    if not mlx_model_dir.exists():
-        mlx_model_dir.symlink_to((source_run / DEFAULT_MLX_SUBDIR).resolve())
 
     print(f"\n{'=' * 60}")
     print(f"Continuing {source_run.name} -> {run_name}")
-    print(f"  Adapter : {source_adapter}")
-    print(f"  Data    : {mix_dir}")
-    print(f"  Iters   : {iters}")
+    print(f"  Model : {source_model}")
+    print(f"  Data  : {mix_dir}")
+    print(f"  Iters : {iters}")
     print(f"{'=' * 60}\n")
 
-    finetune_lora(
-        mlx_model_dir,
-        adapter_dir,
-        mix_dir,
-        iters=iters,
-        learning_rate=CONTINUE_LEARNING_RATE,
-        log_file=log_file,
-        resume_from=source_adapter,
-    )
+    finetune(source_model, run_dir, mix_dir, iters=iters, learning_rate=CONTINUE_LEARNING_RATE)
 
     print(
         f"\nDone. Measure before exporting:\n  uv run python -m "
@@ -167,6 +151,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--iters", type=int, default=CONTINUE_ITERS)
     parser.add_argument("--prose-ratio", type=int, default=PROSE_RATIO)
+    parser.add_argument("--run-name", default=None, help="Reuse a name to resume that run")
     parser.add_argument("--mix-only", action="store_true", help="Build the mix and stop")
     args = parser.parse_args()
 
@@ -174,5 +159,8 @@ if __name__ == "__main__":
         build_tool_mix(prose_ratio=args.prose_ratio)
     else:
         continue_tool_training(
-            from_run=args.from_run, iters=args.iters, prose_ratio=args.prose_ratio
+            from_run=args.from_run,
+            iters=args.iters,
+            prose_ratio=args.prose_ratio,
+            run_name=args.run_name,
         )

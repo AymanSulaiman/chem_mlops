@@ -11,14 +11,12 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from app.scripts.flows.eval.eval_finetuned_model import (
+    DEFAULT_ADAPTER_SUBDIR,
+    DEFAULT_MLX_SUBDIR,
     GOLDEN_BENCHMARK_PATH,
     eval_flow,
     run_golden_benchmark,
     run_perplexity_eval,
-)
-from app.scripts.flows.finetuning.export_to_ollama import (
-    DEFAULT_ADAPTER_SUBDIR,
-    DEFAULT_MLX_SUBDIR,
 )
 
 _EVAL_MODULE = "app.scripts.flows.eval.eval_finetuned_model"

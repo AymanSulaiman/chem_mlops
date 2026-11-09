@@ -1,0 +1,42 @@
+# Chat app: Bun server + Python tool bridge (LanceDB, RDKit).
+# Build from the repo root:  docker build -f deploy/web.Dockerfile .
+FROM oven/bun:1.3.12-slim
+
+# RDKit's drawing code (draw_molecule) links these X11/Cairo system libraries;
+# the slim base image doesn't have them.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      libx11-6 libxext6 libxrender1 libexpat1 \
+ && rm -rf /var/lib/apt/lists/*
+
+COPY --from=ghcr.io/astral-sh/uv:0.13.6 /uv /usr/local/bin/uv
+ENV UV_PYTHON_INSTALL_DIR=/opt/python \
+    UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    # tools.ts calls `uv run`; without this it would try to sync the train/dev groups.
+    UV_NO_SYNC=1
+
+WORKDIR /app
+
+# Serving deps only (see pyproject.toml). The tools run as `python -m app...`
+# from /app, so the project itself doesn't need installing.
+COPY pyproject.toml uv.lock .python-version ./
+RUN uv sync --frozen --no-default-groups --no-install-project
+
+COPY web/package.json web/bun.lock web/
+RUN cd web && bun install --frozen-lockfile --production
+
+COPY app app
+COPY web web
+
+# Build the frontend once here instead of on every boot (cold start).
+RUN cd web && bun build src/frontend.ts --outdir public --target browser
+# Usage log volume (compose mounts it); owned by bun so the server can append.
+RUN mkdir -p /var/log/chem && chown bun /var/log/chem
+USER bun
+
+WORKDIR /app/web
+ENV PORT=3000 \
+    LANCEDB_DIR=/mnt/lancedb \
+    FRONTEND_PREBUILT=1
+EXPOSE 3000
+CMD ["bun", "run", "server.ts"]

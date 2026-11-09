@@ -11,12 +11,24 @@
       <header class="top-bar">
         <h1>Chem MLOps Chat</h1>
         <p id="model-label">Loading model...</p>
+        <p id="account" class="account" hidden>
+          <span id="account-email"></span>
+          <button id="signout" type="button" class="link-button">Sign out</button>
+        </p>
       </header>
+
+      <section id="signin" class="signin" hidden>
+        <p>Sign in with Google to use the chat. Your email is used only to share the demo fairly (one person at a time) and to keep usage logs.</p>
+        <div id="google-button"></div>
+        <p id="signin-error" class="signin__error" hidden></p>
+      </section>
 
       <details class="manual">
         <summary>What can I ask?</summary>
         <div class="manual__body" id="manual-body"></div>
       </details>
+
+      <p id="status" class="status" role="status" hidden></p>
 
       <div class="pane">
         <section id="messages" class="messages" aria-live="polite" aria-label="Chat messages"></section>

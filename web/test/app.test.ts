@@ -410,3 +410,30 @@ test("the fine-tune is not sent a system prompt", async () => {
   expect(sentRoles).not.toContain("system");
   expect(sentRoles).toEqual(["user"]);
 });
+
+test("a failed tool ends the turn with a plain message instead of letting the model guess", async () => {
+  let modelCalls = 0;
+  const handler = createChatRequestHandler({
+    publicDir: new URL("../public/", import.meta.url),
+    googleClientId: null,
+    fetchImpl: async (input) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (url.endsWith("/api/tags")) return Response.json({ models: [] });
+      modelCalls += 1;
+      return reply('{"tool": "draw_molecule", "args": {"name": "prozac"}}');
+    },
+    toolRunner: async () => ({ error: "ImportError: libXrender.so.1" }),
+  });
+  const res = await handler(
+    new Request("http://localhost/api/chat", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ messages: [{ role: "user", content: "draw prozac" }] }),
+    }),
+  );
+  const events = await collectEvents(res);
+  expect(modelCalls).toBe(1); // the model is not asked to write from the error
+  expect(events.find(e => e.toolResult)?.toolResult?.error).toContain("libXrender");
+  expect(answerOf(events)).toContain("won't guess");
+  expect(events.at(-1)?.done).toBe(true);
+});

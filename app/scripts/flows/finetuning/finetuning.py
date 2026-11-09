@@ -1,59 +1,50 @@
+"""Full fine-tune of Gemma 3 270M on the ChEMBL QA dataset with the Hugging Face Trainer.
+
+Runs wherever PyTorch does: CUDA (a GCP L4 or T4), Apple MPS, or CPU (slow).
+
+    uv run python -m app.scripts.flows.finetuning.finetuning --run-name gemma270m_v1
+
+Re-running with the same --run-name resumes from the last checkpoint, which is
+what a preempted or dropped run needs. Output: artifacts/<run>/model/ (Hugging Face
+format), which export_to_ollama turns into a GGUF.
+
+ponytail: full fine-tune rather than LoRA. At 270M parameters the whole model
+plus AdamW state is ~4.5 GB, so there is no adapter, no merge step and no PEFT
+dependency. Revisit (LoRA) if the base model grows past ~1B again.
+"""
+
+import argparse
 import json
-import subprocess
-import sys
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
-from app.scripts.flows.finetuning.export_to_ollama import export_to_ollama
+from app.scripts.flows.finetuning.export_to_ollama import (
+    ARTIFACTS_DIR,
+    CHECKPOINTS_SUBDIR,
+    MODEL_SUBDIR,
+    export_to_ollama,
+)
 
-HF_MODEL_ID = "google/gemma-3-1b-pt"
+HF_MODEL_ID = "google/gemma-3-270m"
 DATA_DIR = Path("data/llm_finetune")
 
-# M1 Pro / 32 GB unified memory — tuned for ~22 GB peak with grad checkpointing
-# Dataset is now ~883K pairs (5× larger); batch 2 keeps peak memory safe.
-# Compensate for the halved batch size by doubling iters to maintain training tokens seen.
-BATCH_SIZE = 2
-NUM_LAYERS = 16  # was 8; Gemma 3 1B has 18 layers — more LoRA coverage
-ITERS = 3000  # doubled from 1500 to match training tokens seen at batch_size=4
-LEARNING_RATE = 1e-5
-MAX_SEQ_LEN = 2048
-STEPS_PER_REPORT = 25  # was 1; reduces per-iteration I/O overhead
+# Sized to fit a 16 GB T4 (no bf16, so fp32), the smallest GPU in deploy/train.sky.yaml. The 262K-token vocabulary
+# makes the logits the largest tensor (batch x seq x 262144 floats), so the
+# micro-batch stays small and gradient accumulation makes up the rest.
+# Gemma's 262k-token vocabulary makes the logits the biggest tensor in training
+# (batch x seq x 262k floats). Measured on an M1 Pro: batch 4 peaked at 26 GB and
+# ran out of memory on the full data; batch 1 peaks at ~12 GB and is faster
+# (less padding). Same effective batch of 16.
+BATCH_SIZE = 1
+GRAD_ACCUM = 16
+ITERS = 3000  # optimizer steps
+LEARNING_RATE = 5e-5
+MAX_SEQ_LEN = 1024
+STEPS_PER_REPORT = 25
 STEPS_PER_EVAL = 200
-SAVE_EVERY = 100  # a crash costs at most 100 iters; checkpoints are ~10 MB each
-# macOS kills a Metal command buffer that hogs the GPU ("Impacting Interactivity",
-# kIOGPUCommandBufferCallbackErrorImpactingInteractivity). It is a watchdog, not
-# OOM: the same command runs fine on a quiet machine. Resume from the last
-# checkpoint instead of losing the run.
-METAL_WATCHDOG_ERROR = "Impacting Interactivity"
-MAX_METAL_RETRIES = 3
-
-
-def _run(cmd: list[str], cwd: Path | None = None, log_file: Path | None = None) -> None:
-    display_cwd = str(cwd) if cwd else "(current)"
-    # Use the current interpreter so the correct venv/environment is always used
-    resolved = [sys.executable if arg == "python" else arg for arg in cmd]
-    print(f"\n>>> Running: {' '.join(resolved)}")
-    print(f"    in: {display_cwd}\n")
-
-    if log_file:
-        log_file.parent.mkdir(parents=True, exist_ok=True)
-        proc = subprocess.Popen(
-            resolved,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            cwd=cwd,
-            text=True,
-        )
-        with open(log_file, "w") as lf:
-            assert proc.stdout is not None
-            for line in proc.stdout:
-                print(line, end="", flush=True)
-                lf.write(line)
-        proc.wait()
-        if proc.returncode != 0:
-            raise subprocess.CalledProcessError(proc.returncode, resolved)
-    else:
-        subprocess.run(resolved, check=True, cwd=cwd)
+EVAL_RECORDS = 500  # the whole valid split would take longer than the training
+SAVE_EVERY = 200  # a disconnect costs at most 200 steps
 
 
 def split_long_sequences(
@@ -65,8 +56,7 @@ def split_long_sequences(
     Split JSONL records whose token length exceeds max_seq_len into smaller chunks.
 
     Operates in-place on train.jsonl / valid.jsonl / test.jsonl.
-    Resolves the mlx_lm truncation warning for sequences > 2048 tokens, which
-    wastes memory on padding and causes inconsistent batch sizes on M1.
+    Without this the collator truncates long records and the tail is never trained on.
     """
     import os
 
@@ -109,125 +99,107 @@ def split_long_sequences(
             print(f"  {split}: all {len(records)} records within {max_seq_len} tokens")
 
 
-def convert_to_mlx(hf_model_id: str, mlx_model_dir: Path) -> Path:
-    """Convert HF model to MLX format (4-bit quantised)."""
-    mlx_model_dir.parent.mkdir(parents=True, exist_ok=True)
+def _read_texts(path: Path, limit: int | None = None) -> list[str]:
+    """The ``text`` field of each JSONL record, optionally the first *limit*."""
+    texts: list[str] = []
+    with path.open() as handle:
+        for line in handle:
+            if line.strip():
+                texts.append(json.loads(line)["text"])
+                if limit is not None and len(texts) >= limit:
+                    break
+    return texts
 
-    _run(
-        [
-            "python",
-            "-m",
-            "mlx_lm",
-            "convert",
-            "--hf-path",
-            hf_model_id,
-            "--mlx-path",
-            str(mlx_model_dir),
-            "--q-bits",
-            "4",
-            "--q-group-size",
-            "64",
-        ]
+
+def collate(tokenizer: Any, texts: list[str], max_seq_len: int = MAX_SEQ_LEN) -> dict[str, Any]:
+    """Tokenize a batch for causal LM training, loss on every non-padding token.
+
+    EOS is appended so the model learns to stop after an answer; padding is
+    masked out of the loss with -100.
+    """
+    enc = tokenizer(
+        [text + tokenizer.eos_token for text in texts],
+        truncation=True,
+        max_length=max_seq_len,
+        padding=True,
+        return_tensors="pt",
     )
+    enc["labels"] = enc["input_ids"].masked_fill(enc["attention_mask"] == 0, -100)
+    return enc
 
-    return mlx_model_dir
 
-
-def finetune_lora(
-    mlx_model_dir: Path,
-    adapter_dir: Path,
+def finetune(
+    base_model: str | Path,
+    run_dir: Path,
     data_dir: Path = DATA_DIR,
-    batch_size: int = BATCH_SIZE,
-    num_layers: int = NUM_LAYERS,
     iters: int = ITERS,
     learning_rate: float = LEARNING_RATE,
+    batch_size: int = BATCH_SIZE,
+    grad_accum: int = GRAD_ACCUM,
     max_seq_len: int = MAX_SEQ_LEN,
-    steps_per_report: int = STEPS_PER_REPORT,
-    steps_per_eval: int = STEPS_PER_EVAL,
-    save_every: int = SAVE_EVERY,
-    log_file: Path | None = None,
-    resume_from: Path | None = None,
 ) -> Path:
-    """Launch LoRA fine-tuning using mlx_lm, resuming after a Metal watchdog kill.
+    """Fine-tune *base_model* (HF id or local folder) on *data_dir*; return the model folder.
 
-    *resume_from* starts training from existing adapter weights instead of from
-    scratch — continued training on a new dataset rather than a fresh run.
+    Resumes from ``run_dir/checkpoints`` when a checkpoint is there.
     """
-    adapter_dir.mkdir(parents=True, exist_ok=True)
+    import torch
+    from transformers import AutoModelForCausalLM, AutoTokenizer, Trainer, TrainingArguments
 
-    def lora_cmd(remaining: int, resume_from: Path | None) -> list[str]:
-        cmd = [
-            "python",
-            "-m",
-            "mlx_lm",
-            "lora",
-            "--model",
-            str(mlx_model_dir),
-            "--train",
-            "--data",
-            str(data_dir),
-            "--fine-tune-type",
-            "lora",
-            "--batch-size",
-            str(batch_size),
-            "--num-layers",
-            str(num_layers),
-            "--iters",
-            str(remaining),
-            "--learning-rate",
-            str(learning_rate),
-            "--max-seq-length",
-            str(max_seq_len),
-            "--grad-checkpoint",  # ~30% lower peak memory -> fits batch_size=4
-            "--adapter-path",
-            str(adapter_dir),
-            "--steps-per-report",
-            str(steps_per_report),
-            "--steps-per-eval",
-            str(steps_per_eval),
-            "--save-every",
-            str(save_every),
-        ]
-        if resume_from is not None:
-            cmd += ["--resume-adapter-file", str(resume_from)]
-        return cmd
+    model_dir = run_dir / MODEL_SUBDIR
+    checkpoint_dir = run_dir / CHECKPOINTS_SUBDIR
 
-    def latest_checkpoint() -> tuple[Path, int] | None:
-        """Newest numbered checkpoint and the iteration it was written at."""
-        checkpoints = sorted(adapter_dir.glob("*_adapters.safetensors"))
-        if not checkpoints:
-            return None
-        newest = checkpoints[-1]
-        return newest, int(newest.name.split("_")[0])
+    tokenizer = AutoTokenizer.from_pretrained(str(base_model))
+    # Eager attention is what Gemma 3 recommends for training.
+    model = AutoModelForCausalLM.from_pretrained(
+        str(base_model), dtype=torch.float32, attn_implementation="eager"
+    )
+    model.config.use_cache = False  # incompatible with gradient checkpointing
 
-    done = 0
-    for attempt in range(1, MAX_METAL_RETRIES + 2):
-        try:
-            _run(lora_cmd(iters - done, resume_from), log_file=log_file)
-            return adapter_dir
-        except subprocess.CalledProcessError:
-            log = log_file.read_text() if log_file and log_file.exists() else ""
-            if METAL_WATCHDOG_ERROR not in log or attempt > MAX_METAL_RETRIES:
-                raise
-            if log_file and log_file.exists():
-                # _run truncates the log per attempt; keep the crash for debugging.
-                log_file.replace(log_file.with_name(f"{log_file.stem}.attempt{attempt}.log"))
-            checkpoint = latest_checkpoint()
-            if checkpoint is None:
-                print(
-                    f"\nMetal watchdog killed the run before the first checkpoint "
-                    f"(attempt {attempt}/{MAX_METAL_RETRIES}). Restarting from scratch.\n"
-                )
-                continue
-            resume_from, checkpoint_iter = checkpoint
-            done += checkpoint_iter
-            print(
-                f"\nMetal watchdog killed the run at ~iter {done} "
-                f"(attempt {attempt}/{MAX_METAL_RETRIES}). "
-                f"Resuming from {resume_from.name}, {iters - done} iters to go.\n"
-            )
+    train = _read_texts(data_dir / "train.jsonl")
+    valid_path = data_dir / "valid.jsonl"
+    valid = _read_texts(valid_path, limit=EVAL_RECORDS) if valid_path.exists() else None
 
-    return adapter_dir
+    # bf16 needs Ampere or newer; a T4 would only emulate it. Gemma overflows in
+    # fp16, so anything older trains in fp32.
+    bf16 = torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 8
+
+    args = TrainingArguments(
+        output_dir=str(checkpoint_dir),
+        max_steps=iters,
+        per_device_train_batch_size=batch_size,
+        per_device_eval_batch_size=batch_size,
+        gradient_accumulation_steps=grad_accum,
+        learning_rate=learning_rate,
+        lr_scheduler_type="cosine",
+        warmup_steps=min(100, iters // 10),
+        bf16=bf16,
+        gradient_checkpointing=True,
+        logging_steps=STEPS_PER_REPORT,
+        eval_strategy="steps" if valid else "no",
+        eval_steps=STEPS_PER_EVAL,
+        save_steps=SAVE_EVERY,
+        save_total_limit=1,  # a checkpoint is ~3.5 GB with optimizer state
+        remove_unused_columns=False,  # the dataset is plain strings
+        report_to="none",
+    )
+    trainer = Trainer(
+        model=model,
+        args=args,
+        train_dataset=train,
+        eval_dataset=valid,
+        data_collator=lambda texts: collate(tokenizer, texts, max_seq_len),
+    )
+
+    resume = any(checkpoint_dir.glob("checkpoint-*"))
+    print(f"Training {base_model} for {iters} steps{' (resuming)' if resume else ''}...")
+    trainer.train(resume_from_checkpoint=True if resume else None)
+
+    trainer.save_model(str(model_dir))
+    tokenizer.save_pretrained(str(model_dir))
+    log_path = run_dir / "logs" / "train_log.json"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.write_text(json.dumps(trainer.state.log_history, indent=2))
+    return model_dir
 
 
 def gemma3_chembl_toon_finetune_flow(
@@ -235,39 +207,25 @@ def gemma3_chembl_toon_finetune_flow(
     data_dir: str = str(DATA_DIR),
     run_name: str | None = None,
     export: bool = True,
+    iters: int = ITERS,
 ) -> Path:
     """
-    Finetuning pipeline optimised for Apple Silicon (M1 Pro, 32 GB):
+    Fine-tune pipeline:
+    1. Pre-split training sequences longer than MAX_SEQ_LEN.
+    2. Full fine-tune of the base model (resumable).
+    3. Export to Ollama — only when *export* is true.
 
-    1. Pre-split training sequences > 2048 tokens to eliminate truncation waste.
-    2. Convert Gemma 3 HF model -> MLX format (4-bit quantised).
-    3. LoRA fine-tuning with gradient checkpointing, log capture.
-    4. Export to Ollama — only when *export* is true.
-
-    Pass ``export=False`` when something downstream evaluates this adapter
-    first. The Dagster pipeline does: it continues this run on a tool-heavy
-    mix, evaluates that, and exports only if the gate passes. Exporting here
-    would publish an unevaluated model and leave it served if the gate then
-    failed — which is what this flow used to do unconditionally, despite the
-    docstring claiming otherwise.
-
-    Args:
-        hf_model_id: HuggingFace model ID
-        data_dir: Path to training data directory (must contain train.jsonl)
-        run_name: Optional custom run name, defaults to timestamp
-        export: Register the fused adapter with Ollama when finished.
+    Pass ``export=False`` when something downstream evaluates this model first.
+    The Dagster pipeline does: it continues this run on a tool-heavy mix,
+    evaluates that, and exports only if the gate passes. Exporting here would
+    publish an unevaluated model and leave it served if the gate then failed.
 
     Returns:
         The run directory, so a caller can evaluate or continue this run
         without guessing at "the latest directory in artifacts/".
     """
-    if run_name is None:
-        run_name = datetime.now().strftime("%Y%m%d_%H%M%S")
-
-    run_dir = Path("artifacts") / run_name
-    mlx_model_dir = run_dir / "mlx" / "gemma-3-1b-pt-mlx"
-    adapter_dir = run_dir / "adapters" / "gemma3-1b-pt-chembl-toon"
-    log_file = run_dir / "logs" / "finetune.log"
+    run_name = run_name or datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_dir = ARTIFACTS_DIR / run_name
 
     print(f"\n{'=' * 60}")
     print(f"Starting finetuning run: {run_name}")
@@ -275,15 +233,9 @@ def gemma3_chembl_toon_finetune_flow(
     print(f"{'=' * 60}\n")
 
     split_long_sequences(Path(data_dir), hf_model_id)
-    mlx_model_dir = convert_to_mlx(hf_model_id, mlx_model_dir)
-    adapter_dir = finetune_lora(mlx_model_dir, adapter_dir, Path(data_dir), log_file=log_file)
+    model_dir = finetune(hf_model_id, run_dir, Path(data_dir), iters=iters)
 
-    print(f"\n{'=' * 60}")
-    print("Finetuning complete!")
-    print(f"MLX model:    {mlx_model_dir}")
-    print(f"LoRA adapter: {adapter_dir}")
-    print(f"Training log: {log_file}")
-    print(f"{'=' * 60}\n")
+    print(f"\nFinetuning complete. Model: {model_dir}\n")
 
     if export:
         export_to_ollama(run_dir=run_dir, force=True)
@@ -292,4 +244,17 @@ def gemma3_chembl_toon_finetune_flow(
 
 
 if __name__ == "__main__":
-    gemma3_chembl_toon_finetune_flow()
+    parser = argparse.ArgumentParser(description="Full fine-tune of Gemma 3 270M.")
+    parser.add_argument("--run-name", default=None, help="Reuse a name to resume that run")
+    parser.add_argument("--base-model", default=HF_MODEL_ID)
+    parser.add_argument("--data-dir", default=str(DATA_DIR))
+    parser.add_argument("--iters", type=int, default=ITERS)
+    parser.add_argument("--no-export", action="store_true", help="Skip the Ollama export")
+    args = parser.parse_args()
+    gemma3_chembl_toon_finetune_flow(
+        hf_model_id=args.base_model,
+        data_dir=args.data_dir,
+        run_name=args.run_name,
+        export=not args.no_export,
+        iters=args.iters,
+    )

@@ -1,0 +1,8 @@
+# HTTPS in front of the web container, with a free certificate Caddy gets and
+# renews by itself (Let's Encrypt). DOMAIN comes from deploy/<vm>.env.
+{$DOMAIN} {
+	reverse_proxy web:3000 {
+		# Chat replies stream token by token; pass each chunk on at once.
+		flush_interval -1
+	}
+}
