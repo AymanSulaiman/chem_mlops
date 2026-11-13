@@ -18,6 +18,9 @@ jobs:
       - name: Page loads, with the Google sign-in button
         run: curl -fsS --max-time 30 "$DEMO_URL/" | grep -q 'id="google-button"'
 
+      - name: Medical disclaimer is on the page
+        run: curl -fsS --max-time 30 "$DEMO_URL/" | grep -q 'class="disclaimer"'
+
       - name: Server and model detection are up
         run: |
           curl -fsS --max-time 30 "$DEMO_URL/api/health" | grep -q '"ok":true'
