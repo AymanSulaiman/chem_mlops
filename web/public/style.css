@@ -358,3 +358,23 @@ body {
   text-decoration: underline;
   cursor: pointer;
 }
+
+/* Medical disclaimer: banner under the header, short reminder under the input */
+.disclaimer {
+  background: var(--surface-alt);
+  border: 1px solid #b45309;
+  border-radius: 12px;
+  padding: 10px 14px;
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.disclaimer--footer {
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--muted);
+  font-size: 12px;
+  text-align: center;
+}
