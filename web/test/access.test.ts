@@ -294,29 +294,32 @@ test("the 21st chat in an hour gets a 429", async () => {
   expect((await post(handler, "/api/chat", "a@x.com", hello)).status).toBe(429);
 });
 
-test("chats run one at a time, and the second is told it is waiting", async () => {
-  let finishFirst!: () => void;
-  const firstHeld = new Promise<void>((resolve) => (finishFirst = resolve));
+test("chats run in parallel up to the seat count, and the next is told it is waiting", async () => {
+  let finishHeld!: () => void;
+  const held = new Promise<void>((resolve) => (finishHeld = resolve));
   let calls = 0;
   const handler = demoHandler(async () => {
     calls++;
-    if (calls === 1) await firstHeld;
+    if (calls <= 2) await held;
     return ollamaReply(`answer ${calls}`);
-  }, 2); // two seats, so both people can send at once
+  }, 2); // two seats: two chats at once
 
-  const first = await post(handler, "/api/chat", "a@x.com", hello);
-  const firstText = first.text();
-  const second = await post(handler, "/api/chat", "b@x.com", hello);
-  const secondText = second.text();
-
+  const first = (await post(handler, "/api/chat", "a@x.com", hello)).text();
+  const second = (await post(handler, "/api/chat", "b@x.com", hello)).text();
   await Bun.sleep(10);
-  expect(calls).toBe(1); // the second chat has not reached the model yet
-  finishFirst();
+  expect(calls).toBe(2); // both seats are at the model
 
-  expect(await firstText).not.toContain("waiting");
-  const events = (await secondText).trim().split("\n").map((line) => JSON.parse(line));
+  // A third chat (a second tab) waits for a slot.
+  const third = (await post(handler, "/api/chat", "a@x.com", hello)).text();
+  await Bun.sleep(10);
+  expect(calls).toBe(2);
+  finishHeld();
+
+  expect(await first).not.toContain("waiting");
+  expect(await second).not.toContain("waiting");
+  const events = (await third).trim().split("\n").map((line) => JSON.parse(line));
   expect(events[0]).toEqual({ waiting: true });
-  expect(events.some((e) => e.message?.content === "answer 2")).toBe(true);
+  expect(events.some((e) => e.message?.content === "answer 3")).toBe(true);
 });
 
 test("without a Google client ID, local runs work with no sign-in", async () => {

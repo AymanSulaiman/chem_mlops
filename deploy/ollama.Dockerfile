@@ -20,7 +20,7 @@ ENV OLLAMA_HOST=0.0.0.0:11434 \
     # Keep the model in memory; reloading it per request would dominate latency.
     OLLAMA_KEEP_ALIVE=-1 \
     # One chat at a time (the web server queues the rest): saves the memory of
-    # extra context slots on a small VM.
+    # extra context slots on a small VM. compose.yaml sets it from MAX_USERS.
     OLLAMA_NUM_PARALLEL=1
 EXPOSE 11434
 ENTRYPOINT ["/usr/bin/ollama"]

@@ -7,6 +7,9 @@ services:
       context: ${MODEL_DIR:?set MODEL_DIR to artifacts/<run>/ollama}
       dockerfile: ${PWD}/deploy/ollama.Dockerfile
     restart: unless-stopped  # come back after a VM reboot
+    environment:
+      # One reply slot per chat seat.
+      OLLAMA_NUM_PARALLEL: ${MAX_USERS:-1}
     healthcheck:
       test: ["CMD", "ollama", "list"]
       interval: 5s
@@ -24,6 +27,8 @@ services:
       CHEMBL_DB_NAME: ${CHEMBL_DB_NAME:-}
       # "Sign in with Google" (demo only). Unset = no sign-in, for local runs.
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      # People in the chat at once; the rest wait in a queue.
+      MAX_USERS: ${MAX_USERS:-1}
       # Who signed in and chatted, one JSON line each (kept across redeploys).
       USAGE_LOG: /var/log/chem/usage.jsonl
     volumes:

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Create (first run) and deploy the chat app to a GCE e2-micro VM, from your
+# Create (first run) and deploy the chat app to a GCE VM (e2-medium), from your
 # working copy: uncommitted changes included, nothing pushed to GitHub.
 #
 #   ./deploy/vm.sh               # the chem-demo VM
@@ -22,6 +22,9 @@ RUN="${RUN:-gcp_v1_tools}"            # gs://$BUCKET/models/$RUN
 # ponytail: 50 GB because LanceDB is 24 GB; 30 GB (the free tier) once its
 # fingerprints are bit-packed.
 DISK_GB="${DISK_GB:-50}"
+# 4 GB and 1 sustained core (bursting to 2): room for 3 chats at once
+# (MAX_USERS in deploy/<vm>.env). Changing it resizes the VM, a few minutes down.
+MACHINE_TYPE="${MACHINE_TYPE:-e2-medium}"
 # The account on the VM whose home holds the model, LanceDB and the checkout.
 # gcloud would use the local username ("runner" in CI): a fresh home that
 # re-downloads 24 GB and fills the disk. Pin it so every deploy shares one.
@@ -34,9 +37,9 @@ SETTINGS="deploy/$VM.env"
 DOMAIN="$( [[ -f "$SETTINGS" ]] && sed -n 's/^DOMAIN=//p' "$SETTINGS" || true)"
 
 if ! gcloud compute instances describe "$VM" --zone "$ZONE" &>/dev/null; then
-  echo "==> Creating $VM (e2-micro, ${DISK_GB} GB disk, $ZONE)"
+  echo "==> Creating $VM ($MACHINE_TYPE, ${DISK_GB} GB disk, $ZONE)"
   gcloud compute instances create "$VM" --zone "$ZONE" \
-    --machine-type e2-micro \
+    --machine-type "$MACHINE_TYPE" \
     --image-family debian-12 --image-project debian-cloud \
     --boot-disk-size "${DISK_GB}GB" --boot-disk-type pd-standard \
     --scopes storage-rw \
@@ -51,9 +54,16 @@ fi
 swapon -a
 EOF
 )
-elif [[ "$(gcloud compute instances describe "$VM" --zone "$ZONE" --format='value(status)')" != RUNNING ]]; then
-  echo "==> Starting $VM"
-  gcloud compute instances start "$VM" --zone "$ZONE"
+else
+  if [[ "$(gcloud compute instances describe "$VM" --zone "$ZONE" --format='value(machineType.basename())')" != "$MACHINE_TYPE" ]]; then
+    echo "==> Resizing $VM to $MACHINE_TYPE (stops it for a few minutes)"
+    gcloud compute instances stop "$VM" --zone "$ZONE"
+    gcloud compute instances set-machine-type "$VM" --zone "$ZONE" --machine-type "$MACHINE_TYPE"
+  fi
+  if [[ "$(gcloud compute instances describe "$VM" --zone "$ZONE" --format='value(status)')" != RUNNING ]]; then
+    echo "==> Starting $VM"
+    gcloud compute instances start "$VM" --zone "$ZONE"
+  fi
 fi
 
 if [[ -n "$DOMAIN" ]]; then
@@ -104,7 +114,7 @@ EOF
 sudo systemctl daemon-reload && sudo systemctl enable --now chem-usage-upload.timer"
 
 # The sync and the image builds run detached on the VM (they take a while on
-# an e2-micro), so a dropped connection doesn't kill them. This script follows
+# a small VM), so a dropped connection doesn't kill them. This script follows
 # ~/deploy.log; if it gets cut off, check on it with:
 #   gcloud compute ssh chem-demo --zone us-central1-a -- tail -f deploy.log
 echo "==> Syncing the model ($RUN) and LanceDB from gs://$BUCKET, then building and starting the app"

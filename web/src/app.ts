@@ -143,19 +143,25 @@ export function createChatRequestHandler(options: ChatAppOptions = {}) {
     options.googleClientId === undefined ? Bun.env.GOOGLE_CLIENT_ID || null : options.googleClientId;
   const verifyGoogle = googleClientId ? createGoogleVerifier(googleClientId, fetchImpl, now) : null;
   const sessions = createSessions(now);
-  const gate = createGate({ now, ...options.gate });
+  // MAX_USERS: seats in the chat at once (the VM's deploy/<vm>.env sets it).
+  const gate = createGate({ now, maxUsers: Number(Bun.env.MAX_USERS) || undefined, ...options.gate });
 
   let cachedModel: CachedModel | null = null;
 
-  // One chat at a time: the CPU model serves one well, and queuing here (not in
-  // Ollama) lets a waiting visitor be told so.
-  let turn: Promise<void> = Promise.resolve();
+  // One chat per seat at a time (Ollama's OLLAMA_NUM_PARALLEL matches), and
+  // queuing here (not in Ollama) lets a waiting visitor be told so.
+  let running = 0;
   let busy = 0;
-  function takeTurn(): Promise<() => void> {
-    const previous = turn;
-    let release!: () => void;
-    turn = new Promise((resolve) => (release = resolve));
-    return previous.then(() => release);
+  const waiters: (() => void)[] = [];
+  async function takeTurn(): Promise<() => void> {
+    if (running < gate.maxUsers) running++;
+    else await new Promise<void>((resolve) => waiters.push(resolve));
+    // Hand the slot straight to the next waiter, so `running` stays put.
+    return () => {
+      const next = waiters.shift();
+      if (next) next();
+      else running--;
+    };
   }
 
   function visitor(request: Request): string | null {
@@ -266,7 +272,7 @@ export function createChatRequestHandler(options: ChatAppOptions = {}) {
         let completionTokens = 0;
         let steps = 0;
         const toolNames: string[] = [];
-        if (busy > 0) send({ waiting: true });
+        if (busy >= gate.maxUsers) send({ waiting: true });
         busy++;
         const release = await takeTurn();
 
