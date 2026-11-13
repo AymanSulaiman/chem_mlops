@@ -115,6 +115,8 @@ jobs:
         run: printf 'DOMAIN=%s\nGOOGLE_CLIENT_ID=%s\n' "${{ vars.DEMO_DOMAIN }}" "${{ vars.GOOGLE_CLIENT_ID }}" > deploy/chem-demo.env
 
       - run: ./deploy/vm.sh
+        env:
+          VM_USER: aymansulaiman  # the account local deploys use; see vm.sh
 
       - name: Live site serves this commit's page
         run: curl -fsS --max-time 60 "https://${{ vars.DEMO_DOMAIN }}/" | grep -q 'class="disclaimer"'

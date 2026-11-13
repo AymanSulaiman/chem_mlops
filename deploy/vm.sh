@@ -22,10 +22,14 @@ RUN="${RUN:-gcp_v1_tools}"            # gs://$BUCKET/models/$RUN
 # ponytail: 50 GB because LanceDB is 24 GB; 30 GB (the free tier) once its
 # fingerprints are bit-packed.
 DISK_GB="${DISK_GB:-50}"
+# The account on the VM whose home holds the model, LanceDB and the checkout.
+# gcloud would use the local username ("runner" in CI): a fresh home that
+# re-downloads 24 GB and fills the disk. Pin it so every deploy shares one.
+VM_USER="${VM_USER:-$USER}"
 
 cd "$(dirname "$0")/.."
 # Keep-alives notice a dropped connection (laptop asleep, network blip) instead of hanging.
-ssh_vm() { gcloud compute ssh "$VM" --zone "$ZONE" --quiet -- -o ServerAliveInterval=30 -o ServerAliveCountMax=4 "$@"; }
+ssh_vm() { gcloud compute ssh "$VM_USER@$VM" --zone "$ZONE" --quiet -- -o ServerAliveInterval=30 -o ServerAliveCountMax=4 "$@"; }
 SETTINGS="deploy/$VM.env"
 DOMAIN="$( [[ -f "$SETTINGS" ]] && sed -n 's/^DOMAIN=//p' "$SETTINGS" || true)"
 
