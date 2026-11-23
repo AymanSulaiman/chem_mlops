@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import os
+from difflib import SequenceMatcher
 from typing import Any
 
 import lancedb
@@ -228,10 +229,54 @@ def get_compound_by_name(
         if not rows:
             rows = _search_synonyms(table, safe)
     if not rows:
+        rows = _fuzzy_compound(table, name)  # closest spelling that wins
+    if not rows:
         return None
     row = rows[0]
     # Projected, not the full 75-column row — see COMPOUND_SUMMARY_FIELDS.
     return {k: row[k] for k in COMPOUND_SUMMARY_FIELDS if row.get(k) is not None}
+
+
+FUZZY_MIN_RATIO = 0.84
+
+
+def _fuzzy_compound(table: Table, name: str) -> list[dict[str, Any]]:
+    """Rows whose spelling is close to *name*, when the exact lookup missed.
+
+    Models misspell drug names (the lookup then fails and the model guesses).
+    Two LIKE passes narrow 2.8M rows to a handful, each ~0.1s, and difflib
+    ranks what comes back:
+
+    - the subsequence pattern ``a%s%p%i%r%n`` survives insertions and deletions;
+    - one pattern per dropped character survives a single substitution.
+
+    Only plain single alphabetic words of 5+ characters; multi-word names come
+    back through the exact paths anyway.
+
+    # ponytail: LIKE-scans the whole table per pattern (~1s on a miss). If
+    # misses get common, put names in an n-gram/fuzzy index and drop this.
+    """
+    wanted = name.strip().lower()
+    if len(wanted) < 5 or " " in wanted or not wanted.isalpha():
+        return []
+    letters = wanted
+    patterns: list[str] = ["%".join(letters)]
+    patterns += ["%".join(letters[:i] + letters[i + 1:]) for i in range(len(letters))]
+    best: dict[str, tuple[float, dict[str, Any]]] = {}
+    for pattern in patterns:
+        for row in (
+            table.search()
+            .where(f"LOWER(pref_name) LIKE '{pattern}'")
+            .limit(50)
+            .to_list()
+        ):
+            candidate = (row.get("pref_name") or "").lower()
+            if not candidate:
+                continue
+            ratio = SequenceMatcher(None, wanted, candidate).ratio()
+            if ratio >= FUZZY_MIN_RATIO and row["chembl_id"] not in best:
+                best[row["chembl_id"]] = (ratio, row)
+    return [row for _, row in sorted(best.values(), key=lambda p: -p[0])]
 
 
 def _search_synonyms(table: Table, safe_name: str) -> list[dict[str, Any]]:

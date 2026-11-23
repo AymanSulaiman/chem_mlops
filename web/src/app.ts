@@ -144,7 +144,12 @@ export function createChatRequestHandler(options: ChatAppOptions = {}) {
   const verifyGoogle = googleClientId ? createGoogleVerifier(googleClientId, fetchImpl, now) : null;
   const sessions = createSessions(now);
   // MAX_USERS: seats in the chat at once (the VM's deploy/<vm>.env sets it).
-  const gate = createGate({ now, maxUsers: Number(Bun.env.MAX_USERS) || undefined, ...options.gate });
+  const gate = createGate({
+    now,
+    maxUsers: Number(Bun.env.MAX_USERS) || undefined,
+    chatsPerHour: Number(Bun.env.CHATS_PER_HOUR) || undefined,
+    ...options.gate,
+  });
 
   let cachedModel: CachedModel | null = null;
 

@@ -403,6 +403,20 @@ class TestGetCompoundByName:
         assert get_compound_by_name("Notadrug", lancedb_dir=name_dir) is None
         assert get_compound_by_name("  ", lancedb_dir=name_dir) is None
 
+    def test_tolerance_for_a_misspelling(self, name_dir: str) -> None:
+        record = get_compound_by_name("Aspirn", lancedb_dir=name_dir)  # dropped letter
+        assert record is not None
+        assert record["chembl_id"] == "CHEMBL25"
+        record = get_compound_by_name("Ibuproffen", lancedb_dir=name_dir)  # doubled letter
+        assert record is not None
+        assert record["pref_name"] == "Ibuprofen"
+
+    def test_fuzzy_ignores_non_name_queries(self, name_dir: str) -> None:
+        """Short, spaced, or non-alphabetic queries stay unmatched."""
+        assert get_compound_by_name("aspi", lancedb_dir=name_dir) is None
+        assert get_compound_by_name("not a drug", lancedb_dir=name_dir) is None
+        assert get_compound_by_name("aspi!n", lancedb_dir=name_dir) is None
+
     def test_name_keys_lookup_uses_the_index(self, lancedb_dir: str) -> None:
         table = lancedb.connect(f"{lancedb_dir}/chembl_CHEMBL_36").open_table(COMPOUNDS_TABLE)
         add_name_keys(table)

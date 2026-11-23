@@ -29,6 +29,8 @@ services:
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
       # People in the chat at once; the rest wait in a queue.
       MAX_USERS: ${MAX_USERS:-1}
+      # Chats per person per hour (default 20); raise it for local evals.
+      CHATS_PER_HOUR: ${CHATS_PER_HOUR:-}
       # Who signed in and chatted, one JSON line each (kept across redeploys).
       USAGE_LOG: /var/log/chem/usage.jsonl
     volumes:
