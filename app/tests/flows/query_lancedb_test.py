@@ -416,6 +416,7 @@ class TestGetCompoundByName:
         assert get_compound_by_name("aspi", lancedb_dir=name_dir) is None
         assert get_compound_by_name("not a drug", lancedb_dir=name_dir) is None
         assert get_compound_by_name("aspi!n", lancedb_dir=name_dir) is None
+        assert get_compound_by_name("a" * 40, lancedb_dir=name_dir) is None  # over the length cap
 
     def test_name_keys_lookup_uses_the_index(self, lancedb_dir: str) -> None:
         table = lancedb.connect(f"{lancedb_dir}/chembl_CHEMBL_36").open_table(COMPOUNDS_TABLE)

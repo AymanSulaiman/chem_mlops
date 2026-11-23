@@ -257,7 +257,9 @@ def _fuzzy_compound(table: Table, name: str) -> list[dict[str, Any]]:
     # misses get common, put names in an n-gram/fuzzy index and drop this.
     """
     wanted = name.strip().lower()
-    if len(wanted) < 5 or " " in wanted or not wanted.isalpha():
+    # # ponytail: the drop-one-char pass is 1+n LIKE scans, so cap n — a long
+    # junk word would otherwise cost ~0.1s per character before ranking.
+    if not 5 <= len(wanted) <= 32 or " " in wanted or not wanted.isalpha():
         return []
     letters = wanted
     patterns: list[str] = ["%".join(letters)]
